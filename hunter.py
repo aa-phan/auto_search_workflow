@@ -23,13 +23,21 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Callable
 
 import requests
 from bs4 import BeautifulSoup
+
+import boards as boards_mod
+import eligibility
+import freshness as fr
+import ledger as lg
+import pipeline as pl
+from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
+from freshness import parse_posted
+from state import CsvState, SheetState
 
 try:  # optional: load .env for local runs
     from dotenv import load_dotenv
@@ -42,6 +50,7 @@ log = logging.getLogger("hunter")
 
 BASE_DIR = Path(__file__).resolve().parent
 TRACKER_PATH = BASE_DIR / "tracked_jobs.csv"
+STATE_DIR = BASE_DIR / "state"  # local fallback for Boards / Events / Runs
 RESUME_PATH = BASE_DIR / "resume.txt"
 
 SETTINGS_TAB = "Settings"
@@ -55,15 +64,13 @@ TRACKER_COLUMNS = [
     "Location",
     "AI_Verdict",
     "Missing_Gaps",
-    "Apply_URL",  # column I: the dedupe key
+    "Apply_URL",  # column I
     "User_Notes",
+    "Freshness",  # how sure we are the job is new (verified fresh / recent / age unverified)
+    "Source",  # Board poll | Search
 ]
 URL_COLUMN = TRACKER_COLUMNS.index("Apply_URL") + 1  # 1-based sheet column (I)
 
-ARCHIVE_TAB = "Seen_Archive"  # hidden: rejected/closed/stale URLs, kept only so they're never re-fetched
-ARCHIVE_COLUMNS = ["Date_Found", "Reason", "URL"]
-ARCHIVE_URL_COLUMN = 3
-ARCHIVE_PATH = BASE_DIR / "seen_archive.csv"
 MIN_TRACKER_SCORE = 50  # only jobs at or above this get a visible row in "Job Tracker"
 
 STATUS_APPLY = "To Apply"
@@ -128,6 +135,8 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
     ("Min_Alert_Score", "70", "Jobs scoring at or above this (0-100) are marked 'To Apply' and sent to Telegram."),
     ("Max_Job_Age_Days", "14", "Jobs published more than this many days ago are skipped as stale."),
+    ("Fresh_Window_Hours", "4", "Only jobs published (or first listed) within this many hours trigger a Telegram alert."),
+    ("Discovery_Every_Hours", "12", "How often the app searches Google for new company job boards to watch."),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
 
@@ -153,6 +162,8 @@ class Settings:
     locations: list[str]
     min_score: int
     max_age_days: int
+    fresh_window_hours: int = 4
+    discovery_every_hours: int = 12
 
     @classmethod
     def from_values(cls, raw: dict[str, str], resume_fallback: str = "") -> Settings:
@@ -169,6 +180,8 @@ class Settings:
             locations=_split_list(pick("Target_Locations")),
             min_score=_int_or(pick("Min_Alert_Score"), 70),
             max_age_days=_int_or(pick("Max_Job_Age_Days"), 14),
+            fresh_window_hours=max(1, _int_or(pick("Fresh_Window_Hours"), 4)),
+            discovery_every_hours=max(1, _int_or(pick("Discovery_Every_Hours"), 12)),
         )
 
     @property
@@ -243,56 +256,6 @@ class AtsRef:
     job_id: str = ""
     hint_title: str = ""  # search-result title (for labelling closed rows)
     hint_date: str = ""  # search-result date string; last-resort publication date
-
-
-_GH_PATH = re.compile(r"^/(?P<board>[^/]+)/jobs/(?P<id>\d+)$")
-_UUID_PATH = re.compile(r"^/(?P<company>[^/]+)/(?P<id>[0-9a-f]{8}-[0-9a-f-]{27})$", re.I)
-_WORKABLE_PATH = re.compile(r"^/(?P<company>[^/]+)/j/(?P<id>[A-Za-z0-9]+)$")
-_SMARTRECRUITERS_PATH = re.compile(r"^/(?P<company>[^/]+)/(?P<id>\d{6,})(?:-[^/]*)?$")
-
-
-def normalize_url(url: str) -> str:
-    """Lowercase host, drop query/fragment/trailing slash and /apply-style suffixes."""
-    try:
-        parts = urlsplit(url.strip())
-    except ValueError:
-        return ""
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        return ""
-    host = parts.netloc.lower()
-    path = re.sub(r"/+$", "", parts.path)
-    if host == "jobs.lever.co":
-        path = re.sub(r"/apply$", "", path)
-    elif host == "jobs.ashbyhq.com":
-        path = re.sub(r"/application$", "", path)
-    elif host == "apply.workable.com":
-        path = re.sub(r"/apply$", "", path)
-    return urlunsplit(("https", host, path, "", ""))
-
-
-def dedupe_key(url: str) -> str:
-    """Canonical identity for the seen-set: query/fragment/suffix stripped, case-insensitive."""
-    return normalize_url(url).lower()
-
-
-def classify_url(url: str) -> AtsRef | None:
-    """AtsRef for individual job-posting URLs; None for board/listing pages."""
-    norm = normalize_url(url)
-    if not norm:
-        return None
-    parts = urlsplit(norm)
-    host, path = parts.netloc, parts.path
-    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io"} and (m := _GH_PATH.match(path)):
-        return AtsRef("greenhouse", norm, m["board"], m["id"])
-    if host == "jobs.lever.co" and (m := _UUID_PATH.match(path)):
-        return AtsRef("lever", norm, m["company"], m["id"])
-    if host == "jobs.ashbyhq.com" and (m := _UUID_PATH.match(path)):
-        return AtsRef("ashby", norm, m["company"], m["id"])
-    if host == "apply.workable.com" and (m := _WORKABLE_PATH.match(path)):
-        return AtsRef("workable", norm, m["company"], m["id"])
-    if host == "jobs.smartrecruiters.com" and (m := _SMARTRECRUITERS_PATH.match(path)):
-        return AtsRef("smartrecruiters", norm, m["company"], m["id"])
-    return None
 
 
 # --------------------------------------------------------------------------- search
@@ -413,44 +376,10 @@ def search_ats(cfg: Config, queries: list[str]) -> list[SearchHit]:
 # --------------------------------------------------------------------------- dates
 
 
-def parse_posted(value: Any) -> date | None:
-    """Best-effort publication date: epoch s/ms, ISO-8601, 'Sep 3, 2026', '3 days ago'."""
-    if value is None or isinstance(value, bool) or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        secs = value / 1000 if value > 1e11 else value
-        try:
-            return datetime.fromtimestamp(secs, timezone.utc).date()
-        except (OverflowError, OSError, ValueError):
-            return None
-    text = str(value).strip()
-    today = datetime.now(timezone.utc).date()
-    if text.lower() in {"today", "just now"}:
-        return today
-    if text.lower() == "yesterday":
-        return today - timedelta(days=1)
-    if m := re.fullmatch(r"(?i)(\d+)\+?\s*(minute|hour|day|week|month)s?\s+ago", text):
-        n, unit = int(m.group(1)), m.group(2).lower()
-        return today - timedelta(days={"minute": 0, "hour": 0, "day": n, "week": 7 * n, "month": 30 * n}[unit])
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc).date()
-    except ValueError:
-        pass
-    try:
-        return date.fromisoformat(text[:10])
-    except ValueError:
-        pass
-    for fmt in ("%b %d, %Y", "%B %d, %Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
 def _posted_iso(value: Any) -> str:
-    d = parse_posted(value)
-    return d.isoformat() if d else ""
+    """Publication value as a stored string: full timestamp when the source has one, else a date."""
+    dt, precision = fr.parse_instant(value)
+    return fr.iso(dt, precision)
 
 
 def job_age_days(posted: str) -> int | None:
@@ -959,6 +888,15 @@ class GroqClient:
 # --------------------------------------------------------------------------- tracker
 
 
+FRESHNESS_LABELS = {
+    fr.VERIFIED_FRESH: "Verified fresh",
+    fr.OBSERVED_NEW: "New on board (age unverified)",
+    fr.RECENT: "Recent",
+    fr.UNCERTAIN: "Age unverified",
+}
+SOURCE_LABELS = {"poll": "Board poll", "serper": "Search"}
+
+
 @dataclass(frozen=True)
 class JobRow:
     status: str
@@ -970,6 +908,8 @@ class JobRow:
     gaps: str
     url: str
     posted: str = ""
+    freshness: str = ""
+    source: str = ""
 
     @property
     def label(self) -> str:
@@ -990,19 +930,21 @@ class JobRow:
             _safe_cell(self.gaps),
             self.url,
             "",  # User_Notes: the user's, never written by the script
+            FRESHNESS_LABELS.get(self.freshness, self.freshness),
+            SOURCE_LABELS.get(self.source, self.source),
         ]
 
-    def archive_cells(self) -> list[Any]:
-        """Row for Seen_Archive: Date_Found, Reason, URL."""
-        if self.status == STATUS_CLOSED:
-            reason = "Closed (404)"
-        elif self.status == STATUS_ERROR:
-            reason = f"Error: {self.verdict}"
-        elif self.status.startswith("Stale"):
-            reason = f"{self.status}: {self.verdict}"
-        else:
-            reason = f"Score {self.score}: {self.verdict}"
-        return [_now(), _safe_cell(reason[:300]), self.url]
+    def payload(self, visible: bool) -> dict[str, Any]:
+        """Plain dict stored in the Events ledger so a later run can re-send an alert."""
+        return {**self.__dict__, "visible": visible}
+
+    @classmethod
+    def from_payload(cls, p: dict[str, Any]) -> "JobRow":
+        return cls(
+            str(p.get("status", "")), p.get("score"), str(p.get("company", "")), str(p.get("title", "")),
+            str(p.get("location", "")), str(p.get("verdict", "")), str(p.get("gaps", "")), str(p.get("url", "")),
+            str(p.get("posted", "")), str(p.get("freshness", "")), str(p.get("source", "")),
+        )  # fmt: skip
 
 
 def is_visible(row: JobRow, min_alert_score: int) -> bool:
@@ -1030,19 +972,25 @@ def load_service_account(value: str) -> dict[str, Any]:
     raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is neither JSON text nor a path to a .json file")
 
 
+def tracker_keys_from_urls(urls: Any) -> set[str]:
+    """Identity keys (ATS|board|ID) of the rows already in the tracker."""
+    return {i.key for i in (parse_job_url(u) for u in urls) if i}
+
+
 class SheetStore:
-    """Google Sheet as settings panel (Settings), append-only tracker (Job Tracker) and a
-    hidden dedupe list of rejected URLs (Seen_Archive)."""
+    """Google Sheet: Settings (user-edited), Job Tracker (append-only, user-facing), plus hidden
+    state tabs (Boards, Events, Runs) managed by `SheetState`."""
 
     def __init__(self, sheet_id: str, credentials: str) -> None:
         import gspread
 
         self.sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         self.sh = gspread.service_account_from_dict(load_service_account(credentials)).open_by_key(sheet_id)
+        self.state = SheetState(self.sh)
 
     # -- bootstrap
     def bootstrap(self, resume_text: str) -> None:
-        """Create any missing tab (Settings, Job Tracker, Seen_Archive) with defaults."""
+        """Create any missing tab (Settings, Job Tracker, hidden state tabs) with defaults."""
         tabs = {w.title: w for w in self.sh.worksheets()}
         created = False
         if SETTINGS_TAB not in tabs:
@@ -1058,23 +1006,13 @@ class SheetStore:
         if TRACKER_TAB not in tabs:
             ws = self.sh.add_worksheet(title=TRACKER_TAB, rows=1000, cols=len(TRACKER_COLUMNS))
             ws.append_rows([TRACKER_COLUMNS], value_input_option="RAW")
-            widths = {0: 120, 1: 100, 2: 120, 3: 70, 4: 320, 5: 180, 6: 380, 7: 300, 8: 260, 9: 220}
-            self._style(ws, header="A1:J1", widths=widths)
+            widths = {0: 120, 1: 130, 2: 120, 3: 70, 4: 320, 5: 180, 6: 380, 7: 300, 8: 260, 9: 220, 10: 170, 11: 100}
+            self._style(ws, header="A1:L1", widths=widths)
             self._status_dropdown(ws)
             tabs[TRACKER_TAB] = ws
             created = True
             log.info("Created the %s tab", TRACKER_TAB)
-        if ARCHIVE_TAB not in tabs:
-            ws = self.sh.add_worksheet(title=ARCHIVE_TAB, rows=1000, cols=len(ARCHIVE_COLUMNS))
-            ws.append_rows([ARCHIVE_COLUMNS], value_input_option="RAW")
-            self._style(ws, header="A1:C1", widths={0: 120, 1: 420, 2: 320})
-            try:
-                ws.hide()  # still readable by the script; just out of the user's way
-            except Exception as exc:
-                log.warning("Could not hide %s: %s", ARCHIVE_TAB, exc)
-            tabs[ARCHIVE_TAB] = ws
-            created = True
-            log.info("Created the hidden %s tab", ARCHIVE_TAB)
+        self.state.ensure()
         if created:  # tidy: drop the blank default tab Google creates with a new spreadsheet
             for name in ("Sheet1", "Sheet 1"):
                 blank = tabs.get(name)
@@ -1116,11 +1054,9 @@ class SheetStore:
         rows = self.sh.worksheet(SETTINGS_TAB).get_all_values()
         return {r[0].strip(): r[1] for r in rows[1:] if len(r) > 1 and r[0].strip()}
 
-    def seen_urls(self) -> set[str]:
-        """Every URL already handled: Apply_URL (col I) of Job Tracker plus URL (col C) of Seen_Archive."""
-        tracked = self.sh.worksheet(TRACKER_TAB).col_values(URL_COLUMN)[1:]
-        archived = self.sh.worksheet(ARCHIVE_TAB).col_values(ARCHIVE_URL_COLUMN)[1:]
-        return {dedupe_key(u) for u in [*tracked, *archived]} - {""}
+    def tracked_keys(self) -> set[str]:
+        """Identity keys already in Job Tracker (read from Apply_URL, column I)."""
+        return tracker_keys_from_urls(self.sh.worksheet(TRACKER_TAB).col_values(URL_COLUMN)[1:])
 
     # -- writes: strictly append-only so the user's edits to My_Status / User_Notes survive
     def append_jobs(self, rows: list[JobRow]) -> None:
@@ -1129,16 +1065,10 @@ class SheetStore:
                 [r.cells() for r in rows], value_input_option="USER_ENTERED", table_range="A1"
             )
 
-    def append_archive(self, rows: list[JobRow]) -> None:
-        if rows:
-            self.sh.worksheet(ARCHIVE_TAB).append_rows(
-                [r.archive_cells() for r in rows], value_input_option="RAW", table_range="A1"
-            )
-
 
 class CsvStore:
     """Local fallback when GOOGLE_SHEET_ID isn't set: default settings, tracked_jobs.csv and
-    seen_archive.csv."""
+    state/*.csv (Boards, Events, Runs)."""
 
     sheet_url = ""
     LEGACY = {  # old column -> new column
@@ -1146,58 +1076,37 @@ class CsvStore:
         "Company_or_Title": "Company_and_Title", "Verdict": "AI_Verdict", "URL": "Apply_URL",
     }  # fmt: skip
 
-    def __init__(self, path: Path = TRACKER_PATH, archive: Path = ARCHIVE_PATH) -> None:
-        self.path, self.archive = path, archive
+    def __init__(self, path: Path = TRACKER_PATH, state_dir: Path = STATE_DIR) -> None:
+        self.path = path
+        self.state = CsvState(state_dir)
 
     def bootstrap(self, resume_text: str) -> None:
-        if not self.archive.exists() or self.archive.stat().st_size == 0:
-            with self.archive.open("w", newline="", encoding="utf-8") as fh:
-                csv.writer(fh).writerow(ARCHIVE_COLUMNS)
+        self.state.ensure()
         if not self.path.exists() or self.path.stat().st_size == 0:
             with self.path.open("w", newline="", encoding="utf-8") as fh:
                 csv.writer(fh).writerow(TRACKER_COLUMNS)
             return
         with self.path.open(newline="", encoding="utf-8") as fh:
             header = next(csv.reader(fh), [])
-        if header != TRACKER_COLUMNS:  # migrate an older tracker; low scorers move to the archive
+        if header != TRACKER_COLUMNS:  # migrate an older tracker, keeping its history
             with self.path.open(newline="", encoding="utf-8") as fh:
                 old = [{self.LEGACY.get(k, k): v for k, v in r.items()} for r in csv.DictReader(fh)]
-            keep, moved = [], []
-            for r in old:
-                try:
-                    visible = float(r.get("AI_Score") or "") >= MIN_TRACKER_SCORE
-                except ValueError:
-                    visible = False
-                (keep if visible else moved).append(r)
             with self.path.open("w", newline="", encoding="utf-8") as fh:
                 w = csv.DictWriter(fh, fieldnames=TRACKER_COLUMNS, restval="", extrasaction="ignore")
                 w.writeheader()
-                w.writerows(keep)
-            with self.archive.open("a", newline="", encoding="utf-8") as fh:
-                w2 = csv.writer(fh)
-                for r in moved:
-                    reason = f"{r.get('My_Status', '')}: {r.get('AI_Verdict', '')}"[:300]
-                    w2.writerow([r.get("Date_Found", ""), reason, r.get("Apply_URL", "")])
-            log.info("Migrated %s (%d kept, %d moved to %s)", self.path.name, len(keep), len(moved), self.archive.name)
+                w.writerows(old)
+            log.info("Migrated %s to the current column layout", self.path.name)
 
     def load_settings(self) -> dict[str, str]:
         return {}
 
-    def seen_urls(self) -> set[str]:
-        urls: set[str] = set()
-        for path, col in ((self.path, "Apply_URL"), (self.archive, "URL")):
-            if path.exists():
-                with path.open(newline="", encoding="utf-8") as fh:
-                    urls |= {dedupe_key(r.get(col, "")) for r in csv.DictReader(fh)}
-        return urls - {""}
+    def tracked_keys(self) -> set[str]:
+        with self.path.open(newline="", encoding="utf-8") as fh:
+            return tracker_keys_from_urls(r.get("Apply_URL", "") for r in csv.DictReader(fh))
 
     def append_jobs(self, rows: list[JobRow]) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(r.cells() for r in rows)
-
-    def append_archive(self, rows: list[JobRow]) -> None:
-        with self.archive.open("a", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerows(r.archive_cells() for r in rows)
 
 
 def make_store(cfg: Config) -> SheetStore | CsvStore:
@@ -1205,7 +1114,7 @@ def make_store(cfg: Config) -> SheetStore | CsvStore:
         if not cfg.service_account:
             raise RuntimeError("GOOGLE_SHEET_ID is set but GOOGLE_SERVICE_ACCOUNT_JSON is empty")
         return SheetStore(cfg.sheet_id, cfg.service_account)
-    log.warning("GOOGLE_SHEET_ID not set: using default settings and the local CSV files")
+    log.warning("GOOGLE_SHEET_ID not set: using default settings and local CSV files")
     return CsvStore()
 
 
@@ -1222,6 +1131,8 @@ def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
             f"🏢 {esc(row.company or 'Company not stated')}",
             f"📍 {esc(row.location or 'Location not stated')}",
             f"⭐ Score: <b>{row.score}/100</b>",
+            f"🕒 {esc(FRESHNESS_LABELS.get(row.freshness, 'Freshness unknown'))}"
+            + (f" · posted {esc(row.posted)}" if row.posted else ""),
             f"💬 {esc(row.verdict)}",
             f"⚠️ Gaps: {esc(row.gaps or 'None')}",
             f'🔗 <a href="{esc(row.url, quote=True)}">Apply here</a>',
@@ -1251,6 +1162,7 @@ def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
                 "missing_gaps": row.gaps,
                 "location": row.location,
                 "posted": row.posted,
+                "freshness": row.freshness,
                 "url": row.url,
                 "tracker": sheet_url,
             },
@@ -1272,80 +1184,131 @@ def load_resume_file(path: Path = RESUME_PATH) -> str:
     return "\n".join(lines).strip()
 
 
-def pending_refs(hits: list[SearchHit], seen: set[str], excluded: re.Pattern[str] | None) -> list[AtsRef]:
-    """Unseen, classifiable job URLs whose search-result title isn't excluded."""
-    refs: dict[str, AtsRef] = {}
-    for hit in hits:
-        key = dedupe_key(hit.url)
-        if not key or key in seen or key in refs:  # O(1) fast path: no regex, no I/O, no tokens
-            continue
-        ref = classify_url(hit.url)
-        if not ref:
-            continue
-        if excluded and (m := excluded.search(hit.title)):
-            log.info("Skipped by title filter (%r): %s | %s", m.group(0), hit.title, ref.url)
-            continue
-        refs[key] = replace(ref, hint_title=hit.title, hint_date=hit.date)
-    return list(refs.values())
+# --------------------------------------------------------------------------- evaluation
 
 
-def process(s: Settings, groq: GroqClient, ref: AtsRef, excluded: re.Pattern[str] | None) -> JobRow | None:
-    """Evaluate one job. Returns None for transient failures (not recorded, so retried)."""
-    try:
-        posting = hydrate_posting(ref)
-    except ClosedPosting:
-        log.info("Closed (404/410): %s", ref.url)
-        return JobRow(STATUS_CLOSED, 0, ref.company, ref.hint_title, "", "Posting is closed or removed.", "", ref.url)
-    except TransientError as exc:
-        log.warning("Transient hydration failure (will retry next run) for %s: %s", ref.url, exc)
-        return None
-    except Exception as exc:
-        log.warning("Hydration failed for %s: %s", ref.url, exc)
-        return JobRow(STATUS_ERROR, None, ref.company, ref.hint_title, "", f"Could not read the posting: {exc}", "", ref.url)
+def ref_for(ident: JobIdentity, url: str = "") -> AtsRef:
+    """Adapter input for the per-job hydrators, built from an identity (not from a URL string)."""
+    return AtsRef(ident.ats, url or ident.url, ident.board, ident.job_id)
 
-    def row(status: str, score: int | None, verdict: str, gaps: str = "") -> JobRow:
-        return JobRow(
-            status, score, posting.company, posting.title, posting.location, verdict, gaps, ref.url, posting.posted
+
+def make_evaluator(
+    s: Settings,
+    groq: GroqClient,
+    excluded: re.Pattern[str] | None,
+    hydrate: Callable[[AtsRef], Posting] | None = None,
+) -> Callable[[JobIdentity, lg.JobState], pl.EvalOutcome]:
+    """Hydrate -> authoritative age -> deterministic gates -> Groq. Each outcome is explicit:
+    done (final), transient (retry next run, no attempt used) or failed (bounded retries)."""
+    hydrate = hydrate or hydrate_posting
+
+    def evaluate(ident: JobIdentity, st: lg.JobState) -> pl.EvalOutcome:
+        url = str(st.seen_detail.get("url") or ident.url)
+        title_hint = str(st.seen_detail.get("title") or "")
+
+        def done(status: str, score: int | None, posting: Posting | None, verdict: str, gaps: str = "") -> pl.EvalOutcome:
+            row = JobRow(
+                status, score, (posting.company if posting else ident.board), (posting.title if posting else title_hint),
+                posting.location if posting else "", verdict, gaps, url, posting.posted if posting else "",
+            )  # fmt: skip
+            return pl.EvalOutcome("done", row.payload(is_visible(row, s.min_score)))
+
+        try:
+            posting = hydrate(ref_for(ident, url))
+        except ClosedPosting:
+            return done(STATUS_CLOSED, 0, None, "Posting is closed or removed.")
+        except TransientError as exc:
+            return pl.EvalOutcome("transient", message=str(exc))
+        except Exception as exc:
+            return pl.EvalOutcome("failed", message=f"could not read the posting: {exc}")
+
+        # Authoritative age. A last-modified fallback is only a lower bound on age, so it can
+        # prove a job stale but never fresh.
+        age = job_age_days(posting.posted)
+        if s.max_age_days > 0 and age is not None and age > s.max_age_days:
+            when = "Last updated" if posting.posted_source == "updated_at" else "Posted"
+            return done(s.stale_status, 0, posting, f"{when} {posting.posted} ({age} days ago).")
+        reason = eligibility.title_gate(posting.title, s.roles, s.levels, excluded) or eligibility.hard_gate(
+            posting.title, posting.location, posting.description, s.resume
         )
+        if reason:
+            return done(STATUS_FILTERED, 0, posting, f"Filtered before scoring: {reason}.")
 
-    age = job_age_days(posting.posted)
-    if posting.posted_source in {"updated_at", "search_result"}:
-        log.info("No creation date for %s: using %s (%s)", ref.url, posting.posted_source, posting.posted or "none")
-    if s.max_age_days > 0 and age is not None and age > s.max_age_days:
-        log.info("Stale (%dd old): %s", age, ref.url)
-        when = "Last updated" if posting.posted_source == "updated_at" else "Posted"
-        return row(s.stale_status, 0, f"{when} {posting.posted} ({age} days ago).")
-    if excluded and (m := excluded.search(posting.title)):
-        log.info("Skipped by title filter (%r, full title): %s", m.group(0), ref.url)
-        return row(STATUS_FILTERED, 0, f"Excluded title word: {m.group(0)}")
+        try:
+            ev = groq.evaluate(s, posting)
+        except TransientError as exc:
+            return pl.EvalOutcome("transient", message=str(exc))
+        except GroqAuthError as exc:
+            raise pl.FatalRunError(str(exc)) from exc
+        except Exception as exc:
+            return pl.EvalOutcome("failed", message=f"AI scoring failed: {exc}")
+        status = STATUS_APPLY if ev.score >= s.min_score else STATUS_STRETCH if ev.score >= MIN_TRACKER_SCORE else STATUS_FILTERED
+        return done(status, ev.score, posting, ev.verdict, ev.missing_gaps)
 
-    try:
-        ev = groq.evaluate(s, posting)
-    except TransientError as exc:
-        log.warning("Groq unavailable (will retry next run) for %s: %s", ref.url, exc)
-        return None
-    except GroqAuthError:
-        raise
-    except Exception as exc:
-        log.warning("Scoring failed for %s: %s", ref.url, exc)
-        return row(STATUS_ERROR, None, f"AI scoring failed: {exc}")
-    if ev.score >= s.min_score:
-        status = STATUS_APPLY
-    elif ev.score >= MIN_TRACKER_SCORE:
-        status = STATUS_STRETCH
-    else:
-        status = STATUS_FILTERED
-    return row(status, ev.score, ev.verdict, ev.missing_gaps)
+    return evaluate
 
 
-FLUSH_EVERY = 10
+def make_serper_hydrator(hydrate: Callable[[AtsRef], Posting] | None = None) -> Callable[[pl.SerperJob], ListedJob | None]:
+    """For jobs found only by search: read the ATS for an authoritative date before observing."""
+    hydrate = hydrate or hydrate_posting
+
+    def hydrate_listed(sj: pl.SerperJob) -> ListedJob | None:
+        try:
+            p = hydrate(ref_for(sj.ident, sj.url))
+        except Exception as exc:  # closed/transient: not recorded, search will surface it again
+            log.info("Search-found job not hydrated (%s): %s", sj.ident.key, exc)
+            return None
+        creation = p.posted_source not in {"", "updated_at", "search_result"}
+        return ListedJob(
+            sj.ident, p.title or sj.title, sj.url, p.location,
+            p.posted if creation else "", p.posted_source if creation else "",
+            p.posted if p.posted_source == "updated_at" else "",
+        )  # fmt: skip
+
+    return hydrate_listed
+
+
+def discover_serper(cfg: Config, s: Settings) -> tuple[list[BoardId], list[pl.SerperJob]]:
+    """Discovery loop. (1) Unfiltered searches surface established boards for the registry.
+    (2) A date-windowed search (cfg.search_tbs, default qdr:d3) supplies recently indexed jobs."""
+    queries = build_queries(s)
+    boards: dict[str, BoardId] = {}
+    jobs: dict[str, pl.SerperJob] = {}
+    for hits, want_jobs in (
+        (search_ats(replace(cfg, search_tbs="", search_pages=max(cfg.search_pages, 3)), queries), False),
+        (search_ats(cfg, queries), True),
+    ):
+        for hit in hits:
+            if b := parse_board_url(hit.url):
+                boards.setdefault(b.key, b)
+            if want_jobs and (ident := parse_job_url(hit.url)):
+                jobs.setdefault(ident.key, pl.SerperJob(ident, hit.title, hit.url))
+    log.info("Discovery: %d boards, %d windowed jobs", len(boards), len(jobs))
+    return list(boards.values()), list(jobs.values())
+
+
+def load_resume_file(path: Path = RESUME_PATH) -> str:
+    """resume.txt without '#' instruction lines (used to seed / back up the sheet)."""
+    if not path.exists():
+        return ""
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
+    return "\n".join(lines).strip()
+
+
+def _seed(value: str) -> BoardId:
+    ats, _, board = value.partition(":")
+    if ats not in boards_mod.ATS_LIST or not board:
+        raise argparse.ArgumentTypeError(f"--seed expects ats:board with ats in {', '.join(boards_mod.ATS_LIST)}")
+    return BoardId(ats, board)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", action="append", default=[], help="evaluate this job URL instead of searching (repeatable)")
-    parser.add_argument("--dry-run", action="store_true", help="do not write the tracker or send alerts")
-    parser.add_argument("--no-tbs", action="store_true", help="search without the time window (unfiltered backfill)")
+    parser.add_argument("--url", help="evaluate one job URL (identity from the URL) and print the outcome; writes nothing")
+    parser.add_argument("--dry-run", action="store_true", help="do not write any state, tracker rows or alerts")
+    parser.add_argument("--discover", action="store_true", help="run the Serper discovery loop now, regardless of schedule")
+    parser.add_argument("--no-tbs", action="store_true", help="discovery without the 3-day search window (unfiltered backfill)")
+    parser.add_argument("--seed", action="append", default=[], type=_seed, metavar="ATS:BOARD", help="register a board manually (repeatable)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1362,74 +1325,64 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings.from_values(store.load_settings(), resume_fallback=resume_file)
         if len(settings.resume) < MIN_JD_CHARS:
             raise RuntimeError("Resume_Text is empty. Paste your resume into the Settings tab (or resume.txt).")
-        if args.url:
-            hits = [SearchHit(u) for u in args.url]
-        else:
-            hits = search_ats(cfg, build_queries(settings))
-        seen = store.seen_urls() if not args.url else set()
     except Exception as exc:
         log.error("Startup failed: %s", exc)
         return 2
 
     excluded = excluded_title_regex(settings.excluded)
-    refs = pending_refs(hits, seen, excluded)
-    log.info("%d new job URLs to evaluate (cap %d)", len(refs), cfg.max_jobs)
-    refs = refs[: cfg.max_jobs]
-    if not refs:
+    groq = GroqClient(cfg)
+    evaluate = make_evaluator(settings, groq, excluded)
+
+    if args.url:  # single-job check through the real gates and scorer; nothing is written
+        ident = parse_job_url(args.url)
+        if not ident:
+            log.error("Not a recognizable job URL for a supported ATS: %s", args.url)
+            return 2
+        st = lg.JobState(ident.key, seen=True, freshness=fr.UNCERTAIN, seen_detail={"board": ident.board, "url": args.url})
+        try:
+            out = evaluate(ident, st)
+        except pl.FatalRunError as exc:
+            log.error("%s", exc)
+            return 2
+        print(json.dumps({"kind": out.kind, "message": out.message, **(out.payload or {})}, indent=2, default=str))
         return 0
 
-    groq = GroqClient(cfg)
-    pending: list[JobRow] = []
-    counts = {"tracked": 0, "archived": 0, "retry": 0, "alerts": 0}
+    def append_tracker(payloads: list[dict[str, Any]]) -> None:
+        store.append_jobs([JobRow.from_payload(p) for p in payloads])
 
-    def flush() -> None:
-        if not pending:
-            return
-        batch = list(pending)
-        pending.clear()
-        if args.dry_run:
-            return
-        shown = [r for r in batch if is_visible(r, settings.min_score)]
-        hidden = [r for r in batch if not is_visible(r, settings.min_score)]
-        # Rows first, so a failed alert can never cause a duplicate row on the next run.
-        store.append_archive(hidden)
-        store.append_jobs(shown)
-        counts["tracked"] += len(shown)
-        counts["archived"] += len(hidden)
-        for row in shown:
-            if row.status == STATUS_APPLY:
-                try:
-                    counts["alerts"] += send_alert(cfg, row, store.sheet_url)
-                except Exception as exc:  # never let an alert failure abort the run
-                    log.warning("Alert failed for %s: %s", row.url, exc)
+    def alert(payload: dict[str, Any]) -> bool:
+        return send_alert(cfg, JobRow.from_payload(payload), store.sheet_url)
 
-    try:
-        for i, ref in enumerate(refs, 1):
-            log.info("[%d/%d] %s", i, len(refs), ref.url)
-            try:
-                row = process(settings, groq, ref, excluded)
-            except GroqAuthError:
-                raise
-            except Exception as exc:  # defensive: one bad job must not end the run
-                log.exception("Unexpected error on %s: %s", ref.url, exc)
-                row = JobRow(STATUS_ERROR, None, ref.company, ref.hint_title, "", f"Unexpected error: {exc}", "", ref.url)
-            if row is None:
-                counts["retry"] += 1
-                continue
-            log.info("  -> %s score=%s | %s | %s", row.status, row.score, row.label, row.verdict)
-            pending.append(row)
-            if len(pending) >= FLUSH_EVERY:
-                flush()
-    except GroqAuthError as exc:
-        log.error("%s", exc)
-        return 2
-    finally:
-        flush()
-    log.info(
-        "Done. %(tracked)d added to the tracker, %(archived)d archived, %(retry)d will retry next run, "
-        "%(alerts)d alerts sent.",
-        counts,
+    deps = pl.Deps(
+        state=store.state,
+        tracked_keys=store.tracked_keys(),
+        append_tracker=append_tracker,
+        evaluate=evaluate,
+        send_alert=alert,
+        title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
+        discover=(lambda: discover_serper(cfg, settings)) if cfg.search_api_key else None,
+        hydrate_listed=make_serper_hydrator(),
+        fresh_window=timedelta(hours=settings.fresh_window_hours),
+        max_age_days=settings.max_age_days,
+        max_jobs=cfg.max_jobs,
+        discovery_every_hours=settings.discovery_every_hours,
+        force_discovery=args.discover,
+        seeds=args.seed,
+        dry_run=args.dry_run,
     )
+    if deps.discover is None:
+        log.warning("SERPER_API_KEY is not set: skipping board discovery (registered boards are still polled)")
+    try:
+        run = pl.run_cycle(deps)
+    except pl.FatalRunError as exc:
+        log.error("Run stopped: %s", exc)
+        return 2
+    log.info(
+        "Run: boards %d ok / %d failed of %d (+%d new) | new jobs %d (%d verified fresh) | evaluated %d | alerts %d sent / %d failed | "
+        "gap since previous run %s min, worst board gap %s min",
+        run.boards_ok, run.boards_failed, run.boards_total, run.boards_added, run.new_jobs, run.verified_fresh,
+        run.evaluated, run.alerts_sent, run.alerts_failed, run.gap_since_prev_run_min, run.max_board_gap_min,
+    )  # fmt: skip
     return 0
 
 

@@ -21,7 +21,7 @@ Why not a rewrite: the adapters, Groq client, Sheet and alert code are sound. Th
 
 ## D-02 New code lives in separate modules
 
-`boards.py` (identity, list adapters, registry), `freshness.py` (dates, classes), `ledger.py` (events, derived state, retry selection), `state.py` (Sheet/CSV persistence for Boards/Events/Runs). `hunter.py` stays the entry point and orchestrator. Reason: `hunter.py` is already ~1,400 lines; new concerns are pure and unit-testable in isolation.
+`boards.py` (identity, list adapters, registry), `freshness.py` (dates, classes), `ledger.py` (events, derived state, retry selection), `eligibility.py` (deterministic gates), `state.py` (Sheet/CSV persistence for Boards/Events/Runs), `pipeline.py` (one run: discover, poll, detect, evaluate, deliver; all side effects injected so failure cases are testable). `hunter.py` stays the entry point and holds config, per-job hydration, Groq scoring, the user-facing Sheet/CSV stores and alerts. Reason: `hunter.py` is already ~1,400 lines; new concerns are pure and unit-testable in isolation.
 
 ## D-03 State persistence: append-only event ledger in the Google Sheet
 
@@ -53,5 +53,7 @@ Keyword and exclusion checks on listing titles run before any fetch (most board 
 
 ## D-10 Open requirement conflicts to confirm with the user
 
+- Earlier request: run every 2 hours on business days only (`0 13-23/2 * * 1-5`). Superseded by the board-polling brief: hourly, 24/7 (`17 * * * *`), because new postings should be caught nights and weekends too. Serper discovery is separately throttled (default every 12 h).
+- Earlier request: alert on every `To Apply` job. Now only `verified_fresh` jobs alert; others reach the tracker without a push (see SPEC).
 - Earlier request: hidden `Seen_Archive` tab. Now replaced by `Events` (D-03). Same purpose (dedupe without cluttering the tracker), different identity key.
 - Earlier request: `Date_Posted`-based stale gate for everything. Now: stale only when a source date exists; undated jobs are labelled `uncertain`/`observed_new` and never alerted.

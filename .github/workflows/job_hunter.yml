@@ -2,13 +2,20 @@ name: Job Hunter
 
 on:
   schedule:
-    - cron: "0 13-23/2 * * 1-5" # every 2 hours, 13:00-23:00 UTC (US business hours), Mon-Fri
+    # Hourly, around the clock (nights and weekends included). GitHub starts scheduled runs
+    # late under load and may skip some; every run records its real gap in the hidden "Runs" tab.
+    - cron: "17 * * * *"
   workflow_dispatch:
+    inputs:
+      discover:
+        description: "Also search Google for new company job boards right now"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write # only needed for the optional tracked_jobs.csv backup
+  contents: write # only used by the local-CSV fallback (no Google Sheet configured)
 
-# Serialize runs so two runs never write the tracker at the same time.
+# One run at a time, so two runs never write the same state.
 concurrency:
   group: job-hunter
   cancel-in-progress: false
@@ -16,7 +23,7 @@ concurrency:
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -28,10 +35,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # All settings (roles, locations, resume, minimum score...) live in the Google Sheet.
-      # Only the secret keys below are configured in GitHub.
-      - name: Run hunter
-        run: python hunter.py
+      # Settings live in the Google Sheet; only the keys below are configured in GitHub.
+      # Board discovery runs on its own schedule (Settings > Discovery_Every_Hours) unless forced.
+      - name: Poll boards, detect new jobs, score, deliver
+        run: python hunter.py ${{ inputs.discover && '--discover' || '' }}
         env:
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -40,20 +47,21 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional repository variable; default qdr:d3 (past 3 days)
+          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional; default qdr:d3 (past 3 days)
 
-      # Only does anything when GOOGLE_SHEET_ID is NOT set (the CSV is then the tracker).
-      # always(): keep rows already written even if the run later fails or times out.
-      - name: Commit CSV backup
+      # Only does anything when GOOGLE_SHEET_ID is NOT set: the CSV files are then the state,
+      # so they must survive between runs. always(): keep what was written even if the run failed.
+      - name: Save local fallback state
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tracked_jobs.csv
+          [ -f tracked_jobs.csv ] && git add -f tracked_jobs.csv
+          [ -d state ] && git add -f state
           if git diff --cached --quiet; then
-            echo "No tracker changes."
+            echo "No local state changes."
           else
-            git commit -m "chore: update tracked_jobs.csv [skip ci]"
+            git commit -m "chore: update local fallback state [skip ci]"
             git pull --rebase
             git push
           fi

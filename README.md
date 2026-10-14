@@ -1,22 +1,48 @@
 # Job Hunter
 
-Every 2 hours during US business hours (Mon–Fri), this finds new job postings (Greenhouse, Lever, Ashby, Workable, SmartRecruiters), has an AI score each one against **your resume**, logs everything in **a Google Sheet**, and sends the best matches to **Telegram** on your phone.
+Watches company job boards around the clock, spots **newly published** jobs, has an AI score them against **your resume**, logs them in **a Google Sheet**, and pings **Telegram** on your phone when a strong, verifiably fresh match appears.
 
 **After the one-time setup below, you never touch code.** You change your search by editing the Google Sheet, and you track applications in the same sheet.
 
+> **Read this first: what it can and cannot promise.** It only sees jobs on company boards it has *discovered* (Greenhouse, Lever, Ashby, Workable and SmartRecruiters). Jobs on other systems, on company websites, or only on LinkedIn/Indeed are invisible to it, and it does **not** promise to beat those sites. What it does promise: for every board it watches, a new posting is noticed within about an hour (GitHub's scheduler can run late), and an alert is only labelled "fresh" when the company's own data proves the job was published in the last few hours.
+
 ```
-Google Sheet "Settings" tab ──► search (Serper) ──► read each posting ──► AI score (Groq) ──► Google Sheet "Job Tracker" tab ──► Telegram
+Google Search (Serper) ──► finds company job boards ──► board list (grows over time)
+                                                              │
+                                  hourly: read every board ◄──┘
+                                          │  new job IDs only
+                                          ▼
+                       filters (title, location, experience, language)
+                                          ▼
+                              AI score vs your resume (Groq)
+                                          ▼
+                   Google Sheet tracker  +  Telegram alert (fresh matches only)
 ```
+
+## How freshness works (why you can trust the labels)
+
+Every job gets one label the first time it is seen:
+
+| Label in your tracker | Meaning | Telegram alert? |
+|---|---|---|
+| **Verified fresh** | The company's own timestamp says it was published within the last 4 hours (or, for boards that only give a date, it appeared right after our previous successful check). | **Yes** |
+| New on board (age unverified) | It just appeared on a board we check, but the company gives no date. | No (Sheet only) |
+| Recent | Published more than 4 hours ago, within `Max_Job_Age_Days`. | No (Sheet only) |
+| Age unverified | No date and we had no recent check of that board. | No (Sheet only) |
+
+Jobs already on a board when we first discover it are **not** treated as new: they are quietly recorded as the starting point. Jobs older than `Max_Job_Age_Days` are skipped. "Last updated" times are never mistaken for publication times.
+
+If GitHub runs the job late or skips a run, the hidden `Runs` tab records the real gap, and jobs found after a long gap are labelled honestly (they will show as *Recent*, not *Verified fresh*).
 
 ## What you'll use (all have free tiers)
 
 | Service | What it does | Where to get the key |
 |---|---|---|
-| Google Sheets | Your settings + your job tracker | a Google Cloud service account (step 1) |
-| Serper | Searches Google for postings | https://serper.dev |
+| Google Sheets | Your settings and your job tracker | a Google Cloud service account (step 1) |
+| Serper | Searches Google to discover company job boards | https://serper.dev |
 | Groq | The AI that scores each job | https://console.groq.com/keys |
 | Telegram | Phone alerts | @BotFather in Telegram (step 4) |
-| GitHub Actions | Runs it for you every 2 hours | this repository |
+| GitHub Actions | Runs it for you every hour | this repository |
 
 ## One-time setup (about 20 minutes)
 
@@ -45,7 +71,7 @@ In this repository: **Settings → Secrets and variables → Actions → New rep
 | `TELEGRAM_BOT_TOKEN` | from step 4 (optional) |
 | `TELEGRAM_CHAT_ID` | from step 4 (optional) |
 
-> **Use a private repository.** Your resume gets stored in your Google Sheet, but `resume.txt` (if you keep it) lives in the repo.
+> **Use a private repository.**
 
 ### 4. Telegram alerts (optional but recommended)
 1. In Telegram, message **@BotFather**, send `/newbot`, follow the prompts, and copy the **token** it gives you.
@@ -53,7 +79,9 @@ In this repository: **Settings → Secrets and variables → Actions → New rep
 3. In a browser, open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` (put your token in place of `<YOUR_TOKEN>`). Find `"chat":{"id":123456789` — that number is your **chat ID**.
 
 ### 5. First run
-Go to the **Actions** tab → **Job Hunter** → **Run workflow**. The first run creates the tabs in your Sheet: **Settings** (filled with defaults), **Job Tracker**, and a hidden **Seen_Archive**. Open the Sheet, go to **Settings**, and **paste your resume into the `Resume_Text` row** (and adjust anything else). From then on it runs by itself every 2 hours, Monday to Friday, between 13:00 and 23:00 UTC.
+Go to the **Actions** tab → **Job Hunter** → **Run workflow**, tick **"Also search Google for new company job boards right now"**, and run it. The first run creates the tabs in your Sheet: **Settings** (filled with defaults), **Job Tracker**, and three hidden internal tabs (**Boards**, **Events**, **Runs**). Open the Sheet, go to **Settings**, and **paste your resume into the `Resume_Text` row** (adjust anything else). From then on it runs by itself every hour.
+
+The first runs mostly *learn* the boards (quietly recording what is already there), so don't expect alerts immediately. The list of watched boards grows each time discovery runs (every 12 hours by default). More boards means more coverage; see the hidden `Boards` tab (View → Hidden sheets) for what is being watched.
 
 ## Using it day to day
 
@@ -62,42 +90,45 @@ Go to the **Actions** tab → **Job Hunter** → **Run workflow**. The first run
 | Setting | What it does |
 |---|---|
 | `Resume_Text` | Your resume as plain text. The AI scores jobs against this. |
-| `Target_Roles` | Job-title words to search for (comma-separated). |
-| `Target_Levels` | Level words that should be in the title (Intern, Associate…). |
-| `Excluded_Title_Words` | Titles containing these are skipped before the AI is used. |
+| `Target_Roles` | Job-title words a title must contain (comma-separated). |
+| `Target_Levels` | Level words a title must contain (Intern, Associate…). |
+| `Excluded_Title_Words` | Titles containing these are skipped before any AI is used. |
 | `Target_Locations` | Where you want to work. Include `US Remote` for US-wide remote jobs. |
-| `Min_Alert_Score` | Jobs at or above this score are marked **To Apply** and sent to Telegram. |
-| `Max_Job_Age_Days` | Jobs published longer ago than this are skipped as stale. |
+| `Min_Alert_Score` | Jobs at or above this score are marked **To Apply**; fresh ones are sent to Telegram. |
+| `Max_Job_Age_Days` | Jobs published longer ago than this are skipped. |
+| `Fresh_Window_Hours` | How recent "verified fresh" must be (default 4). |
+| `Discovery_Every_Hours` | How often it searches Google for new boards to watch (default 12). |
 
-**Job Tracker tab** only shows jobs worth your time (score 50 or higher). The script only ever *adds* rows, so your edits are safe:
+**Job Tracker tab** shows jobs scoring 50 or higher. The script only ever *adds* rows, so your edits are safe:
 
 | Column | Meaning |
 |---|---|
-| `Date_Found` / `Date_Posted` | When we found it / when the company actually published it |
-| `My_Status` | Starts as **To Apply** (score at or above `Min_Alert_Score`) or **Stretch / Review** (score 50 up to the minimum). **Yours to change**: `Applied` → `Interviewing` → `Offer` / `Pass` |
-| `AI_Score` | 0–100 fit with your resume |
+| `Date_Found` / `Date_Posted` | When we found it / when the company published it (blank if the company gives none) |
+| `My_Status` | Starts as **To Apply** (score at or above `Min_Alert_Score`) or **Stretch / Review**. **Yours to change**: `Applied` → `Interviewing` → `Offer` / `Pass` |
+| `AI_Score`, `AI_Verdict`, `Missing_Gaps` | 0–100 fit, a one-sentence reason, and what you're missing |
 | `Company_and_Title`, `Location` | The job |
-| `AI_Verdict`, `Missing_Gaps` | One-sentence reason, and what you're missing |
-| `Apply_URL` | Click to apply (don't delete this column: it's how duplicates are avoided) |
+| `Apply_URL` | Click to apply |
 | `User_Notes` | **Yours** |
+| `Freshness`, `Source` | How sure we are it's new (see the table above), and whether it came from a watched board or a search |
 
-**Seen_Archive tab** (hidden): low scorers (under 50), closed postings, stale postings and errors are logged here with a one-line reason, only so the same job is never fetched twice. To see it: *View → Hidden sheets*. To make the script re-check a job, delete its row there.
-
-**Telegram:** every new job scoring at or above `Min_Alert_Score` sends you a message with the title, company, location, score, a plain-English verdict, what you're missing, a direct **Apply** link, and a link to your tracker. *Stretch / Review* jobs are only in the Sheet.
+The hidden tabs are the app's memory (which jobs were seen, scored and alerted, which boards are watched, and a log of every run). Please don't edit them; to make the app re-check a job, ask a developer.
 
 ### How scoring works
-The AI reads your resume, your target roles and locations, and the full job posting, and scores 0–100:
-- **80–100** strong early-career fit (0–2 years required; internships and projects count) in a target location or US-eligible Remote
+Before the AI sees a job, simple checks remove clear mismatches: the title must contain a target role and level word and no excluded word; the location must not be outside the US; it must not demand 4+ years of experience or a language your resume doesn't show. The AI then scores the survivors 0–100 against your resume:
+- **80–100** strong early-career fit in a target location or US-eligible Remote
 - **65–79** stretch (about 2–3 years, or a couple of unfamiliar tools)
 - **26–64** partial fit
-- **0–25** hard no: 4+ years minimum, wrong location, a required language or license you don't have, or an unrelated field
+- **0–25** hard no
+
+## If something goes wrong
+- **Telegram or the Sheet is down:** nothing is lost. A job is only marked "scored" or "alerted" after that step really worked, so the next hourly run retries it (an alert is dropped only if it would be more than 12 hours late). In rare cases an alert may arrive twice.
+- **Groq rate limits:** it automatically falls back to a smaller model and retries later; jobs it couldn't score are picked up next run. A bad Groq key stops the run with a clear error in the Actions log.
+- **No alerts for a while:** that can be normal. Check the hidden `Runs` tab: how many boards were polled, how many new jobs were found, and the gap since the previous run.
 
 ## Good to know
-- **Cost of mistakes.** Scores come from an AI reading the posting: treat them as a first filter, not a verdict.
-- **Free-tier limits.** Groq's free tier caps requests and tokens per minute, so a run scores about 30 jobs at most (`MAX_JOBS_PER_RUN`). If the main model is rate-limited it automatically uses a smaller one. Jobs it couldn't score this run are retried on the next run.
-- **Serper credits.** Each run uses about 4 searches (2 queries × 2 pages). Check your remaining credits at serper.dev.
-- **Two-layer freshness.** (1) Search only looks at pages Google indexed in the **past 3 days** (`SEARCH_TBS`, default `qdr:d3`), so results rotate with new postings instead of repeating the same evergreen pages; the script runs every 2 hours and skips anything it has already seen. (2) Google's window follows page edits, not posting dates, so each new posting's **real publication date** is read from its job board, and anything older than `Max_Job_Age_Days` is archived as stale. Trade-off: a posting Google hasn't dated yet can be missed until it is. To backfill without the window, run `python hunter.py --no-tbs` (or set the `SEARCH_TBS` repository variable to `none`).
-- **No Google Sheet?** If `GOOGLE_SHEET_ID` isn't set, it uses the default settings and a local `tracked_jobs.csv` instead.
+- **Free-tier limits.** Groq's free tier caps requests and tokens per minute, so a run scores about 30 jobs at most (`MAX_JOBS_PER_RUN`), freshest first.
+- **Serper credits.** Discovery uses up to 10 searches per run, twice a day by default. Polling boards uses no search credits.
+- **Very large boards** (for example job aggregators) are polled like any other; their jobs go through the same filters.
 
 ## Running it on your own computer (optional, for developers)
 ```bash
@@ -114,14 +145,16 @@ GOOGLE_SERVICE_ACCOUNT_JSON=      # raw JSON, or the path to the downloaded .jso
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 ```
- For `GOOGLE_SERVICE_ACCOUNT_JSON` you can use the path to the downloaded `.json` file.
+Without `GOOGLE_SHEET_ID` it uses default settings, `resume.txt`, and local files (`tracked_jobs.csv`, `state/`).
 
 ```bash
-python hunter.py --dry-run --url "https://boards.greenhouse.io/<board>/jobs/<id>"   # score one job, write nothing
-python hunter.py                                                                     # full run
-python -m unittest discover -s tests                                                 # offline tests
+python hunter.py --seed greenhouse:gyde --dry-run   # poll one board, classify jobs, write and send nothing
+python hunter.py --url "https://boards.greenhouse.io/<board>/jobs/<id>"   # run one job through the real gates and scorer
+python hunter.py --discover                          # force a board-discovery pass now
+python hunter.py --discover --no-tbs                 # discovery without the 3-day search window
+python -m unittest discover -s tests                 # offline tests
 ```
 
-Environment variables (all optional unless noted): `SERPER_API_KEY` (required; the older name `SEARCH_API_KEY` also works), `GROQ_API_KEY` (required), `GOOGLE_SHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ALERT_WEBHOOK_URL`, `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES`, `SEARCH_TBS` (default `qdr:d3`).
+Optional environment variables: `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES`, `SEARCH_TBS` (default `qdr:d3`), `ALERT_WEBHOOK_URL`.
 
-The previous keyword-scoring version is kept in `legacy/` for reference.
+Project documents for contributors and agents: `SPEC.md` (requirements), `DECISIONS.md` (why), `STATUS.md` (what is verified), `AGENTS.md`. The earlier keyword-scoring version is kept in `legacy/`.

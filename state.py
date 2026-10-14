@@ -1,0 +1,202 @@
+"""Persistence for internal state: Boards registry, Events ledger, Runs log.
+
+SheetState keeps them in hidden tabs of the user's Google Sheet (no Git, nothing to maintain);
+CsvState is the local fallback. Events and Runs are append-only; Boards is rewritten in a
+single atomic request because rows are updated every poll.
+"""
+
+from __future__ import annotations
+
+import csv
+import logging
+import os
+import tempfile
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Any
+
+from boards import BoardRecord
+from ledger import EVENT_COLUMNS, Event
+
+log = logging.getLogger("hunter")
+
+BOARDS_TAB, EVENTS_TAB, RUNS_TAB = "Boards", "Events", "Runs"
+BOARD_COLUMNS = [
+    "Board_Key", "ATS", "Board", "Status", "Discovered_At", "Source", "Baselined_At",
+    "Last_Attempt_At", "Last_Success_At", "Consecutive_Failures", "Last_Job_Count", "Last_Error",
+]  # fmt: skip
+RUN_COLUMNS = [
+    "Run_At", "Discovery", "Boards_Total", "Boards_OK", "Boards_Failed", "Boards_Added", "New_Jobs",
+    "Verified_Fresh", "Evaluated", "Alerts_Sent", "Alerts_Failed", "Gap_Since_Prev_Run_Min",
+    "Max_Board_Gap_Min", "Max_Alert_Lag_Min", "Notes",
+]  # fmt: skip
+APPEND_CHUNK = 2000
+
+
+@dataclass
+class RunRecord:
+    run_at: str
+    discovery: bool = False
+    boards_total: int = 0
+    boards_ok: int = 0
+    boards_failed: int = 0
+    boards_added: int = 0
+    new_jobs: int = 0
+    verified_fresh: int = 0
+    evaluated: int = 0
+    alerts_sent: int = 0
+    alerts_failed: int = 0
+    gap_since_prev_run_min: int | None = None
+    max_board_gap_min: int | None = None
+    max_alert_lag_min: int | None = None
+    notes: str = ""
+
+    def to_row(self) -> list[Any]:
+        out = []
+        for f in fields(self):
+            v = getattr(self, f.name)
+            out.append("" if v is None else ("yes" if v is True else "no" if v is False else v))
+        return out
+
+    @classmethod
+    def from_row(cls, row: list[str]) -> "RunRecord | None":
+        if not row or not row[0]:
+            return None
+        row = list(row) + [""] * (len(RUN_COLUMNS) - len(row))
+
+        def num(i: int) -> int | None:
+            try:
+                return int(float(row[i]))
+            except ValueError:
+                return None
+
+        return cls(row[0], row[1] == "yes", num(2) or 0, num(3) or 0, num(4) or 0, num(5) or 0, num(6) or 0, num(7) or 0,
+                   num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14])  # fmt: skip
+
+
+def board_to_row(b: BoardRecord) -> list[Any]:
+    return [b.key, b.ats, b.board, b.status, b.discovered_at, b.source, b.baselined_at, b.last_attempt_at,
+            b.last_success_at, b.consecutive_failures, b.last_job_count, b.last_error]  # fmt: skip
+
+
+def board_from_row(row: list[str]) -> BoardRecord | None:
+    if len(row) < 3 or not row[1] or not row[2]:
+        return None
+    row = list(row) + [""] * (len(BOARD_COLUMNS) - len(row))
+
+    def num(s: str) -> int:
+        try:
+            return int(float(s))
+        except ValueError:
+            return 0
+
+    return BoardRecord(row[1], row[2], row[4], row[5], row[3] or "new", row[6], row[7], row[8], num(row[9]), num(row[10]), row[11])
+
+
+def _chunks(rows: list[list[Any]], n: int = APPEND_CHUNK):
+    for i in range(0, len(rows), n):
+        yield rows[i : i + n]
+
+
+class SheetState:
+    """State in hidden tabs of the user's spreadsheet."""
+
+    def __init__(self, spreadsheet: Any) -> None:
+        self.sh = spreadsheet
+
+    def ensure(self) -> None:
+        tabs = {w.title: w for w in self.sh.worksheets()}
+        for title, columns, rows in ((BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000)):
+            if title in tabs:
+                continue
+            ws = self.sh.add_worksheet(title=title, rows=rows, cols=len(columns))
+            ws.append_rows([columns], value_input_option="RAW")
+            try:
+                ws.freeze(rows=1)
+                ws.hide()  # internal state: out of the user's way, still readable by the script
+            except Exception as exc:
+                log.warning("Could not tidy the %s tab: %s", title, exc)
+            log.info("Created the hidden %s tab", title)
+
+    def load_boards(self) -> dict[str, BoardRecord]:
+        rows = self.sh.worksheet(BOARDS_TAB).get_all_values()[1:]
+        recs = (board_from_row(r) for r in rows)
+        return {b.key: b for b in recs if b}
+
+    def save_boards(self, boards: dict[str, BoardRecord]) -> None:
+        """Rewrite the registry in ONE request so a crash can never leave it half-written."""
+        ws = self.sh.worksheet(BOARDS_TAB)
+        rows = [board_to_row(b) for b in sorted(boards.values(), key=lambda b: b.key)]
+        if not rows:
+            return
+        if ws.row_count < len(rows) + 2:
+            ws.add_rows(len(rows) + 500 - ws.row_count)
+        ws.update(values=rows, range_name="A2", value_input_option="RAW")
+
+    def load_events(self) -> list[Event]:
+        rows = self.sh.worksheet(EVENTS_TAB).get_all_values()[1:]
+        return [e for e in (Event.from_row(r) for r in rows) if e]
+
+    def append_events(self, events: list[Event]) -> None:
+        ws = self.sh.worksheet(EVENTS_TAB)
+        for chunk in _chunks([e.to_row() for e in events]):
+            ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
+
+    def append_run(self, run: RunRecord) -> None:
+        self.sh.worksheet(RUNS_TAB).append_rows([run.to_row()], value_input_option="RAW", table_range="A1")
+
+    def load_runs(self) -> list[RunRecord]:
+        rows = self.sh.worksheet(RUNS_TAB).get_all_values()[1:]
+        return [r for r in (RunRecord.from_row(x) for x in rows) if r]
+
+
+class CsvState:
+    """Local-file fallback (development, or Sheets not configured)."""
+
+    def __init__(self, directory: Path) -> None:
+        self.dir = directory
+
+    def _path(self, name: str) -> Path:
+        return self.dir / f"{name.lower()}.csv"
+
+    def ensure(self) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        for title, columns in ((BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS)):
+            p = self._path(title)
+            if not p.exists() or p.stat().st_size == 0:
+                with p.open("w", newline="", encoding="utf-8") as fh:
+                    csv.writer(fh).writerow(columns)
+
+    def _rows(self, title: str) -> list[list[str]]:
+        p = self._path(title)
+        if not p.exists():
+            return []
+        with p.open(newline="", encoding="utf-8") as fh:
+            return list(csv.reader(fh))[1:]
+
+    def load_boards(self) -> dict[str, BoardRecord]:
+        recs = (board_from_row(r) for r in self._rows(BOARDS_TAB))
+        return {b.key: b for b in recs if b}
+
+    def save_boards(self, boards: dict[str, BoardRecord]) -> None:
+        p = self._path(BOARDS_TAB)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(BOARD_COLUMNS)
+            w.writerows(board_to_row(b) for b in sorted(boards.values(), key=lambda b: b.key))
+        os.replace(tmp, p)  # atomic
+
+    def load_events(self) -> list[Event]:
+        return [e for e in (Event.from_row(r) for r in self._rows(EVENTS_TAB)) if e]
+
+    def append_events(self, events: list[Event]) -> None:
+        with self._path(EVENTS_TAB).open("a", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(e.to_row() for e in events)
+
+    def append_run(self, run: RunRecord) -> None:
+        with self._path(RUNS_TAB).open("a", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(run.to_row())
+
+    def load_runs(self) -> list[RunRecord]:
+        return [r for r in (RunRecord.from_row(x) for x in self._rows(RUNS_TAB)) if r]
