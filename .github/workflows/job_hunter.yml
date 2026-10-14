@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       discover:
-        description: "Also search Google for new company job boards right now"
+        description: "Run one rotating (date-windowed) Google discovery now, outside the 12-hour schedule"
+        type: boolean
+        default: false
+      backfill:
+        description: "MANUAL ONLY: broad Google searches without the date window (boards only, capped credits)"
         type: boolean
         default: false
 
@@ -36,9 +40,10 @@ jobs:
         run: pip install -r requirements.txt
 
       # Settings live in the Google Sheet; only the keys below are configured in GitHub.
-      # Board discovery runs on its own schedule (Settings > Discovery_Every_Hours) unless forced.
+      # Rotating discovery runs on its own schedule (Settings > Discovery_Every_Hours) within
+      # Settings > Discovery_Credit_Budget. Unfiltered search only runs when 'backfill' is ticked by hand.
       - name: Poll boards, detect new jobs, score, deliver
-        run: python hunter.py ${{ inputs.discover && '--discover' || '' }}
+        run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
         env:
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -47,7 +52,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional; default qdr:d3 (past 3 days)
+          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional; default qdr:d3. Blank/none cannot make scheduled discovery unfiltered.
 
       # Only does anything when GOOGLE_SHEET_ID is NOT set: the CSV files are then the state,
       # so they must survive between runs. always(): keep what was written even if the run failed.

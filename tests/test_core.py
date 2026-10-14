@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import boards as bd  # noqa: E402
+import discovery as dsc  # noqa: E402
 import eligibility as el  # noqa: E402
 import freshness as fr  # noqa: E402
 import hunter as h  # noqa: E402
@@ -103,6 +104,7 @@ class Harness:
 
     def run(self, minutes_later: int = 0, seeds: list[bd.BoardId] | None = None, **kw: Any) -> st_mod.RunRecord:
         self.now = self.now + timedelta(minutes=minutes_later)
+        kw.setdefault("sleep", lambda seconds: None)  # no real waiting for validation backoff / per-host spacing
         deps = pl.Deps(
             state=self.state, tracked_keys=self.tracked_keys, append_tracker=self.append_tracker, evaluate=self.evaluate,
             send_alert=self.send_alert, title_gate=gate, fetch=self.fetch, now=lambda: self.now,
@@ -141,12 +143,16 @@ class ClassifyTests(unittest.TestCase):
     def cls(self, published: str, *, gap_min: int | None = 60, baselined: bool = True, baseline_pass: bool = False, **kw: Any) -> str:
         dt, prec = fr.parse_instant(published)
         gap = timedelta(minutes=gap_min) if gap_min is not None else None
-        return fr.classify(dt, prec, now=T0, board_gap=gap, board_baselined=baselined, baseline_pass=baseline_pass, **kw).cls
+        return fr.classify(dt, prec, now=kw.pop("now", T0), board_gap=gap, board_baselined=baselined, baseline_pass=baseline_pass, **kw).cls
 
     def test_time_precision_inside_and_outside_window(self) -> None:
         self.assertEqual(self.cls(ago(minutes=30)), fr.VERIFIED_FRESH)
-        self.assertEqual(self.cls(ago(hours=4)), fr.VERIFIED_FRESH)
-        self.assertEqual(self.cls(ago(hours=4, minutes=1)), fr.RECENT)
+        self.assertEqual(self.cls(ago(hours=11, minutes=59)), fr.VERIFIED_FRESH)
+        noon30 = T0 + timedelta(minutes=90)  # 13:30, so "12 h ago" (01:30) is a real time of day, not midnight
+        self.assertEqual(self.cls("2026-10-14T01:30:00Z", now=noon30), fr.VERIFIED_FRESH)  # the boundary itself is inside the window
+        self.assertEqual(self.cls("2026-10-14T01:29:59Z", now=noon30), fr.RECENT)  # one second past it is not
+        self.assertEqual(self.cls(ago(hours=12, minutes=1)), fr.RECENT)
+        self.assertEqual(self.cls(ago(hours=4, minutes=1)), fr.VERIFIED_FRESH)  # the old 4 h boundary no longer matters
         self.assertEqual(self.cls(ago(days=3)), fr.RECENT)
         self.assertEqual(self.cls(ago(days=15)), fr.STALE)
 
@@ -155,7 +161,8 @@ class ClassifyTests(unittest.TestCase):
 
     def test_day_precision_needs_board_gap_evidence(self) -> None:
         self.assertEqual(self.cls("2026-10-14", gap_min=60), fr.VERIFIED_FRESH)  # Workable: today + seen right after the last poll
-        self.assertEqual(self.cls("2026-10-14", gap_min=600), fr.RECENT)  # we did not poll recently: cannot claim fresh
+        self.assertEqual(self.cls("2026-10-14", gap_min=720), fr.VERIFIED_FRESH)  # gap exactly at the window
+        self.assertEqual(self.cls("2026-10-14", gap_min=721), fr.RECENT)  # we did not poll recently: cannot claim fresh
         self.assertEqual(self.cls("2026-10-14", gap_min=None, baselined=False), fr.RECENT)
         self.assertEqual(self.cls("2026-10-01", gap_min=60), fr.RECENT)  # old date contradicts "just appeared"
 
@@ -164,14 +171,20 @@ class ClassifyTests(unittest.TestCase):
 
     def test_no_date_is_never_verified(self) -> None:
         self.assertEqual(self.cls("", gap_min=60), fr.OBSERVED_NEW)
-        self.assertEqual(self.cls("", gap_min=600), fr.UNCERTAIN)
+        self.assertEqual(self.cls("", gap_min=720), fr.OBSERVED_NEW)
+        self.assertEqual(self.cls("", gap_min=721), fr.UNCERTAIN)
         self.assertEqual(self.cls("", gap_min=None, baselined=False), fr.UNCERTAIN)
 
     def test_baseline_pass_only_trusts_source_timestamps(self) -> None:
+        noon30 = T0 + timedelta(minutes=90)
         self.assertEqual(self.cls(ago(days=40), baselined=False, baseline_pass=True), fr.BASELINE)
         self.assertEqual(self.cls("", baselined=False, baseline_pass=True), fr.BASELINE)
-        self.assertEqual(self.cls("2026-10-14", baselined=False, baseline_pass=True), fr.BASELINE)  # day precision cannot prove 4h
+        self.assertEqual(self.cls("2026-10-14", baselined=False, baseline_pass=True), fr.BASELINE)  # day precision cannot prove 12h
         self.assertEqual(self.cls(ago(minutes=30), baselined=False, baseline_pass=True), fr.VERIFIED_FRESH)
+        self.assertEqual(self.cls("2026-10-14T01:30:00Z", baselined=False, baseline_pass=True, now=noon30), fr.VERIFIED_FRESH)  # baseline exception follows the window
+        self.assertEqual(self.cls("2026-10-14T01:29:59Z", baselined=False, baseline_pass=True, now=noon30), fr.BASELINE)
+        self.assertEqual(self.cls(ago(hours=11, minutes=59), baselined=False, baseline_pass=True), fr.VERIFIED_FRESH)
+        self.assertEqual(self.cls(ago(hours=5), baselined=False, baseline_pass=True, fresh_window=timedelta(hours=4)), fr.BASELINE)  # explicit override honoured
 
     def test_future_dates_are_not_trusted(self) -> None:
         self.assertEqual(self.cls(ago(hours=-5)), fr.UNCERTAIN)
@@ -331,7 +344,7 @@ class FreshnessRoutingTests(HarnessCase):
         self.poll_with(
             job("acme", "fresh", published=ago(minutes=30, base=later)),
             job("acme", "nodate", published=""),
-            job("acme", "recent", published=ago(hours=6, base=later)),
+            job("acme", "recent", published=ago(hours=14, base=later)),
             job("acme", "stale", published=ago(days=30, base=later)),
             job("acme", "gated", title="Senior Software Engineer", published=ago(minutes=5, base=later)),
         )  # fmt: skip
@@ -347,12 +360,12 @@ class FreshnessRoutingTests(HarnessCase):
     def test_day_precision_workable_needs_a_recent_poll(self) -> None:
         wb = bd.BoardId(bd.WORKABLE, "wk")
         self.w.listings[wb.key] = [job("wk", "AAA", ats=bd.WORKABLE, published="2026-10-14", field="published_on")]
-        self.w.run(seeds=[wb])  # baseline poll: a date alone cannot prove 4h
+        self.w.run(seeds=[wb])  # baseline poll: a date alone cannot prove 12h
         self.w.listings[wb.key].append(job("wk", "BBB", ats=bd.WORKABLE, published="2026-10-14", field="published_on"))
         self.w.run(minutes_later=60)
         self.assertEqual(self.w.states()[bd.JobIdentity(bd.WORKABLE, "wk", "BBB").key].freshness, fr.VERIFIED_FRESH)
         self.w.listings[wb.key].append(job("wk", "CCC", ats=bd.WORKABLE, published="2026-10-14", field="published_on"))
-        self.w.run(minutes_later=60 * 7)  # polling stopped for 7 hours: no claim of freshness
+        self.w.run(minutes_later=60 * 13)  # polling stopped for 13 hours: no claim of freshness
         self.assertEqual(self.w.states()[bd.JobIdentity(bd.WORKABLE, "wk", "CCC").key].freshness, fr.RECENT)
 
 
@@ -403,13 +416,32 @@ class RetryTests(HarnessCase):
             self.w.run(minutes_later=60)
         self.assertEqual(len(self.w.events(k, lg.ABANDONED)), 1)
 
-    def test_late_alert_retries_are_abandoned(self) -> None:
+    def test_pending_alert_survives_aging_past_the_window_and_is_labelled_late(self) -> None:
         k = self.fresh_setup()
         self.w.alert_error = ConnectionError("down")
         self.w.run(minutes_later=60)
+        self.assertEqual(self.w.events(k, lg.ALERTED), [])
         self.w.alert_error = None
-        self.w.run(minutes_later=60 * 13)  # 13 hours later: no longer fresh news
-        self.assertEqual((self.w.alerts, len(self.w.events(k, lg.ABANDONED))), ([], 1))
+        self.w.run(minutes_later=60 * 13)  # 14 h after publication: outside the 12 h window, but still pending
+        self.assertEqual((len(self.w.alerts), self.w.events(k, lg.ABANDONED)), (1, []))
+        self.assertIn("delivered late", self.w.alerts[0]["late"])
+        self.assertEqual(self.w.alerts[0]["freshness"], fr.VERIFIED_FRESH)  # verified at first observation, not re-judged
+        self.assertTrue(self.w.events(k, lg.ALERTED)[0].detail["late"])
+
+    def test_on_time_alert_is_not_labelled_late(self) -> None:
+        self.fresh_setup()
+        self.w.run(minutes_later=60)
+        self.assertNotIn("late", self.w.alerts[0])
+
+    def test_scoring_retry_survives_aging_past_the_window(self) -> None:
+        k = self.fresh_setup()
+        self.w.plan[k] = [pl.EvalOutcome("transient", message="groq down")] * 14 + [done()]
+        for _ in range(14):  # the job is now older than 12 h and still unscored
+            self.w.run(minutes_later=60)
+        self.assertEqual((self.w.events(k, lg.EVALUATED), self.w.events(k, lg.ABANDONED), self.w.alerts), ([], [], []))
+        self.w.run(minutes_later=60)
+        self.assertEqual((len(self.w.events(k, lg.EVALUATED)), len(self.w.alerts), len(self.w.tracker)), (1, 1, 1))
+        self.assertIn("delivered late", self.w.alerts[0]["late"])
 
     def test_tracker_write_failure_leaves_the_job_retryable_without_duplicate_rows(self) -> None:
         k = self.fresh_setup()
@@ -456,14 +488,14 @@ class BoardHealthTests(HarnessCase):
         self.w.listings[self.board.key] = bd.BoardError("HTTP 503")
         r2 = self.w.run(minutes_later=60)
         self.assertEqual((r2.boards_failed, self.w.state.load_boards()[self.board.key].consecutive_failures), (1, 1))
-        t_back = T0 + timedelta(minutes=60 + 240)
+        t_back = T0 + timedelta(minutes=60 + 780)
         self.w.listings[self.board.key] = [
             job("acme", "1", published=ago(days=30)),
             job("acme", "undated", published=""),
             job("acme", "stamped", published=ago(minutes=20, base=t_back)),
         ]
-        r3 = self.w.run(minutes_later=240)
-        self.assertEqual(r3.max_board_gap_min, 300)  # 5 hours since the last SUCCESSFUL poll
+        r3 = self.w.run(minutes_later=780)
+        self.assertEqual(r3.max_board_gap_min, 840)  # 14 hours since the last SUCCESSFUL poll
         by = {k.split("|")[2]: s.freshness for k, s in self.w.states().items()}
         self.assertEqual((by["undated"], by["stamped"]), (fr.UNCERTAIN, fr.VERIFIED_FRESH))  # gap > window: no "observed new" claim
         self.assertEqual(self.w.state.load_boards()[self.board.key].consecutive_failures, 0)
@@ -513,7 +545,7 @@ class DiscoveryTests(HarnessCase):
     def test_discovered_boards_are_baselined_in_the_same_run(self) -> None:
         nb = bd.BoardId(bd.LEVER, "newco")
         self.w.listings[nb.key] = [job("newco", f"{i:08x}-e89b-12d3-a456-426614174000", ats=bd.LEVER, published=ago(days=60)) for i in range(5)]
-        run = self.w.run(discover=lambda: ([nb], []), discovery_every_hours=12)
+        run = self.w.run(discover=lambda ctx: dsc.DiscoveryResult(boards=[nb]), discovery_every_hours=12)
         self.assertEqual((run.discovery, run.boards_added, run.evaluated, len(self.w.alerts)), (True, 1, 0, 0))
         self.assertTrue(self.w.state.load_boards()[nb.key].baselined_at)
 
@@ -526,7 +558,7 @@ class DiscoveryTests(HarnessCase):
 
         self.baseline(job("acme", "1", published=ago(days=30)))
 
-        def boom() -> Any:
+        def boom(ctx: Any) -> Any:
             raise RuntimeError("serper credits exhausted")
 
         self.w.listings[self.board.key].append(job("acme", "2", published=ago(minutes=5, base=T0 + timedelta(minutes=60))))
@@ -539,11 +571,11 @@ class DiscoveryTests(HarnessCase):
         self.baseline(job("acme", "1", published=ago(days=30)))
         sj = pl.SerperJob(listed.ident, listed.title, listed.url)
         self.w.listings[self.board.key].append(listed)  # on the board AND found by search
-        self.w.run(minutes_later=60, discover=lambda: ([], [sj]), hydrate_listed=lambda s: listed, force_discovery=True)
+        self.w.run(minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[sj]), hydrate_listed=lambda s: listed, force_discovery=True)
         self.assertEqual(len(self.w.events(self.key("88"), lg.SEEN)), 1)
         off_board = job("acme", "89", published=ago(minutes=30, base=T0 + timedelta(minutes=120)))
         sj2 = pl.SerperJob(off_board.ident, off_board.title, off_board.url)
-        self.w.run(minutes_later=60, discover=lambda: ([], [sj2]), hydrate_listed=lambda s: off_board, force_discovery=True)
+        self.w.run(minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[sj2]), hydrate_listed=lambda s: off_board, force_discovery=True)
         self.assertEqual(self.w.states()[self.key("89")].seen_detail["source"], "serper")
         self.assertEqual(self.w.states()[self.key("89")].freshness, fr.VERIFIED_FRESH)
 

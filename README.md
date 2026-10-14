@@ -25,9 +25,9 @@ Every job gets one label the first time it is seen:
 
 | Label in your tracker | Meaning | Telegram alert? |
 |---|---|---|
-| **Verified fresh** | The company's own timestamp says it was published within the last 4 hours (or, for boards that only give a date, it appeared right after our previous successful check). | **Yes** |
+| **Verified fresh** | The company's own timestamp says it was published within the last 12 hours (or, for boards that only give a date, it appeared right after our previous successful check). | **Yes** |
 | New on board (age unverified) | It just appeared on a board we check, but the company gives no date. | No (Sheet only) |
-| Recent | Published more than 4 hours ago, within `Max_Job_Age_Days`. | No (Sheet only) |
+| Recent | Published more than 12 hours ago, within `Max_Job_Age_Days`. | No (Sheet only) |
 | Age unverified | No date and we had no recent check of that board. | No (Sheet only) |
 
 Jobs already on a board when we first discover it are **not** treated as new: they are quietly recorded as the starting point. Jobs older than `Max_Job_Age_Days` are skipped. "Last updated" times are never mistaken for publication times.
@@ -36,7 +36,15 @@ If GitHub runs the job late or skips a run, the hidden `Runs` tab records the re
 
 ## Where the list of boards comes from
 
-Three sources feed one list: Google searches (every 12 hours), and two public company lists that are imported weekly: [open-ats-feed](https://github.com/veresk06/open-ats-feed) and [ats-scrapers](https://github.com/kalil0321/ats-scrapers) (MIT, see `NOTICE.md`). Together that is about **21,900 boards** on the five supported systems. Only the *names of boards* come from those lists: every job is read from the company's own board.
+Three sources feed one list: a rotating Google search (every 12 hours; see below), manual seeds, and two public company lists that are imported weekly: [open-ats-feed](https://github.com/veresk06/open-ats-feed) and [ats-scrapers](https://github.com/kalil0321/ats-scrapers) (MIT, see `NOTICE.md`). Together that is about **21,900 boards** on the five supported systems. Only the *names of boards* come from those lists: every job is read from the company's own board.
+
+### How the Google search works (and what it cannot do)
+- **Rotation.** Every 12 hours the app searches Google for a few combinations of *one job site x one role word x one location* (about 6 sites x your roles x your locations), restricted to pages Google indexed in the last 3 days (`qdr:d3`). Where it stopped is stored in the hidden `Discovery` tab, so each run continues with the next combinations and a full pass takes many days. Changing your Settings does not restart the rotation.
+- **Search only finds candidates.** Google's 3-day filter says when a page was indexed or changed, never when the job was published. A job is only called fresh when the company's own board gives a publish time inside the window.
+- **Every result is used twice.** Its *board* is added to the shared list (even if that job is old, already seen or excluded), and its *job*, if never seen, is read from the company's board and goes through the normal matching, scoring and alert steps.
+- **One set of rules for every source.** Boards from Google, the public lists and manual seeds all go through the same checks: supported provider, valid identifier, validated against the company's own API, best matches first, and never beyond `Max_Active_Boards` / `Max_New_Boards_Per_Run`. SmartRecruiters boards stay parked whatever the source (see `DECISIONS.md` D-13), unless `ALLOW_SMARTRECRUITERS_BULK=1`.
+- **Bounded.** A query stops paging after two pages in a row that add nothing new, and a run stops at its credit budget. It never keeps searching until something new appears.
+- **What this does not promise.** A 12-hour search interval and a 12-hour freshness window do **not** guarantee that every new job is caught. Google may index a page late or never; the rotation covers only a slice of all combinations per run; results per query are capped; GitHub may start a run late or skip it; and a board is only polled once it has been admitted within the board budget. Jobs on boards we poll are detected within one successful hourly poll; jobs elsewhere are found only if search happens to surface them in time.
 
 Not every listed board is checked every hour. New boards are first **validated** (does it exist? does it have jobs that match your targets?) by a separate workflow (**Board Inventory**, weekly refresh plus a daily validation pass), then the best matches are added to the hourly checks within the limit set by `Max_Active_Boards`. Each newly watched board is read once as a starting point, so its existing jobs never look "just posted". The hidden `Boards` tab shows every board, where it came from, and its status; the hidden `Runs` tab shows how many were discovered, validated and actively watched.
 
@@ -104,8 +112,10 @@ The first runs mostly *learn* the boards (quietly recording what is already ther
 | `Target_Locations` | Where you want to work. Include `US Remote` for US-wide remote jobs. |
 | `Min_Alert_Score` | Jobs at or above this score are marked **To Apply**; fresh ones are sent to Telegram. |
 | `Max_Job_Age_Days` | Jobs published longer ago than this are skipped. |
-| `Fresh_Window_Hours` | How recent "verified fresh" must be (default 4). |
-| `Discovery_Every_Hours` | How often it searches Google for new boards to watch (default 12). |
+| `Fresh_Window_Hours` | How recent "verified fresh" must be (default 12). Your own value always wins. **If your Sheet still says 4, that is the old default and is kept as is: change it to 12 if you want the new window** (the hidden `Runs` tab notes it every run). |
+| `Discovery_Every_Hours` | How often the rotating Google search runs (default 12). Independent of `Fresh_Window_Hours`. |
+| `Timezone` | Time zone for the dates in your tracker, e.g. `America/Chicago`. Leave blank to use the Google Sheet's own time zone (File > Settings > Time zone). The app runs on a server, so it cannot see each viewer's own zone: set this once if the Sheet's zone is not yours. |
+| `Discovery_Credit_Budget` | Most search credits one Google discovery run may spend (default 10). A hard cap. Sheets made before this setting existed use the default. |
 | `Max_Active_Boards` | Most company boards checked every hour (default 500). Imported boards join gradually, best matches first, up to this limit. |
 | `Max_New_Boards_Per_Run` | Most new boards added to the hourly checks in one run (default 50). |
 
@@ -131,13 +141,13 @@ Before the AI sees a job, simple checks remove clear mismatches: the title must 
 - **0–25** hard no
 
 ## If something goes wrong
-- **Telegram or the Sheet is down:** nothing is lost. A job is only marked "scored" or "alerted" after that step really worked, so the next hourly run retries it (an alert is dropped only if it would be more than 12 hours late). In rare cases an alert may arrive twice.
+- **Telegram or the Sheet is down:** nothing is lost. A job is only marked "scored" or "alerted" after that step really worked, so the next hourly run retries it. A retry is never discarded because the job got older: if it is delivered after the 12-hour window it says so ("delivered late"). In rare cases an alert may arrive twice.
 - **Groq rate limits:** it automatically falls back to a smaller model and retries later; jobs it couldn't score are picked up next run. A bad Groq key stops the run with a clear error in the Actions log.
 - **No alerts for a while:** that can be normal. Check the hidden `Runs` tab: how many boards were polled, how many new jobs were found, and the gap since the previous run.
 
 ## Good to know
 - **Free-tier limits.** Groq's free tier caps requests and tokens per minute, so a run scores about 30 jobs at most (`MAX_JOBS_PER_RUN`), freshest first.
-- **Serper credits.** Discovery uses up to 10 searches per run, twice a day by default. Polling boards uses no search credits.
+- **Serper credits.** Discovery spends at most `Discovery_Credit_Budget` credits (default 10, one per results page) per run, twice a day by default: at most 20 a day. Polling boards uses no search credits. Unfiltered searches never run on the schedule; the manual `--backfill` option exists for a one-off broad sweep (`python hunter.py --backfill --backfill-credits 12`).
 - **Very large boards** (for example job aggregators) are polled like any other; their jobs go through the same filters.
 
 ## Running it on your own computer (optional, for developers)
@@ -169,6 +179,6 @@ python hunter.py --import-inventory --offline        # re-merge from the saved c
 python -m unittest discover -s tests                 # offline tests
 ```
 
-Optional environment variables: `GROQ_MODEL` (default `openai/gpt-oss-120b`), `GROQ_FALLBACK_MODEL` (default `openai/gpt-oss-20b`), `ALLOW_SMARTRECRUITERS_BULK`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES`, `SEARCH_TBS` (default `qdr:d3`), `ALERT_WEBHOOK_URL`.
+Optional environment variables: `GROQ_MODEL` (default `openai/gpt-oss-120b`), `GROQ_FALLBACK_MODEL` (default `openai/gpt-oss-20b`), `ALLOW_SMARTRECRUITERS_BULK`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES` (pages per query for `--backfill` only), `SEARCH_TBS` (default `qdr:d3`; cannot unfilter scheduled discovery), `ALERT_WEBHOOK_URL`.
 
 Project documents for contributors and agents: `SPEC.md` (requirements), `DECISIONS.md` (why), `STATUS.md` (what is verified), `AGENTS.md`. The earlier keyword-scoring version is kept in `legacy/`.

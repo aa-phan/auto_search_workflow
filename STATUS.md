@@ -1,10 +1,12 @@
 # STATUS
 
-Last updated 2026-10-14. Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-14 (discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## State
 
 Board polling -> new-ID detection -> freshness classification -> filters/scoring -> Sheet -> Telegram is implemented (D-01..D-09). This change adds the **inventory loop** (D-11..D-15): the registry is seeded from two public inventories, validated through the existing adapters, and promoted into hourly polling only within a budget. Groq model defaults changed because the requested models no longer exist for this key (D-16).
+
+Latest change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
 
 ## Inventory: live numbers (2026-10-14, real downloads)
 
@@ -28,6 +30,8 @@ Registry after a real CLI run (450 validated, then the hourly run): 21 boards pr
 | Identity (casing per provider, region, unchanged job keys), parsers, last-known-good cache, schema-change and shrink guards, merge idempotence, provenance, overlap math | pass | **Mocked** (`tests/test_inventory.py`), 145 offline tests in total |
 | Validation outcomes valid / empty / invalid / transient, retries and backoff, breaker, rate limits, SmartRecruiters policy, interleaving, batching | pass | **Mocked** |
 | Activation budget (ceiling, surge cap, relevance order), baselining of imported boards, row-level writes, concurrent importer+poller | pass | **Mocked** |
+| Rotation persistence and wrap, fixed credit budget, stall-based pagination stop, repeated-result counting, independent board/job processing, shared admission (SmartRecruiters parked for every source, activation ceiling across sources, one row and provenance per board), 12-hour boundaries (11:59 / 12:00 / 12:01, baseline exception, day precision), explicit 4 h kept and flagged, pending alert/scoring/hydration retries surviving age | pass | **Mocked** (`tests/test_discovery.py`, plus updated `test_core.py` / `test_hunter.py`): 200 offline tests in total |
+| Real Serper requests (query syntax per slot, `tbs`, credit use, result shape), real hit rate of rotating queries | not verified | needs `SERPER_API_KEY` |
 | Downloading both inventories, parsing, merging, re-import, CLI (`--import-inventory`, `--validate`, `--offline`) | pass | **Live** (public GitHub + ATS endpoints) |
 | Validation against real ATS endpoints, per-provider limits | pass | **Live**, sampled (above) |
 | Transient-failure retry against a real outage | not observed | **Mocked** only (no outage occurred in live runs) |
@@ -37,6 +41,11 @@ Registry after a real CLI run (450 validated, then the hourly run): 21 boards pr
 | Telegram delivery | not verified live | **Mocked**: token not provided (backlogged) |
 
 ## Known gaps / risks
+
+- **Search cannot promise full coverage of the 12-hour window.** Google indexing delay, a rotation that covers at most ~20 of 336 slots per day (default Settings), the per-query page cap, the credit budget and late or skipped GitHub runs all cause misses. Only jobs on polled boards have the hourly-poll guarantee.
+- A full rotation takes about 17 days at best (10 credits x 2 runs/day) (see D-18); slot count depends on Settings.
+- Existing registries: SmartRecruiters boards activated by Serper before this change remain monitored (counted in `Runs.Notes`); a Sheet still holding `Fresh_Window_Hours = 4` keeps 4 and is flagged each run. Sheets without `Discovery_Credit_Budget` use the default; the hidden `Discovery` tab and the new `Runs` columns are created / widened on the next run.
+- Serper credits are counted as one per page request; actual billing was not checked.
 
 - Validation is still draining: ~18,500 candidates unvalidated; the daily workflow works through them (Lever alone needs ~44 min per full pass at 1 req/s).
 - Which boards are monitored depends on a snapshot of title relevance; a waiting board that posts a relevant job tomorrow is only re-checked weekly. Coverage = monitored boards, not all 21,900.

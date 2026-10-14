@@ -27,6 +27,8 @@ BOARD_COLUMNS = [
     "Last_Attempt_At", "Last_Success_At", "Consecutive_Failures", "Last_Job_Count", "Last_Error",
     "Region", "Name", "Validation", "Last_Validated_At", "Relevant_Jobs", "Provenance",
 ]  # fmt: skip
+DISCOVERY_TAB = "Discovery"
+DISCOVERY_COLUMNS = ["Key", "Value", "Updated_At"]  # key -> JSON: rotation cursor, retry queue, last run's queries
 INVENTORY_TAB = "Inventory"
 INVENTORY_COLUMNS = ["Source", "Fetched_At", "SHA256", "Rows", "As_Of", "Status", "Note"]
 RUN_COLUMNS = [
@@ -34,6 +36,8 @@ RUN_COLUMNS = [
     "Verified_Fresh", "Evaluated", "Alerts_Sent", "Alerts_Failed", "Gap_Since_Prev_Run_Min",
     "Max_Board_Gap_Min", "Max_Alert_Lag_Min", "Notes",
     "Boards_Discovered", "Boards_Validated", "Boards_Monitored", "Boards_Activated",
+    "Search_Queries", "Search_Pages", "Search_Credits", "Search_Repeated", "New_Unique_Boards",
+    "Eligible_Boards", "Promoted_Boards", "Verified_Fresh_Matches",
 ]  # fmt: skip
 APPEND_CHUNK = 2000
 
@@ -59,6 +63,14 @@ class RunRecord:
     boards_validated: int = 0  # validated OK (valid or valid-but-empty)
     boards_monitored: int = 0  # actively polled (new + active)
     boards_activated: int = 0  # promoted into monitoring this run
+    search_queries: int = 0  # discovery queries started (rotation slots)
+    search_pages: int = 0  # result pages fetched
+    search_credits: int = 0  # Serper credits spent (1 per page)
+    search_repeated: int = 0  # results already returned earlier in the same run
+    new_unique_boards: int = 0  # boards in the results that the registry had never seen
+    eligible_boards: int = 0  # result boards that passed admission (validated, monitored)
+    promoted_boards: int = 0  # result boards promoted into monitoring this run
+    verified_fresh_matches: int = 0  # unique result jobs verified fresh and matching the title gate
 
     def to_row(self) -> list[Any]:
         out = []
@@ -81,7 +93,8 @@ class RunRecord:
 
         return cls(row[0], row[1] == "yes", num(2) or 0, num(3) or 0, num(4) or 0, num(5) or 0, num(6) or 0, num(7) or 0,
                    num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
-                   num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0)  # fmt: skip
+                   num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
+                   *(num(i) or 0 for i in range(19, 27)))  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
@@ -130,7 +143,7 @@ class SheetState:
         tabs = {w.title: w for w in self.sh.worksheets()}
         for title, columns, rows in (
             (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
-            (INVENTORY_TAB, INVENTORY_COLUMNS, 50),
+            (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20),
         ):  # fmt: skip
             if title in tabs:
                 continue
@@ -142,18 +155,19 @@ class SheetState:
             except Exception as exc:
                 log.warning("Could not tidy the %s tab: %s", title, exc)
             log.info("Created the hidden %s tab", title)
-        self._widen_boards_header()
+        self._widen_header(BOARDS_TAB, BOARD_COLUMNS)
+        self._widen_header(RUNS_TAB, RUN_COLUMNS)
 
-    def _widen_boards_header(self) -> None:
-        """A registry created before provenance/validation columns gets the new header names
+    def _widen_header(self, tab: str, columns: list[str]) -> None:
+        """A tab created before newer columns existed gets the new header names
         (header row only; no data row is touched)."""
         try:
-            ws = self.sh.worksheet(BOARDS_TAB)
+            ws = self.sh.worksheet(tab)
             header = ws.row_values(1) if hasattr(ws, "row_values") else []
-            if header and header != BOARD_COLUMNS and header == BOARD_COLUMNS[: len(header)]:
-                ws.update(values=[BOARD_COLUMNS], range_name="A1", value_input_option="RAW")
+            if header and header != columns and header == columns[: len(header)]:
+                ws.update(values=[columns], range_name="A1", value_input_option="RAW")
         except Exception as exc:  # cosmetic: rows are read positionally either way
-            log.warning("Could not widen the Boards header: %s", exc)
+            log.warning("Could not widen the %s header: %s", tab, exc)
 
     def load_boards(self) -> dict[str, BoardRecord]:
         rows = self.sh.worksheet(BOARDS_TAB).get_all_values()[1:]
@@ -212,6 +226,19 @@ class SheetState:
         rows = self.sh.worksheet(RUNS_TAB).get_all_values()[1:]
         return [r for r in (RunRecord.from_row(x) for x in rows) if r]
 
+    # -- discovery bookkeeping (rotation cursor, hydration retry queue, last run's queries)
+    def load_discovery_state(self) -> dict[str, str]:
+        rows = self.sh.worksheet(DISCOVERY_TAB).get_all_values()[1:]
+        return {r[0]: r[1] for r in rows if len(r) >= 2 and r[0]}
+
+    def save_discovery_state(self, values: dict[str, str], stamp: str) -> None:
+        """Rewrite the (tiny) tab body in one request. Keys are never removed, only overwritten,
+        so a shorter body can never leave stale rows behind."""
+        ws = self.sh.worksheet(DISCOVERY_TAB)
+        rows = [[k, v[:45000], stamp] for k, v in sorted(values.items())]
+        if rows:
+            ws.update(values=rows, range_name="A2", value_input_option="RAW")
+
     # -- inventory bookkeeping (last-known-good metadata per source)
     def load_inventory_meta(self) -> dict[str, dict[str, str]]:
         rows = self.sh.worksheet(INVENTORY_TAB).get_all_values()[1:]
@@ -236,7 +263,8 @@ class CsvState:
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         for title, columns in (
-            (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS)
+            (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS),
+            (DISCOVERY_TAB, DISCOVERY_COLUMNS),
         ):
             p = self._path(title)
             if not p.exists() or p.stat().st_size == 0:
@@ -283,6 +311,18 @@ class CsvState:
 
     def load_runs(self) -> list[RunRecord]:
         return [r for r in (RunRecord.from_row(x) for x in self._rows(RUNS_TAB)) if r]
+
+    def load_discovery_state(self) -> dict[str, str]:
+        return {r[0]: r[1] for r in self._rows(DISCOVERY_TAB) if len(r) >= 2 and r[0]}
+
+    def save_discovery_state(self, values: dict[str, str], stamp: str) -> None:
+        p = self._path(DISCOVERY_TAB)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(DISCOVERY_COLUMNS)
+            w.writerows([k, v, stamp] for k, v in sorted(values.items()))
+        os.replace(tmp, p)
 
     def load_inventory_meta(self) -> dict[str, dict[str, str]]:
         return {r[0]: dict(zip(INVENTORY_COLUMNS[1:], list(r[1:]) + [""] * 6)) for r in self._rows(INVENTORY_TAB) if r and r[0]}

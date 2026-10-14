@@ -6,6 +6,7 @@ All mocked (no network, no credentials). See tests/test_core.py for the polling/
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timezone
 import os
 import sys
 import tempfile
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import boards as bd  # noqa: E402
 import freshness as fr  # noqa: E402
+import discovery as dsc  # noqa: E402
 import hunter as h  # noqa: E402
 import ledger as lg  # noqa: E402
 import pipeline as pl  # noqa: E402
@@ -73,42 +75,67 @@ class QueryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             h.build_queries(settings(roles=[]))
 
-    def search_bodies(self, **cfg_kw: object) -> list[dict]:
-        cfg = h.replace(h.Config.from_env(), search_api_key="k", search_pages=1, **cfg_kw)
+    def post_bodies(self, query: "dsc.Query", **cfg_kw: object) -> list[dict]:
+        cfg = h.replace(h.Config.from_env(), search_api_key="k", **cfg_kw)
         resp = mock.Mock()
         resp.json.return_value = {"organic": []}
         with mock.patch.object(h.requests, "post", return_value=resp) as post:
-            h.search_ats(cfg, ["q1", "q2"])
+            h.search_page(cfg, query, 1)
         return [c.kwargs["json"] for c in post.call_args_list]
 
-    def test_search_tbs_defaults_to_three_day_window_and_can_be_disabled(self) -> None:
+    def test_search_page_sends_the_query_window_and_never_num(self) -> None:
+        body = self.post_bodies(dsc.Query("q", "site:x", "qdr:d3"))[0]
+        self.assertEqual((body["q"], body["tbs"], body["page"]), ("site:x", "qdr:d3", 1))
+        self.assertNotIn("num", body)  # free tier rejects num > 10
+        self.assertNotIn("tbs", self.post_bodies(dsc.Query("q", "site:x", ""))[0])  # only the manual backfill is unfiltered
+
+    def test_scheduled_discovery_can_never_become_unfiltered(self) -> None:
         with mock.patch.dict(os.environ):
             os.environ.pop("SEARCH_TBS", None)
             self.assertEqual(h.Config.from_env().search_tbs, "qdr:d3")
-        for body in self.search_bodies(search_tbs="qdr:d3"):
-            self.assertEqual(body["tbs"], "qdr:d3")
-            self.assertNotIn("num", body)  # free tier rejects num > 10
-        for off in ("none", "off", ""):
-            for body in self.search_bodies(search_tbs=off):
-                self.assertNotIn("tbs", body)
+        base = h.Config.from_env()
+        for off in ("none", "off", "", "  "):
+            self.assertEqual(h.scheduled_tbs(h.replace(base, search_tbs=off)), "qdr:d3")
+        self.assertEqual(h.scheduled_tbs(h.replace(base, search_tbs="qdr:d")), "qdr:d")  # an explicit narrower window is honoured
         with mock.patch.dict(os.environ, {"SEARCH_TBS": ""}):  # blank repository variable = default
             self.assertEqual(h.Config.from_env().search_tbs, "qdr:d3")
 
-    def test_discovery_uses_unfiltered_search_for_boards_and_window_for_jobs(self) -> None:
-        cfg = h.replace(h.Config.from_env(), search_api_key="k", search_tbs="qdr:d3", search_pages=1)
-        seen_tbs: list[str] = []
+    def test_rotation_slots_cover_every_site_role_and_location(self) -> None:
+        s = settings(roles=["Marketing", "Social Media"], locations=["Austin", "US Remote", "Remote"])
+        slots = h.rotation_slots(s)
+        self.assertEqual(len(slots), len(h.ATS_SITES) * 2 * 2)  # both "remote" spellings collapse to one location
+        self.assertEqual(len({sl.id for sl in slots}), len(slots))
+        self.assertEqual({sl.site for sl in slots[: len(h.ATS_SITES)]}, set(h.ATS_SITES))  # consecutive slots span providers
+        self.assertEqual({sl.location for sl in slots}, {"Austin", "Remote"})
 
-        def fake_search(c: h.Config, queries: list[str]) -> list[h.SearchHit]:
-            seen_tbs.append(c.search_tbs)
-            if c.search_tbs:
-                return [h.SearchHit("https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000?utm_source=x", "Marketing Intern")]
-            return [h.SearchHit("https://boards.greenhouse.io/oldco/jobs/5", "x"), h.SearchHit("https://jobs.lever.co/acme", "listing")]
+    def test_slot_query_is_one_site_one_role_one_location_within_the_word_limit(self) -> None:
+        sl = dsc.Slot("jobs.lever.co", "Social Media", "Austin")
+        q = h.slot_query(sl, settings())
+        self.assertIn("site:jobs.lever.co", q)
+        self.assertIn('intitle:"Social Media"', q)
+        self.assertIn("Austin", q)
+        self.assertNotIn("greenhouse", q)
+        self.assertLessEqual(h.count_words(q), h.GOOGLE_QUERY_WORD_LIMIT)
 
-        with mock.patch.object(h, "search_ats", side_effect=fake_search):
-            boards, jobs = h.discover_serper(cfg, settings())
-        self.assertEqual(seen_tbs, ["", "qdr:d3"])
-        self.assertEqual({b.key for b in boards}, {"greenhouse|oldco", "lever|acme"})
-        self.assertEqual([j.ident.key for j in jobs], ["lever|acme|123e4567-e89b-12d3-a456-426614174000"])
+    def test_scheduled_discovery_is_windowed_and_budgeted_and_backfill_is_the_only_unfiltered_path(self) -> None:
+        cfg = h.replace(h.Config.from_env(), search_api_key="k", search_tbs="qdr:d3")
+        seen: list[tuple[str, str]] = []
+
+        def fake_page(c: h.Config, q: "dsc.Query", page: int) -> list[h.SearchHit]:
+            seen.append((q.id, q.tbs))
+            return []
+
+        ctx = pl.DiscoveryContext(datetime(2026, 10, 14, 12, tzinfo=timezone.utc), dsc.RotationState(), lambda b: True, lambda i: True)
+        s = settings(roles=["Marketing"], locations=["Austin"])
+        with mock.patch.object(h, "search_page", side_effect=fake_page):
+            scheduled = h.make_discovery(cfg, h.replace(s, discovery_credit_budget=4))(ctx)
+            self.assertEqual({tbs for _, tbs in seen}, {"qdr:d3"})
+            self.assertEqual((scheduled.kind, scheduled.credits, scheduled.slots_used), ("rotation", 4, 4))  # one empty page per query, budget-bounded
+            seen.clear()
+            manual = h.make_discovery(cfg, s, backfill=True)(ctx)
+        self.assertEqual(manual.kind, "backfill")
+        self.assertEqual({tbs for _, tbs in seen}, {""})
+        self.assertTrue(all(q_id.startswith("backfill:") for q_id, _ in seen))
 
 
 # --------------------------------------------------------------------------- hydration
@@ -262,7 +289,10 @@ class EvaluatorTests(unittest.TestCase):
         assert listed is not None
         self.assertEqual((listed.published, listed.updated), ("", "2026-10-14"))  # last-modified is never publication
         hyd = h.make_serper_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.TransientError("t")))
-        self.assertIsNone(hyd(sj))
+        with self.assertRaises(pl.RetryableHydration):  # temporary: queued for a retry, not dropped
+            hyd(sj)
+        hyd = h.make_serper_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.ClosedPosting("gone")))
+        self.assertIsNone(hyd(sj))  # closed: nothing to retry
 
 
 # --------------------------------------------------------------------------- Groq
@@ -431,14 +461,14 @@ class SheetTests(unittest.TestCase):
     def test_bootstrap_creates_user_tabs_and_hidden_state_tabs(self) -> None:
         sh = FakeSpreadsheet([FakeWorksheet("Sheet1", [])])
         sheet_store(sh).bootstrap("MY RESUME")
-        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory"})
+        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory", "Discovery"})
         self.assertEqual(sh.deleted, ["Sheet1"])
         by_key = {r[0]: r[1] for r in sh.tabs["Settings"].values[1:]}
-        self.assertEqual((by_key["Resume_Text"], by_key["Min_Alert_Score"], by_key["Fresh_Window_Hours"], by_key["Discovery_Every_Hours"]), ("MY RESUME", "70", "4", "12"))
+        self.assertEqual((by_key["Resume_Text"], by_key["Min_Alert_Score"], by_key["Fresh_Window_Hours"], by_key["Discovery_Every_Hours"]), ("MY RESUME", "70", "12", "12"))
         self.assertEqual(sh.tabs["Job Tracker"].values[0], h.TRACKER_COLUMNS)
         self.assertEqual(h.TRACKER_COLUMNS[8], "Apply_URL")  # column I
         self.assertEqual(h.TRACKER_COLUMNS[-2:], ["Freshness", "Source"])
-        for hidden in ("Boards", "Events", "Runs", "Inventory"):
+        for hidden in ("Boards", "Events", "Runs", "Inventory", "Discovery"):
             self.assertTrue(sh.tabs[hidden].hidden, hidden)
         self.assertFalse(sh.tabs["Job Tracker"].hidden or sh.tabs["Settings"].hidden)
 
@@ -528,5 +558,40 @@ class AlertTests(unittest.TestCase):
         self.assertFalse(h.send_alert(cfg, job()))
 
 
+class DisplayTimeTests(unittest.TestCase):
+    def test_tracker_times_are_central_12_hour(self) -> None:
+        self.assertEqual(h.display_time("2026-10-14T21:13:28Z"), "10/14/2026 04:13 PM")  # CDT in October
+        self.assertEqual(h.display_time("2026-01-15T18:05:00Z"), "01/15/2026 12:05 PM")  # CST in winter
+        self.assertEqual(h.display_time("2026-10-14 21:25"), "10/14/2026 04:25 PM")  # legacy Date_Found (UTC)
+        self.assertEqual(h.display_time("2026-10-14"), "10/14/2026")  # day precision: no invented time
+        self.assertEqual((h.display_time(""), h.display_time("n/a")), ("", "n/a"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_timezone_resolution_prefers_the_user_then_the_sheet_then_the_default(self) -> None:
+        tz, source, warn = h.resolve_timezone("America/New_York", "America/Los_Angeles")
+        self.assertEq(str(tz), "America/New_York") if False else None
+        self.assertEqual((str(tz), warn), ("America/New_York", ""))
+        self.assertIn("Settings", source)
+        tz, source, warn = h.resolve_timezone("", "America/Los_Angeles")  # blank setting: detect from the Sheet
+        self.assertEqual((str(tz), warn), ("America/Los_Angeles", ""))
+        self.assertIn("Sheet", source)
+        tz, _, warn = h.resolve_timezone("Mars/Base", "Europe/London")  # bad name: reported, falls through to the Sheet
+        self.assertEqual(str(tz), "Europe/London")
+        self.assertIn("Mars/Base", warn)
+        self.assertEqual(str(h.resolve_timezone("", None)[0]), "America/Chicago")
+        self.assertEqual(h.display_time("2026-10-14T21:13:28Z", h.resolve_timezone("America/Los_Angeles", None)[0]), "10/14/2026 02:13 PM")
+
+    def test_tracker_rows_use_the_stores_zone_and_unreadable_sheet_zone_is_not_fatal(self) -> None:
+        sh = FakeSpreadsheet([])
+        store = sheet_store(sh)
+        store.display_tz = h.ZoneInfo("America/New_York")
+        row = h.JobRow("To Apply", 80, "Acme", "Intern", "Remote", "v", "", "https://u", "2026-10-14T21:13:28Z")
+        self.assertEqual(row.cells(tz=store.display_tz)[1], "10/14/2026 05:13 PM")
+        sh.timezone = "Asia/Tokyo"  # type: ignore[attr-defined]
+        self.assertEqual(h.SheetStore.sheet_timezone(store), "Asia/Tokyo")
+        del sh.timezone
+        self.assertIsNone(h.SheetStore.sheet_timezone(store))  # FakeSpreadsheet has no attribute: handled
+

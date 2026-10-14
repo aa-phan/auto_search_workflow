@@ -23,9 +23,10 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,6 +34,7 @@ from bs4 import BeautifulSoup
 import boards as boards_mod
 import eligibility
 import inventory
+import discovery as dsc
 import freshness as fr
 import ledger as lg
 import pipeline as pl
@@ -73,6 +75,8 @@ TRACKER_COLUMNS = [
 ]
 URL_COLUMN = TRACKER_COLUMNS.index("Apply_URL") + 1  # 1-based sheet column (I)
 
+DEFAULT_TZ = ZoneInfo("America/Chicago")  # used only when neither Settings nor the Sheet names a zone
+
 MIN_TRACKER_SCORE = 50  # only jobs at or above this get a visible row in "Job Tracker"
 
 STATUS_APPLY = "To Apply"
@@ -105,7 +109,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 MIN_JD_CHARS = 200
-DEFAULT_SEARCH_TBS = "qdr:d3"  # Serper `tbs`: results Google indexed in the last 3 days
+DEFAULT_SEARCH_TBS = "qdr:d3"  # Serper `tbs`: pages Google indexed in the last 3 days (candidate retrieval only)
 GOOGLE_QUERY_WORD_LIMIT = 30  # Google ignores terms past ~32 words; keep a margin
 MAX_QUERIES = 4
 
@@ -137,8 +141,15 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
     ("Min_Alert_Score", "70", "Jobs scoring at or above this (0-100) are marked 'To Apply' and sent to Telegram."),
     ("Max_Job_Age_Days", "14", "Jobs published more than this many days ago are skipped as stale."),
-    ("Fresh_Window_Hours", "4", "Only jobs published (or first listed) within this many hours trigger a Telegram alert."),
-    ("Discovery_Every_Hours", "12", "How often the app searches Google for new company job boards to watch."),
+    ("Fresh_Window_Hours", "12", "Only jobs whose company-stated publish time is within this many hours trigger a Telegram alert. Separate from how often Google is searched."),
+    ("Discovery_Every_Hours", "12", "How often the app runs its rotating Google search for new company job boards (separate from the freshness window above)."),
+    ("Discovery_Credit_Budget", "10", "Most search credits (one per results page) one Google discovery run may spend. A hard cap."),
+    (
+        "Timezone",
+        "",
+        "Your time zone for the dates in the tracker, e.g. America/Chicago, America/New_York, America/Los_Angeles. "
+        "Leave blank to use this Google Sheet's own time zone (File > Settings).",
+    ),
     ("Max_Active_Boards", "500", "Most company boards checked every hour. Imported boards join gradually, best matches first, up to this limit."),
     ("Max_New_Boards_Per_Run", "50", "Most new boards added to the hourly checks in a single run (each one is read once as a starting point)."),
 ]
@@ -166,8 +177,10 @@ class Settings:
     locations: list[str]
     min_score: int
     max_age_days: int
-    fresh_window_hours: int = 4
+    fresh_window_hours: int = fr.DEFAULT_FRESH_WINDOW_HOURS
     discovery_every_hours: int = 12
+    discovery_credit_budget: int = dsc.DEFAULT_CREDIT_BUDGET
+    timezone: str = ""
     max_active_boards: int = 500
     max_new_boards_per_run: int = 50
 
@@ -186,8 +199,10 @@ class Settings:
             locations=_split_list(pick("Target_Locations")),
             min_score=_int_or(pick("Min_Alert_Score"), 70),
             max_age_days=_int_or(pick("Max_Job_Age_Days"), 14),
-            fresh_window_hours=max(1, _int_or(pick("Fresh_Window_Hours"), 4)),
+            fresh_window_hours=max(1, _int_or(pick("Fresh_Window_Hours"), fr.DEFAULT_FRESH_WINDOW_HOURS)),
             discovery_every_hours=max(1, _int_or(pick("Discovery_Every_Hours"), 12)),
+            discovery_credit_budget=max(1, _int_or(pick("Discovery_Credit_Budget"), dsc.DEFAULT_CREDIT_BUDGET)),
+            timezone=pick("Timezone"),
             max_active_boards=max(1, _int_or(pick("Max_Active_Boards"), 500)),
             max_new_boards_per_run=max(1, _int_or(pick("Max_New_Boards_Per_Run"), 50)),
         )
@@ -195,6 +210,23 @@ class Settings:
     @property
     def stale_status(self) -> str:
         return f"Stale (>{self.max_age_days}d old)"
+
+
+LEGACY_FRESH_WINDOW_HOURS = 4  # the default before the 12-hour window; kept if the user still has it
+
+
+def settings_notes(raw: dict[str, str]) -> list[str]:
+    """Configuration that needs the user's attention. Nothing is changed for them: an explicit
+    value always wins, but a four-hour window left over from the old default is called out."""
+    notes = []
+    for key in ("Fresh_Window_Hours",):
+        value = (raw.get(key) or "").strip() or (os.getenv(key.upper()) or "").strip()
+        if _int_or(value, 0) == LEGACY_FRESH_WINDOW_HOURS:
+            notes.append(
+                f"{key} is {LEGACY_FRESH_WINDOW_HOURS} (the old default; the new default is {fr.DEFAULT_FRESH_WINDOW_HOURS}) - "
+                f"kept as configured; change it in Settings to use {fr.DEFAULT_FRESH_WINDOW_HOURS}"
+            )
+    return notes
 
 
 def excluded_title_regex(words: list[str]) -> re.Pattern[str] | None:
@@ -332,53 +364,91 @@ def build_queries(s: Settings, *, limit: int = GOOGLE_QUERY_WORD_LIMIT, max_quer
 class SearchHit:
     url: str
     title: str = ""
-    date: str = ""  # Serper's `date` (often null for ATS pages)
+    date: str = ""  # Serper's `date` (often null for ATS pages); never used as a publication time
 
 
-def search_ats(cfg: Config, queries: list[str]) -> list[SearchHit]:
-    """Run every query (paged); one failing query/page is logged and skipped.
+def scheduled_tbs(cfg: Config) -> str:
+    """Scheduled discovery is ALWAYS date-windowed. A blank/none/off SEARCH_TBS cannot turn it
+    into an unfiltered search (that is the manual --backfill only)."""
+    tbs = cfg.search_tbs.strip()
+    if tbs.lower() in {"", "none", "off"}:
+        log.warning("SEARCH_TBS disables the date window; scheduled discovery keeps %s (use --backfill for unfiltered searches)", DEFAULT_SEARCH_TBS)
+        return DEFAULT_SEARCH_TBS
+    return tbs
 
-    Layer 1: results are limited to a sliding window (`cfg.search_tbs`, default qdr:d3) so
-    they rotate with newly indexed pages. Google's window follows crawl/edit dates, so an old
-    page that was just edited can still slip through; Layer 2 (the ATS publication date in
-    hydrate_posting / process) is the authoritative freshness check.
-    """
+
+def search_page(cfg: Config, query: dsc.Query, page: int) -> list[SearchHit]:
+    """One Serper request = one results page = one credit. Raises on any failure."""
     if not cfg.search_api_key:
         raise RuntimeError("SERPER_API_KEY is not set")
-    hits: list[SearchHit] = []
-    failures = 0
-    for query in queries:
-        log.info("Search: %s", query)
-        for page in range(1, cfg.search_pages + 1):
-            body: dict[str, Any] = {"q": query, "page": page}
-            if cfg.serper_num > 0:
-                body["num"] = cfg.serper_num
-            if cfg.search_tbs.lower() not in {"", "none", "off"}:
-                body["tbs"] = cfg.search_tbs
-            try:
-                resp = requests.post(
-                    SERPER_URL,
-                    headers={"X-API-KEY": cfg.search_api_key, "Content-Type": "application/json"},
-                    json=body,
-                    timeout=HTTP_TIMEOUT,
-                )
-                resp.raise_for_status()
-            except requests.RequestException as exc:
-                failures += 1
-                log.warning("Search failed (page %d): %s", page, exc)
-                break
-            organic = resp.json().get("organic", [])
-            hits.extend(
-                SearchHit(r["link"], r.get("title") or "", str(r.get("date") or ""))
-                for r in organic
-                if r.get("link")
-            )
-            if len(organic) < 10:  # last page
-                break
-    if failures and not hits:
-        raise RuntimeError("every search request failed (check SERPER_API_KEY / Serper credits)")
-    log.info("Search (tbs=%s) returned %d URLs across %d queries", cfg.search_tbs or "none", len(hits), len(queries))
-    return hits
+    body: dict[str, Any] = {"q": query.text, "page": page}
+    if cfg.serper_num > 0:
+        body["num"] = cfg.serper_num
+    if query.tbs:
+        body["tbs"] = query.tbs
+    resp = requests.post(
+        SERPER_URL, headers={"X-API-KEY": cfg.search_api_key, "Content-Type": "application/json"}, json=body, timeout=HTTP_TIMEOUT
+    )
+    resp.raise_for_status()
+    return [SearchHit(r["link"], r.get("title") or "", str(r.get("date") or "")) for r in resp.json().get("organic", []) if r.get("link")]
+
+
+def rotation_slots(s: Settings) -> list[dsc.Slot]:
+    """Site x role x location combinations to rotate through (locations as they appear in postings)."""
+    if not s.roles:
+        raise RuntimeError("Target_Roles is empty; nothing to search for")
+    locs: list[str] = []
+    for x in s.locations:  # postings say "Remote - US", rarely "US Remote": search plain Remote
+        term = "Remote" if "remote" in x.lower() else x
+        if term not in locs:
+            locs.append(term)
+    return dsc.make_slots(ATS_SITES, s.roles, locs)
+
+
+def slot_query(slot: dsc.Slot, s: Settings, *, limit: int = GOOGLE_QUERY_WORD_LIMIT) -> str:
+    """Query text for one rotation slot: one ATS site, one role, level words, one location, plus
+    as many excluded-title terms as fit Google's word limit (the rest are enforced locally)."""
+    parts = [f"site:{slot.site}", _term(slot.role, "intitle:")]
+    if s.levels:
+        parts.append(_group([_term(x, "intitle:") for x in s.levels]))
+    if slot.location:
+        parts.append(_term(slot.location))
+    query = " ".join(parts)
+    for w in s.excluded:
+        term = _term(w, "-intitle:")
+        if count_words(query + " " + term) > limit:
+            break
+        query += " " + term
+    return query
+
+
+def make_discovery(cfg: Config, s: Settings, *, backfill: bool = False, backfill_credits: int = 12) -> Callable[[pl.DiscoveryContext], dsc.DiscoveryResult]:
+    """The discovery callable the pipeline runs when discovery is due (or forced).
+
+    Scheduled: the next slots of the persistent rotation, each date-windowed (qdr:d3), within
+    `Discovery_Credit_Budget` credits. Backfill (manual `--backfill` only): the old broad
+    queries WITHOUT the date window, boards only (undated results are not job candidates)."""
+
+    def run(ctx: pl.DiscoveryContext) -> dsc.DiscoveryResult:
+        def fetch_page(q: dsc.Query, page: int) -> list[SearchHit]:
+            return search_page(cfg, q, page)
+
+        if backfill:
+            queries = [dsc.Query(f"backfill:{i + 1}", q, "") for i, q in enumerate(build_queries(s))]
+            return dsc.run_queries(
+                queries, fetch_page, budget=backfill_credits, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
+                max_pages=max(cfg.search_pages, 3), kind=dsc.KIND_BACKFILL, take_jobs=False,
+            )  # fmt: skip
+        tbs = scheduled_tbs(cfg)
+        slots = rotation_slots(s)
+        chosen = dsc.plan_slots(ctx.rotation, slots, s.discovery_credit_budget)  # >= 1 credit each: never more than the budget
+        queries = [dsc.Query(sl.id, slot_query(sl, s), tbs) for sl in chosen]
+        return dsc.run_queries(
+            queries, fetch_page, budget=s.discovery_credit_budget, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
+            max_pages=dsc.DEFAULT_MAX_PAGES, stall_pages=dsc.DEFAULT_STALL_PAGES,
+        )  # fmt: skip
+
+    return run
 
 
 # --------------------------------------------------------------------------- dates
@@ -939,6 +1009,7 @@ class JobRow:
     posted: str = ""
     freshness: str = ""
     source: str = ""
+    late: str = ""  # set when a retried alert is delivered after the freshness window
 
     @property
     def label(self) -> str:
@@ -946,11 +1017,11 @@ class JobRow:
             return f"{self.company} — {self.title}"
         return self.title or self.company or self.url
 
-    def cells(self, found: str | None = None) -> list[Any]:
+    def cells(self, found: str | None = None, tz: tzinfo = DEFAULT_TZ) -> list[Any]:
         """Row in TRACKER_COLUMNS order. Text is neutralized against formula injection."""
         return [
-            found or _now(),
-            self.posted,
+            found or _now(tz),
+            display_time(self.posted, tz),
             self.status,
             "" if self.score is None else self.score,
             _safe_cell(self.label),
@@ -972,7 +1043,7 @@ class JobRow:
         return cls(
             str(p.get("status", "")), p.get("score"), str(p.get("company", "")), str(p.get("title", "")),
             str(p.get("location", "")), str(p.get("verdict", "")), str(p.get("gaps", "")), str(p.get("url", "")),
-            str(p.get("posted", "")), str(p.get("freshness", "")), str(p.get("source", "")),
+            str(p.get("posted", "")), str(p.get("freshness", "")), str(p.get("source", "")), str(p.get("late", "")),
         )  # fmt: skip
 
 
@@ -981,8 +1052,45 @@ def is_visible(row: JobRow, min_alert_score: int) -> bool:
     return row.score is not None and row.score >= min(MIN_TRACKER_SCORE, min_alert_score)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+DISPLAY_FORMAT = "%m/%d/%Y %I:%M %p"
+
+
+def resolve_timezone(setting: str, sheet_tz: str | None) -> tuple[tzinfo, str, str]:
+    """The zone for tracker dates: the user's `Timezone` setting, else the Google Sheet's own
+    time zone, else US Central. Returns (zone, where it came from, a warning or "").
+
+    The script runs on a server, so it cannot see a viewer's browser zone; the Sheet's zone is
+    the closest automatic signal (it is the owner's, set at creation). A bad name is reported,
+    never fatal."""
+    warning = ""
+    for name, source in ((setting.strip(), "Settings > Timezone"), ((sheet_tz or "").strip(), "the Google Sheet's time zone")):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name), source, warning
+        except (ZoneInfoNotFoundError, ValueError):
+            warning += f"{source} '{name}' is not a valid time zone name (like America/Chicago); "
+    return DEFAULT_TZ, "the default (US Central)", warning.strip("; ")
+
+
+def display_time(value: str, tz: tzinfo = DEFAULT_TZ) -> str:
+    """Tracker display of a stored UTC time: 'MM/DD/YYYY hh:MM AM/PM' in `tz`.
+
+    A date-only value (day-precision sources such as Workable) is shown as the date alone: no
+    time of day is invented. Anything unparseable is returned unchanged."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    dt, precision = fr.parse_instant(text.replace(" ", "T", 1) if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", text) else text)
+    if dt is None:
+        return value
+    if precision == fr.DAY:
+        return dt.strftime("%m/%d/%Y")
+    return dt.astimezone(tz).strftime(DISPLAY_FORMAT)
+
+
+def _now(tz: tzinfo = DEFAULT_TZ) -> str:
+    return datetime.now(timezone.utc).astimezone(tz).strftime(DISPLAY_FORMAT)
 
 
 def _safe_cell(value: str) -> str:
@@ -1010,12 +1118,22 @@ class SheetStore:
     """Google Sheet: Settings (user-edited), Job Tracker (append-only, user-facing), plus hidden
     state tabs (Boards, Events, Runs) managed by `SheetState`."""
 
+    display_tz: tzinfo = DEFAULT_TZ  # set from Settings / the Sheet's own zone at startup
+
     def __init__(self, sheet_id: str, credentials: str) -> None:
         import gspread
 
         self.sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         self.sh = gspread.service_account_from_dict(load_service_account(credentials)).open_by_key(sheet_id)
         self.state = SheetState(self.sh)
+
+    def sheet_timezone(self) -> str | None:
+        """The spreadsheet's own time zone (File > Settings), if Google reports one."""
+        try:
+            return str(self.sh.timezone or "") or None
+        except Exception as exc:
+            log.warning("Could not read the Sheet's time zone: %s", exc)
+            return None
 
     # -- bootstrap
     def bootstrap(self, resume_text: str) -> None:
@@ -1091,7 +1209,7 @@ class SheetStore:
     def append_jobs(self, rows: list[JobRow]) -> None:
         if rows:
             self.sh.worksheet(TRACKER_TAB).append_rows(
-                [r.cells() for r in rows], value_input_option="USER_ENTERED", table_range="A1"
+                [r.cells(tz=self.display_tz) for r in rows], value_input_option="USER_ENTERED", table_range="A1"
             )
 
 
@@ -1100,6 +1218,11 @@ class CsvStore:
     state/*.csv (Boards, Events, Runs)."""
 
     sheet_url = ""
+    display_tz: tzinfo = DEFAULT_TZ
+
+    def sheet_timezone(self) -> str | None:
+        return None
+
     LEGACY = {  # old column -> new column
         "Date_Found_UTC": "Date_Found", "Score": "AI_Score", "Status": "My_Status",
         "Company_or_Title": "Company_and_Title", "Verdict": "AI_Verdict", "URL": "Apply_URL",
@@ -1135,7 +1258,7 @@ class CsvStore:
 
     def append_jobs(self, rows: list[JobRow]) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerows(r.cells() for r in rows)
+            csv.writer(fh).writerows(r.cells(tz=self.display_tz) for r in rows)
 
 
 def make_store(cfg: Config) -> SheetStore | CsvStore:
@@ -1162,6 +1285,7 @@ def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
             f"⭐ Score: <b>{row.score}/100</b>",
             f"🕒 {esc(FRESHNESS_LABELS.get(row.freshness, 'Freshness unknown'))}"
             + (f" · posted {esc(row.posted)}" if row.posted else ""),
+            *([f"⏱ {esc(row.late)}"] if row.late else []),
             f"💬 {esc(row.verdict)}",
             f"⚠️ Gaps: {esc(row.gaps or 'None')}",
             f'🔗 <a href="{esc(row.url, quote=True)}">Apply here</a>',
@@ -1192,6 +1316,7 @@ def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
                 "location": row.location,
                 "posted": row.posted,
                 "freshness": row.freshness,
+                "late": row.late,
                 "url": row.url,
                 "tracker": sheet_url,
             },
@@ -1278,13 +1403,16 @@ def make_evaluator(
 
 
 def make_serper_hydrator(hydrate: Callable[[AtsRef], Posting] | None = None) -> Callable[[pl.SerperJob], ListedJob | None]:
-    """For jobs found only by search: read the ATS for an authoritative date before observing."""
+    """For jobs found only by search: read the ATS for an authoritative date before observing.
+    A closed posting returns None; a temporary failure raises RetryableHydration (queued)."""
     hydrate = hydrate or hydrate_posting
 
     def hydrate_listed(sj: pl.SerperJob) -> ListedJob | None:
         try:
             p = hydrate(ref_for(sj.ident, sj.url))
-        except Exception as exc:  # closed/transient: not recorded, search will surface it again
+        except TransientError as exc:
+            raise pl.RetryableHydration(str(exc)) from exc
+        except Exception as exc:  # closed or unreadable: not recorded; a later search result can surface it again
             log.info("Search-found job not hydrated (%s): %s", sj.ident.key, exc)
             return None
         creation = p.posted_source not in {"", "updated_at", "search_result"}
@@ -1295,25 +1423,6 @@ def make_serper_hydrator(hydrate: Callable[[AtsRef], Posting] | None = None) -> 
         )  # fmt: skip
 
     return hydrate_listed
-
-
-def discover_serper(cfg: Config, s: Settings) -> tuple[list[BoardId], list[pl.SerperJob]]:
-    """Discovery loop. (1) Unfiltered searches surface established boards for the registry.
-    (2) A date-windowed search (cfg.search_tbs, default qdr:d3) supplies recently indexed jobs."""
-    queries = build_queries(s)
-    boards: dict[str, BoardId] = {}
-    jobs: dict[str, pl.SerperJob] = {}
-    for hits, want_jobs in (
-        (search_ats(replace(cfg, search_tbs="", search_pages=max(cfg.search_pages, 3)), queries), False),
-        (search_ats(cfg, queries), True),
-    ):
-        for hit in hits:
-            if b := parse_board_url(hit.url):
-                boards.setdefault(b.key, b)
-            if want_jobs and (ident := parse_job_url(hit.url)):
-                jobs.setdefault(ident.key, pl.SerperJob(ident, hit.title, hit.url))
-    log.info("Discovery: %d boards, %d windowed jobs", len(boards), len(jobs))
-    return list(boards.values()), list(jobs.values())
 
 
 def load_resume_file(path: Path = RESUME_PATH) -> str:
@@ -1371,8 +1480,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="evaluate one job URL (identity from the URL) and print the outcome; writes nothing")
     parser.add_argument("--dry-run", action="store_true", help="do not write any state, tracker rows or alerts")
-    parser.add_argument("--discover", action="store_true", help="run the Serper discovery loop now, regardless of schedule")
-    parser.add_argument("--no-tbs", action="store_true", help="discovery without the 3-day search window (unfiltered backfill)")
+    parser.add_argument("--discover", action="store_true", help="run one rotating (date-windowed) Serper discovery now, regardless of schedule")
+    parser.add_argument("--backfill", action="store_true", help="MANUAL ONLY: broad Serper searches without the date window, boards only (never scheduled)")
+    parser.add_argument("--backfill-credits", type=int, default=12, help="search-credit cap for --backfill (default 12)")
     parser.add_argument("--seed", action="append", default=[], type=_seed, metavar="ATS:BOARD", help="register a board manually (repeatable)")
     inv = parser.add_argument_group("inventory (seed the registry from public company lists; never scores or alerts)")
     inv.add_argument("--import-inventory", action="store_true", help="download both inventories and merge new boards into the registry")
@@ -1389,8 +1499,6 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
-    if args.no_tbs:
-        cfg = replace(cfg, search_tbs="")
 
     try:
         if not cfg.groq_api_key and not inventory_mode:
@@ -1406,6 +1514,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     excluded = excluded_title_regex(settings.excluded)
+    config_notes = settings_notes(store.load_settings())
+    store.display_tz, tz_source, tz_warning = resolve_timezone(settings.timezone, store.sheet_timezone())
+    log.info("Tracker dates shown in %s (from %s)", store.display_tz, tz_source)
+    if tz_warning:
+        config_notes.append(tz_warning)
+    for note in config_notes:
+        log.warning("Settings: %s", note)
     if inventory_mode:
         return run_inventory(args, store, settings, excluded)
     groq = GroqClient(cfg)
@@ -1438,7 +1553,10 @@ def main(argv: list[str] | None = None) -> int:
         evaluate=evaluate,
         send_alert=alert,
         title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
-        discover=(lambda: discover_serper(cfg, settings)) if cfg.search_api_key else None,
+        discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.search_api_key else None,
+        rotation_slots=rotation_slots(settings) if settings.roles else [],
+        allow_smartrecruiters=(os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1",
+        config_notes=config_notes,
         hydrate_listed=make_serper_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),
         max_age_days=settings.max_age_days,
@@ -1446,7 +1564,7 @@ def main(argv: list[str] | None = None) -> int:
         max_new_boards_per_run=settings.max_new_boards_per_run,
         max_jobs=cfg.max_jobs,
         discovery_every_hours=settings.discovery_every_hours,
-        force_discovery=args.discover,
+        force_discovery=args.discover or args.backfill,
         seeds=args.seed,
         dry_run=args.dry_run,
     )

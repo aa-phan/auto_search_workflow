@@ -554,6 +554,88 @@ def run_validation(
     return summary
 
 
+# --------------------------------------------------------------------------- admission (every source)
+
+
+@dataclass
+class AdmissionResult:
+    """What one admission pass did. `touched` rows must be persisted by the caller."""
+
+    submitted: int = 0  # unique boards submitted
+    added: int = 0  # not in the registry before
+    rejected: int = 0  # identifier cannot be a board id (never registered)
+    parked: int = 0  # provider policy blocks checking them (SmartRecruiters)
+    validated: int = 0  # validated inline (valid or valid-but-empty)
+    invalid: int = 0
+    transient: int = 0  # left as candidates; the validation workflow retries with backoff
+    touched: dict[str, BoardRecord] = field(default_factory=dict)
+    keys: list[str] = field(default_factory=list)  # registry keys of the submitted boards
+
+
+def admit_boards(
+    registry: dict[str, BoardRecord],
+    found: Iterable[BoardId],
+    *,
+    source: str,
+    now: datetime,
+    fetch: Callable[[BoardId], list[Any]] = bd.fetch_board,
+    title_gate: Callable[[str], str | None] | None = None,
+    allow_smartrecruiters: bool = False,
+    max_inline_validations: int = 40,
+    limiter: HostLimiter | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> AdmissionResult:
+    """The ONE admission path for boards from any source (inventory import, Serper, manual seed).
+
+    Every submitted board gets the same treatment: (1) identifier sanity, (2) registered as an
+    unvalidated `candidate` with provenance (an existing board only gains provenance; its status
+    and history never change), (3) provider policy (SmartRecruiters is parked unless bulk access
+    is allowed), (4) validation through the ATS adapter. Prioritisation and the active-board
+    limits are applied afterwards by `boards.activate_waiting`, the only way into monitoring.
+    Inline validation is bounded; boards past the bound stay candidates for the validation job."""
+    res = AdmissionResult()
+    unique: dict[str, BoardId] = {}
+    for b in found:
+        if not IDENT_RE.match(b.board or "") or b.ats not in SUPPORTED_ATS:
+            res.rejected += 1
+            continue
+        unique.setdefault(b.key, b)
+    res.submitted = len(unique)
+    added, updated = merge_candidates(registry, (Candidate(b, source) for b in unique.values()), now=now, new_status=STATUS_CANDIDATE)
+    res.added = len(added)
+    for rec in (*added, *updated):
+        res.touched[rec.key] = rec
+    res.keys = list(unique)
+    mine = [registry[k] for k in unique]
+
+    for rec in mine:  # provider policy: park, do not poll and do not validate
+        if rec.status in (STATUS_CANDIDATE, STATUS_DEFERRED) and (why := policy_blocks(rec.ats, allow_smartrecruiters=allow_smartrecruiters)):
+            if rec.status != STATUS_DEFERRED or rec.validation != V_DEFERRED:
+                apply_validation(rec, ValidationResult(V_DEFERRED, error=why), now)
+                res.touched[rec.key] = rec
+                res.parked += 1
+
+    due = [r for r in mine if r.status in (STATUS_CANDIDATE, STATUS_DEFERRED) and validation_due(r, now, allow_smartrecruiters=allow_smartrecruiters)]
+    due = interleave_by_ats(sorted(due, key=_priority))[:max_inline_validations]
+    limiter = limiter or HostLimiter(sleep=sleep)
+
+    def check(rec: BoardRecord) -> tuple[BoardRecord, ValidationResult]:
+        return rec, validate_board(rec.board_id, fetch=fetch, limiter=limiter, title_gate=title_gate, retries=2, sleep=sleep)
+
+    if due:
+        with ThreadPoolExecutor(max_workers=min(4, len(due))) as pool:
+            for rec, vr in pool.map(check, due):
+                if apply_validation(rec, vr, now):
+                    res.touched[rec.key] = rec
+                if vr.outcome == V_INVALID:
+                    res.invalid += 1
+                elif vr.outcome == V_TRANSIENT:
+                    res.transient += 1
+                else:
+                    res.validated += 1
+    return res
+
+
 # --------------------------------------------------------------------------- orchestration
 
 

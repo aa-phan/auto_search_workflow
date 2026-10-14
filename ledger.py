@@ -26,7 +26,6 @@ STAGE_EVALUATE, STAGE_ALERT = "evaluate", "alert"
 MAX_ATTEMPTS = 5
 EVENT_COLUMNS = ["Time", "Job_Key", "Event", "Freshness", "Disposition", "Published", "Detail"]
 _DETAIL_LIMIT = 45000  # Google Sheets caps a cell at 50,000 characters
-ALERT_RETRY_WINDOW = timedelta(hours=12)  # a retried alert older than this is no longer "fresh news"
 
 
 def stamp(dt: datetime) -> str:
@@ -111,12 +110,16 @@ def needs_alert(st: JobState, now: datetime) -> bool:
     return True
 
 
-def alert_too_late(st: JobState, now: datetime) -> bool:
-    try:
-        done = datetime.strptime(st.evaluated_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=now.tzinfo)
-    except ValueError:
-        return False
-    return now - done > ALERT_RETRY_WINDOW
+def alert_delay_note(st: JobState, now: datetime, window: timedelta) -> str:
+    """Non-empty when a retried alert is delivered after the freshness window has passed.
+
+    Pending deliveries are never discarded because the job aged: the freshness class was verified
+    at first observation and stays true, but the message must say how late it is."""
+    published, _ = fr.parse_instant(st.last_published)
+    if published is None or now - published <= window:
+        return ""
+    hours = int((now - published).total_seconds() // 3600)
+    return f"delivered late: published about {hours} h ago (verified fresh when first seen)"
 
 
 _PRIORITY = {fr.VERIFIED_FRESH: 0, fr.OBSERVED_NEW: 1, fr.RECENT: 2, fr.UNCERTAIN: 3}
