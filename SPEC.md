@@ -27,7 +27,9 @@ One persistent registry (hidden `Boards` tab) holds every board from every sourc
 
 - **Identity:** provider + region/API host + board identifier. The default region is empty, so existing keys are unchanged. Casing follows the provider: Lever and Workable identifiers are case-sensitive (kept exactly); Greenhouse, Ashby and SmartRecruiters are not (compared lowercase, first-seen spelling used for API calls). Each unique board is polled once, however many sources list it.
 - **Provenance:** every source that listed a board is recorded with its first-seen time; `Discovered_At` is the first time any source knew it; `Last_Validated_At` is the last time its adapter call succeeded.
-- **Statuses:** `candidate` (imported, unvalidated) -> `validated` (exists; waiting for a monitoring slot) -> `new` (activated, not yet baselined) -> `active`. Also `invalid` (404/410), `deferred` (blocked by policy), `disabled` (monitored board that kept failing). Rows are never deleted, and an upstream list dropping a board changes nothing.
+- **Statuses:** `candidate` (imported, unvalidated) -> `validated` (exists; waiting for a monitoring slot) -> `new` (activated, not yet baselined) -> `active`. Also `invalid` (404/410), `deferred` (blocked by policy), `disabled` (monitored board that kept failing). Rows are never deleted, and an upstream list dropping a board changes nothing. A `new` board that already has a baseline is **re-entering** monitoring (it was monitored before, left, and was promoted again): its next successful poll re-establishes the baseline (see "Baselining").
+- **Board evidence (refreshed by every complete, successful hourly poll, from the listing already fetched; no LLM):** `Relevant_Jobs` (unique posting IDs passing the title gate), `Eligible_Jobs` (those whose listing location is not excluded by the US location rule), `Relevance_At`, `Last_Success_At`, `Complete_Polls`, and the activity fields `Last_New_Relevant_At`, `New_Relevant_7d`, `New_Relevant_30d`. A poll is *complete* when it succeeded, was not rejected as a suspicious empty listing, and the adapter did not truncate the listing (SmartRecruiters past 5,000 postings). A partial listing, a failed poll or a suspicious empty listing changes none of these. Open-job counts and new-posting activity are separate facts.
+- **New-posting activity** counts only the first observation of a relevant job by an ordinary board poll (not a baseline or re-entry pass, not a search-found job, not a stale job), at or after the start of the board's current monitoring stint (`Activity_Since`). It is **unknown (blank) until the stint is 7 days old** and a real 0 afterwards: a board with no history is never read as a board with no activity.
 - **Validation outcomes:** `valid` (jobs listed), `valid_empty` (exists, no jobs), `invalid` (404/410), `transient` (timeouts, 5xx, 429, bad payload: retried with backoff, never read as closed).
 - **Imports are additive and idempotent:** re-importing an unchanged inventory writes nothing and never alters polling history, posting IDs, alert state or Serper discoveries. A failed or malformed download keeps the last-known-good copy.
 - **Polling budget:** only `new`/`active` boards are polled. Validated boards are promoted by the poller (the same rule for every source), at most `Max_New_Boards_Per_Run` at a time and never beyond `Max_Active_Boards`, boards with jobs matching the user's targets first. Counts (discovered / validated / monitored) are logged per run.
@@ -75,6 +77,8 @@ Freshness classes (assigned once, at first observation, with the evidence record
 
 **Baselining:** the first successful poll of a newly admitted board records all existing IDs as `baseline`; only jobs whose time-precision source publication time is inside the window are evaluated. Day-precision dates cannot prove a 12-hour window on a first poll, so those stay `baseline`.
 
+**Re-entry:** when a board that left monitoring is promoted again, its next successful poll is a re-entry pass. Already-seen IDs stay as they are (no new `seen` event). For an unseen ID the real board gap applies: a job with a time-precision source date inside the window is `verified_fresh` (alertable); a dated job outside the window is `recent` or `stale` as usual (a future date is `uncertain`); an **undated** job is `baseline` when the gap is longer than the window ("appeared while the board was not monitored; no source date"), never `observed_new` or `verified_fresh`. The pass then re-establishes the baseline and starts a new monitoring stint; re-entry observations are not new-posting activity.
+
 ## State model (separate, individually retryable)
 
 - **Seen**: first observation recorded (with class and evidence).
@@ -85,7 +89,7 @@ A failure at one stage never marks later stages done. Transient failures (timeou
 
 ## Filtering order
 
-1. Cheap checks on listing data (before any fetch): roles keyword in title, level keyword in title, excluded title words, freshness class.
+1. Cheap checks on listing data (before any fetch): roles keyword in title, level keyword in title, excluded title words, freshness class. A space and a hyphen are interchangeable inside a configured term ("Entry Level" matches "Entry-Level"), and when `Target_Levels` contains Intern or Junior, "Internship" and "Jr"/"Jr." also match. A level keyword is still required; seniority exclusions are checked first and unchanged.
 2. Hydrate the full posting from the ATS (authoritative date, location, text).
 3. Hard eligibility rules (deterministic): age, excluded title (full), non-US location, minimum experience >= 4 years, required foreign language.
 4. Resume-fit scoring (Groq) only for postings that pass 1-3.
@@ -98,7 +102,7 @@ A failure at one stage never marks later stages done. Transient failures (timeou
 
 ## Observability
 
-Each run appends a `Runs` row: boards polled/failed, new jobs by class, alerts sent/failed, gap since the previous run, worst board gap, max alert lag. Per-board `Last_Success_At` is kept in `Boards`.
+Each run appends a `Runs` row: boards polled/failed, new jobs by class, alerts sent/failed, gap since the previous run, worst board gap, max alert lag. Per-board `Last_Success_At` is kept in `Boards`, together with its evidence columns (`Eligible_Jobs`, `Relevance_At`, `Activity_Since`, `Complete_Polls`, `Last_New_Relevant_At`, `New_Relevant_7d`, `New_Relevant_30d`) and its pool state (`Pool`, `Pool_Since`, `Trial_Until`, `Trials`, `Weak_Streak`, `Pool_Reason`). Older rows without these columns load with unknown evidence (blank, never 0).
 
 ## Out of scope for now
 

@@ -119,8 +119,13 @@ def classify(
     baseline_pass: bool = False,
     fresh_window: timedelta = timedelta(hours=DEFAULT_FRESH_WINDOW_HOURS),
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+    reentry: bool = False,
 ) -> Freshness:
-    """Classify a job at its first observation from the best available evidence."""
+    """Classify a job at its first observation from the best available evidence.
+
+    `reentry`: the board returned to monitoring after a gap. Jobs that appeared in the gap are
+    judged by source publication evidence only; an undated one cannot be called new (it may have
+    been public for the whole gap), so it becomes baseline unless the gap itself is within the window."""
     age = (now - published) if published else None
     age_min = int(age.total_seconds() // 60) if age is not None else None
     gap_min = int(board_gap.total_seconds() // 60) if board_gap is not None else None
@@ -147,6 +152,10 @@ def classify(
         if age is not None and age > timedelta(days=max_age_days):
             return Freshness(STALE, f"published {age.days} days ago", age_min, gap_min)
         return Freshness(RECENT, f"published {age_min // 60 if age_min is not None else '?'} h ago, outside the {int(fresh_window.total_seconds() // 3600)} h window", age_min, gap_min)
+
+    if reentry and not gap_ok:
+        since = f"last successful poll {gap_min} min earlier" if gap_min is not None else "no earlier successful poll known"
+        return Freshness(BASELINE, f"appeared while the board was not monitored ({since}); no source date", None, gap_min)
 
     if gap_ok:
         return Freshness(OBSERVED_NEW, f"no source date; not on the board {gap_min} min ago, listed now", None, gap_min)

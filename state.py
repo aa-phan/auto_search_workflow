@@ -26,6 +26,9 @@ BOARD_COLUMNS = [
     "Board_Key", "ATS", "Board", "Status", "Discovered_At", "Source", "Baselined_At",
     "Last_Attempt_At", "Last_Success_At", "Consecutive_Failures", "Last_Job_Count", "Last_Error",
     "Region", "Name", "Validation", "Last_Validated_At", "Relevant_Jobs", "Provenance",
+    "Eligible_Jobs", "Relevance_At", "Activity_Since", "Complete_Polls", "Last_New_Relevant_At",
+    "New_Relevant_7d", "New_Relevant_30d", "Pool", "Pool_Since", "Trial_Until", "Trials", "Weak_Streak",
+    "Pool_Reason",
 ]  # fmt: skip
 DISCOVERY_TAB = "Discovery"
 DISCOVERY_COLUMNS = ["Key", "Value", "Updated_At"]  # key -> JSON: rotation cursor, retry queue, last run's queries
@@ -101,7 +104,12 @@ def board_to_row(b: BoardRecord) -> list[Any]:
     return [b.key, b.ats, b.board, b.status, b.discovered_at, b.source, b.baselined_at, b.last_attempt_at,
             b.last_success_at, b.consecutive_failures, b.last_job_count, b.last_error,
             b.region, b.name, b.validation, b.last_validated_at, b.relevant_jobs,
-            json.dumps(b.provenance, separators=(",", ":"), ensure_ascii=False)[:40000]]  # fmt: skip
+            json.dumps(b.provenance, separators=(",", ":"), ensure_ascii=False)[:40000],
+            *("" if v is None else v for v in (
+                b.eligible_jobs, b.relevance_at, b.activity_since, b.complete_polls, b.last_new_relevant_at,
+                b.new_relevant_7d, b.new_relevant_30d, b.pool, b.pool_since, b.trial_until, b.trials, b.weak_streak,
+                b.pool_reason[:200])),
+            ]  # fmt: skip
 
 
 def board_from_row(row: list[str]) -> BoardRecord | None:
@@ -115,6 +123,13 @@ def board_from_row(row: list[str]) -> BoardRecord | None:
         except ValueError:
             return 0
 
+    def maybe(s: str) -> int | None:
+        """A hand-edited or never-measured cell is unknown (None), never an error and never a silent 0."""
+        try:
+            return int(float(s))
+        except ValueError:
+            return None
+
     try:
         prov = json.loads(row[17]) if row[17] else {}
     except ValueError:
@@ -122,6 +137,8 @@ def board_from_row(row: list[str]) -> BoardRecord | None:
     return BoardRecord(
         row[1], row[2], row[4], row[5], row[3] or "new", row[6], row[7], row[8], num(row[9]), num(row[10]), row[11],
         row[12], row[13], row[14], row[15], num(row[16]), prov if isinstance(prov, dict) else {},
+        maybe(row[18]), row[19], row[20], num(row[21]), row[22], maybe(row[23]), maybe(row[24]),
+        row[25], row[26], row[27], num(row[28]), num(row[29]), row[30],
     )  # fmt: skip
 
 

@@ -289,6 +289,20 @@ class EligibilityTests(unittest.TestCase):
         self.assertIn("role", gate("Software Engineering Intern") or "")
         self.assertIn("level", gate("Marketing Strategist") or "")
 
+    def test_title_gate_audit(self) -> None:
+        """D-25: suitable titles the old whole-word, single-spelling match rejected now pass; seniority exclusions
+        and the requirement for a level signal are unchanged."""
+        for t in (
+            "Marketing Coordinator", "Marketing Internship", "Social Media Internship - Summer 2027", "Jr. Content Creator",
+            "Jr Content Creator", "Marketing - Entry Level", "Entry-Level Social Media", "New Grad Marketing Program",
+        ):  # fmt: skip
+            self.assertIsNone(gate(t), t)
+        for t in (
+            "Senior Marketing Internship", "Marketing Lead - Entry Level", "Social Media Marketing", "Marketing Strategist",
+            "Content Creator", "International Marketing Manager",
+        ):  # fmt: skip
+            self.assertIsNotNone(gate(t), t)
+
     def test_hard_gate_is_conservative(self) -> None:
         resume = "Canva, WordPress"
         self.assertIsNone(el.hard_gate("Marketing Intern", "Remote", "Great role. 1-2 years of experience.", resume))

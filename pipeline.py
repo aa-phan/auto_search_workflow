@@ -22,8 +22,9 @@ import discovery as dsc
 import freshness as fr
 import inventory as inv
 import ledger as lg
+import pools
 from boards import (
-    MONITORED, SMARTRECRUITERS, STATUS_ACTIVE, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
+    MONITORED, SMARTRECRUITERS, STATUS_ACTIVE, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
     activate_waiting, fetch_board, poll_boards, registry_counts, apply_poll_result,
 )  # fmt: skip
 from discovery import SerperJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
@@ -219,6 +220,8 @@ def run_cycle(d: Deps) -> RunRecord:
         max_gap: timedelta | None = None
         for res in poll_boards(active, fetch=d.fetch, workers=d.workers):
             was_baselined = bool(res.board.baselined_at)
+            # A board that is `new` but already has a baseline came back after leaving monitoring.
+            reentry = was_baselined and res.board.status == STATUS_NEW
             if res.ok and not res.jobs and res.board.last_job_count > SUSPICIOUS_EMPTY_AFTER:
                 res.ok, res.error = False, "suspicious empty listing (previously had jobs)"
             rec, gap = apply_poll_result(res, now=now)
@@ -232,11 +235,12 @@ def run_cycle(d: Deps) -> RunRecord:
                 max_gap = gap
             unseen = [j for j in res.jobs if not (states.get(j.ident.key) and states[j.ident.key].seen)]
             baseline_pass = not was_baselined
-            if was_baselined and len(unseen) >= FLOOD_MIN_JOBS and len(unseen) > len(res.jobs) / 2:
+            if was_baselined and not reentry and len(unseen) >= FLOOD_MIN_JOBS and len(unseen) > len(res.jobs) / 2:
                 log.warning("Board %s: %d of %d IDs unseen; treating as a re-baseline", rec.key, len(unseen), len(res.jobs))
                 run.notes += f"{rec.key} re-baselined; "
                 baseline_pass = True
-            obs = lg.Observation(now, gap, was_baselined, baseline_pass, "poll", d.fresh_window, d.max_age_days)
+            pass_kind = "baseline" if baseline_pass else "reentry" if reentry else ""
+            obs = lg.Observation(now, gap, was_baselined, baseline_pass, "poll", d.fresh_window, d.max_age_days, pass_kind, reentry)
             for job in res.jobs:
                 st = states.get(job.ident.key)
                 if st and st.seen:
@@ -248,9 +252,24 @@ def run_cycle(d: Deps) -> RunRecord:
                 states[ev.key] = lg.replay([ev])[ev.key]
                 run.new_jobs += 1
                 run.verified_fresh += ev.freshness == fr.VERIFIED_FRESH
-            if baseline_pass and not rec.baselined_at:
+            if (baseline_pass and not rec.baselined_at) or reentry:
+                # A first baseline or a re-entry pass starts a new continuous monitoring stint.
                 rec.baselined_at, rec.status = lg.stamp(now), STATUS_ACTIVE
+                pools.start_stint(rec, now)
+            elif rec.baselined_at and not rec.activity_since:
+                rec.activity_since = rec.baselined_at  # monitored before evidence existed: history starts at its baseline
+            if res.complete:
+                # Relevance and activity evidence only from a complete listing; a truncated one
+                # still gets its new IDs observed above but never changes the board's counts.
+                pools.refresh_relevance(rec, res.jobs, d.title_gate, now)
         run.max_board_gap_min = _minutes(max_gap)
+        # New-relevant-posting counts come from the ledger (first observations on ordinary polls
+        # only). Every monitored board was polled above, so each row is already being written.
+        activity = pools.ActivityIndex.from_states(states)
+        for b in boards.values():
+            if b.status in MONITORED:
+                pools.refresh_activity(b, activity, now)
+                dirty[b.key] = b
         counts = registry_counts(boards)
         run.boards_discovered, run.boards_validated, run.boards_monitored = counts["discovered"], counts["validated"], counts["monitored"]
 

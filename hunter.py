@@ -126,7 +126,7 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
     (
         "Target_Levels",
-        "Coordinator, Associate, Specialist, Intern, Assistant, Junior",
+        "Coordinator, Associate, Specialist, Intern, Assistant, Junior, Entry Level, New Grad",
         "Seniority words that should appear in the job title, separated by commas.",
     ),
     (

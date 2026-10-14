@@ -273,6 +273,16 @@ def parse_smartrecruiters(board: str, items: list[dict[str, Any]]) -> list[Liste
     return out
 
 
+class Listing(list):
+    """A board listing that knows whether it is the WHOLE listing. `complete` is False only when
+    an adapter had to stop early (SmartRecruiters past its paging cap), so counts derived from it
+    must not be treated as the board's real totals. A plain list counts as complete."""
+
+    def __init__(self, items: Iterable[Any] = (), *, complete: bool = True) -> None:
+        super().__init__(items)
+        self.complete = complete
+
+
 def fetch_board(board: BoardId) -> list[ListedJob]:
     """All currently listed jobs on a board. Raises BoardGone (deleted) or BoardError (transient)."""
     url = LIST_APIS[board.ats].format(board=board.board)
@@ -285,15 +295,17 @@ def fetch_board(board: BoardId) -> list[ListedJob]:
     if board.ats == WORKABLE:
         return parse_workable(board.board, _get_json(url))
     items: list[dict[str, Any]] = []  # SmartRecruiters pages at 100
-    offset = 0
+    offset = total = 0
     while True:
         page = _get_json(url, {"limit": 100, "offset": offset})
         content = (page or {}).get("content") or []
         items.extend(content)
         offset += len(content)
-        if not content or offset >= int((page or {}).get("totalFound") or 0) or offset > 5000:
+        total = int((page or {}).get("totalFound") or 0)
+        if not content or offset >= total or offset > 5000:
             break
-    return parse_smartrecruiters(board.board, items)
+    parsed = parse_smartrecruiters(board.board, items)
+    return parsed if offset >= total else Listing(parsed, complete=False)  # stopped at the paging cap: a truncated listing
 
 
 # --------------------------------------------------------------------------- registry
@@ -335,6 +347,20 @@ class BoardRecord:
     last_validated_at: str = ""  # last time the board's adapter call succeeded
     relevant_jobs: int = 0  # listed jobs passing the title gate at the last validation
     provenance: dict[str, Any] = field(default_factory=dict)  # source -> {"first": ts, ...}
+    # Evidence and pool state (D-23, D-26). None = never measured / unknown; 0 = measured zero.
+    eligible_jobs: int | None = None  # relevant listed jobs whose location is not excluded by the US rule
+    relevance_at: str = ""  # when relevant_jobs / eligible_jobs were last measured (complete poll or validation)
+    activity_since: str = ""  # start of the current continuous monitoring stint ("" = no observation history)
+    complete_polls: int = 0  # complete successful polls since activity_since
+    last_new_relevant_at: str = ""  # first observation of the board's latest new relevant posting
+    new_relevant_7d: int | None = None  # new relevant postings first observed in the last 7 days; None = unknown
+    new_relevant_30d: int | None = None  # the same over min(30 days, stint length)
+    pool: str = ""  # "established" | "exploration" | "" (not monitored)
+    pool_since: str = ""  # when it entered its pool, or became waiting / left monitoring
+    trial_until: str = ""  # end of the exploration trial
+    trials: int = 0  # exploration trials started
+    weak_streak: int = 0  # consecutive rebalance cycles as a replacement target (established boards)
+    pool_reason: str = ""  # last admission / graduation / demotion / park reason (max 200 chars)
 
     @property
     def board_id(self) -> BoardId:
@@ -446,6 +472,7 @@ class PollResult:
     ok: bool = False
     gone: bool = False
     error: str = ""
+    complete: bool = True  # False when the adapter truncated the listing: counts are not the board's totals
 
 
 def poll_boards(
@@ -458,7 +485,8 @@ def poll_boards(
 
     def one(rec: BoardRecord) -> PollResult:
         try:
-            return PollResult(rec, fetch(rec.board_id), ok=True)
+            jobs = fetch(rec.board_id)
+            return PollResult(rec, jobs, ok=True, complete=getattr(jobs, "complete", True))
         except BoardGone as exc:
             return PollResult(rec, gone=True, error=str(exc))
         except BoardError as exc:

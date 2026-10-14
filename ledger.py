@@ -145,6 +145,8 @@ class Observation:
     source: str  # "poll" | "serper"
     fresh_window: timedelta = timedelta(hours=fr.DEFAULT_FRESH_WINDOW_HOURS)
     max_age_days: int = fr.DEFAULT_MAX_AGE_DAYS
+    pass_kind: str = ""  # "baseline" | "reentry" | "" (an ordinary poll); recorded so activity counts can exclude it
+    reentry: bool = False  # the board returned to monitoring: gap jobs are judged by source evidence only
 
 
 def observe_new(job: ListedJob, obs: Observation, title_gate: Callable[[str], str | None]) -> Event:
@@ -153,6 +155,7 @@ def observe_new(job: ListedJob, obs: Observation, title_gate: Callable[[str], st
     f = fr.classify(
         published, precision, now=obs.now, board_gap=obs.board_gap, board_baselined=obs.board_baselined,
         baseline_pass=obs.baseline_pass, fresh_window=obs.fresh_window, max_age_days=obs.max_age_days,
+        reentry=obs.reentry,
     )  # fmt: skip
     gate = ""
     if f.cls == fr.BASELINE:
@@ -167,6 +170,8 @@ def observe_new(job: ListedJob, obs: Observation, title_gate: Callable[[str], st
         "location": job.location[:200], "published_field": job.published_field, "precision": precision,
         "evidence": f.reason, "gate": gate, "age_min": f.age_minutes, "gap_min": f.gap_minutes, "updated": job.updated,
     }  # fmt: skip
+    if obs.pass_kind:
+        detail["pass"] = obs.pass_kind
     return Event(stamp(obs.now), job.ident.key, SEEN, f.cls, disposition, fr.iso(published, precision), detail)
 
 

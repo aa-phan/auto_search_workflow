@@ -40,8 +40,27 @@ _LANG_REQ_RE = re.compile(
 )
 
 
-def _term_re(terms: list[str]) -> re.Pattern[str] | None:
-    parts = [re.escape(t.strip()) for t in terms if t.strip()]
+# Morphological variants of level words, applied only when the user's own Target_Levels contains
+# the word (regex fragments). "Internship" and "Jr." are the same level signal as "Intern" and
+# "Junior"; nothing else is widened (D-25).
+_LEVEL_VARIANTS = {"intern": [r"internship"], "junior": [r"jr\.?"]}
+
+
+def _term_pattern(term: str) -> str:
+    """One configured term as a regex: inside the term a space and a hyphen are interchangeable
+    ("Entry Level" also matches "Entry-Level")."""
+    tokens = [re.escape(t) for t in re.split(r"[\s-]+", term.strip()) if t]
+    return r"[\s-]+".join(tokens)
+
+
+def _term_re(terms: list[str], variants: dict[str, list[str]] | None = None) -> re.Pattern[str] | None:
+    parts: list[str] = []
+    for t in terms:
+        if not t.strip():
+            continue
+        parts.append(_term_pattern(t))
+        parts.extend((variants or {}).get(t.strip().lower(), []))
+    parts = [p for p in parts if p]
     if not parts:
         return None
     return re.compile(rf"(?<![A-Za-z0-9])(?:{'|'.join(parts)})s?(?![A-Za-z0-9])", re.I)
@@ -58,7 +77,7 @@ def title_gate(
     """Reject titles that are excluded, or lack a target-role keyword, or lack a level keyword."""
     if excluded and (m := excluded.search(title)):
         return f"excluded title word '{m.group(0)}'"
-    role_re, level_re = _term_re(roles), _term_re(levels)
+    role_re, level_re = _term_re(roles), _term_re(levels, _LEVEL_VARIANTS)
     if role_re and not role_re.search(title):
         return "no target role keyword in the title"
     if require_level and level_re and not level_re.search(title):
@@ -75,11 +94,19 @@ def min_years_required(text: str) -> int | None:
     return best
 
 
-def hard_gate(title: str, location: str, text: str, resume: str) -> str | None:
-    """Reject only on explicit signals found in the hydrated posting."""
+def location_blocks(location: str) -> str | None:
+    """The hard gate's non-US location rule on its own (also used to count a board's eligible
+    jobs). An empty location is not excluded; a listing naming a US place beside a foreign one is not."""
     loc = location or ""
     if _NON_US_RE.search(loc) and not (_US_CASE_SENSITIVE.search(loc) or re.search(r"United States|North America|Austin|San Antonio|Texas|New York", loc, re.I)):
         return f"location is outside the US ({loc[:60]})"
+    return None
+
+
+def hard_gate(title: str, location: str, text: str, resume: str) -> str | None:
+    """Reject only on explicit signals found in the hydrated posting."""
+    if blocked := location_blocks(location):
+        return blocked
     years = min_years_required(text)
     if years is not None and years >= HARD_YEARS:
         return f"requires {years}+ years of experience"

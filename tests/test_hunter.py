@@ -65,7 +65,7 @@ class SettingsTests(unittest.TestCase):
 class QueryTests(unittest.TestCase):
     def test_default_queries_fit_google_limit_and_cover_every_ats(self) -> None:
         queries = h.build_queries(settings())
-        self.assertEqual(len(queries), 2)
+        self.assertEqual(len(queries), 4)  # eight default level words (D-25 added Entry Level, New Grad) no longer fit in two queries
         for q in queries:
             self.assertLessEqual(h.count_words(q), h.GOOGLE_QUERY_WORD_LIMIT, q)
             for site in h.ATS_SITES:
