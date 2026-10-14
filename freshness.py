@@ -141,10 +141,11 @@ def classify(
                 f"source date {published.date()} (day precision) and first seen {gap_min} min after the previous successful poll",
                 age_min, gap_min,
             )  # fmt: skip
+        if age is not None and age < -CLOCK_SKEW:
+            # Seen on real data: aggregator boards stamp postings tens of minutes in the future.
+            return Freshness(UNCERTAIN, f"source timestamp is {-age_min} min in the future; not trusted", age_min, gap_min)
         if age is not None and age > timedelta(days=max_age_days):
             return Freshness(STALE, f"published {age.days} days ago", age_min, gap_min)
-        if age is not None and age < -timedelta(hours=1):
-            return Freshness(UNCERTAIN, "source date is in the future; clock or data problem", age_min, gap_min)
         return Freshness(RECENT, f"published {age_min // 60 if age_min is not None else '?'} h ago, outside the {int(fresh_window.total_seconds() // 3600)} h window", age_min, gap_min)
 
     if gap_ok:

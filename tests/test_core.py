@@ -174,6 +174,8 @@ class ClassifyTests(unittest.TestCase):
 
     def test_future_dates_are_not_trusted(self) -> None:
         self.assertEqual(self.cls(ago(hours=-5)), fr.UNCERTAIN)
+        self.assertEqual(self.cls(ago(minutes=-30)), fr.UNCERTAIN)  # aggregators stamp postings ahead of real time
+        self.assertEqual(self.cls(ago(minutes=-3)), fr.VERIFIED_FRESH)  # within normal clock skew
 
     def test_update_is_never_publication(self) -> None:
         self.assertEqual(fr.detect_changes(None, "a", None, "b"), ["updated"])
