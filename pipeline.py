@@ -11,6 +11,7 @@ Ordering rules that protect correctness (SPEC.md "State model"):
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import time
@@ -24,7 +25,7 @@ import inventory as inv
 import ledger as lg
 import pools
 from boards import (
-    MONITORED, SMARTRECRUITERS, STATUS_ACTIVE, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
+    MONITORED, STATUS_ACTIVE, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
     activate_waiting, fetch_board, poll_boards, registry_counts, apply_poll_result,
 )  # fmt: skip
 from discovery import SerperJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
@@ -99,6 +100,7 @@ class Deps:
     workers: int = 8
     sleep: Callable[[float], None] = time.sleep  # backoff between validation retries (tests pass a no-op)
     dry_run: bool = False
+    pool_policy: pools.PoolPolicy = field(default_factory=pools.PoolPolicy)  # max_active is always max_monitored_boards
 
 
 def _parse_stamp(value: str, tz: Any) -> datetime | None:
@@ -206,15 +208,32 @@ def run_cycle(d: Deps) -> RunRecord:
         # ---------------------------------------------------------------- 2. polling loop
         # Validated inventory boards enter monitoring only within the polling budget; the poll
         # below then baselines them (their existing jobs never look "just posted").
+        policy = dataclasses.replace(d.pool_policy, max_active=d.max_monitored_boards)
+
+        def blocked(ats: str) -> str | None:
+            return inv.policy_blocks(ats, allow_smartrecruiters=d.allow_smartrecruiters)
+
+        # Every run, in every mode: provider policy applies to boards that are already monitored,
+        # stale pool labels are cleared and boards monitored before pools existed get a trial.
+        sync = pools.sync_pools(boards, policy, now, blocked)
+        dirty.update(sync.changed)
+        run.parked_policy = len(sync.parked)
+        for line in sync.lines:
+            log.info(line)
+        if sync.parked:
+            log.warning("%d monitored SmartRecruiters boards parked by provider policy (history kept)", len(sync.parked))
+            run.notes += f"{len(sync.parked)} monitored SmartRecruiters boards parked by provider policy (history kept); "
+        if sync.migrated:
+            run.notes += f"{len(sync.migrated)} boards monitored before pools existed started an exploration trial; "
         promoted_keys: set[str] = set()
-        for rec in activate_waiting(boards, max_monitored=d.max_monitored_boards, per_run=d.max_new_boards_per_run):
+        for rec in activate_waiting(
+            boards, max_monitored=d.max_monitored_boards, per_run=d.max_new_boards_per_run, now=now,
+            trial_days=policy.exploration_days, blocked=blocked,
+        ):  # fmt: skip
             dirty[rec.key] = rec
             promoted_keys.add(rec.key)
             run.boards_activated += 1
-        parked_monitored = sum(1 for b in boards.values() if b.ats == SMARTRECRUITERS and b.status in MONITORED and not d.allow_smartrecruiters)
-        if parked_monitored:
-            log.warning("%d SmartRecruiters boards are monitored from before the provider policy; set ALLOW_SMARTRECRUITERS_BULK=1 or park them", parked_monitored)
-            run.notes += f"{parked_monitored} SmartRecruiters boards monitored from before the parked policy; "
+            log.info("Pool %s: waiting -> exploration (%s)", rec.key, rec.pool_reason)
         active = [b for b in boards.values() if b.status in MONITORED]
         run.boards_total = len(active)
         max_gap: timedelta | None = None
@@ -270,6 +289,46 @@ def run_cycle(d: Deps) -> RunRecord:
             if b.status in MONITORED:
                 pools.refresh_activity(b, activity, now)
                 dirty[b.key] = b
+
+        # Weekly rebalance: ended trials against the weakest evidence-backed established boards.
+        # In "report" mode (the default) only the plan is recorded; "on" applies it. Transitions are
+        # made here, inside the hourly poller, and nowhere else (D-28).
+        rebalance_values: dict[str, str] = {}
+        if pools.rebalance_due(discovery_state.get(pools.REBALANCE_KEY), boards, now, policy):
+            plan = pools.plan_rebalance(boards, policy, now, blocked)
+            for line in pools.format_plan(plan, pools.coverage(boards, now, blocked), policy):
+                log.info("Rebalance (%s): %s", policy.mode, line)
+            if policy.mode == "on":
+                was_pool = {dec.key: boards[dec.key].pool or "-" for dec in plan.decisions if dec.key in boards}
+                moved = pools.apply_plan(boards, plan, now)
+                dirty.update({b.key: b for b in moved})
+                run.graduated = plan.count("graduate") + plan.count("replace")
+                run.demoted = plan.count("replace") + plan.count("return") + plan.count("shed")
+                run.rebalance = "applied"
+                for dec in plan.decisions:
+                    if dec.action in ("graduate", "replace"):
+                        log.info("Pool %s: exploration -> established (%s)", dec.key, dec.reason)
+                    if dec.action == "replace":
+                        log.info("Pool %s: established -> waiting (replaced by %s)", dec.partner, dec.key)
+                    if dec.action in ("return", "shed"):
+                        log.info("Pool %s: %s -> waiting (%s)", dec.key, was_pool.get(dec.key, "-"), dec.reason)
+            else:
+                run.rebalance = "report"
+                run.notes += f"rebalance report ({plan.summary()}; {plan.waiting} relevant boards waiting); "
+            rebalance_values[pools.REBALANCE_KEY] = json.dumps(
+                {"at": lg.stamp(now), "mode": policy.mode, "graduate": plan.count("graduate"), "replace": plan.count("replace"),
+                 "defer": plan.count("defer"), "return": plan.count("return"), "keep": plan.count("keep"),
+                 "extend": plan.count("extend"), "shed": plan.count("shed")}, separators=(",", ":"),
+            )  # fmt: skip
+            rebalance_values[pools.REBALANCE_REPORT_KEY] = pools.plan_json(plan, now, policy.mode)
+        cov = pools.coverage(boards, now, blocked)
+        run.pool_established, run.pool_exploration, run.waiting_relevant = cov["established"], cov["exploration"], cov["waiting"]
+        run.oldest_waiting_hours, run.relevant_coverage_pct = cov["oldest_waiting_hours"], cov["coverage_pct"]
+        log.info(
+            "Pools: established %d/%d, exploration %d/%d, monitored %d/%d, %d relevant boards waiting%s, relevant-board coverage %s%%",
+            cov["established"], policy.established_target, cov["exploration"], policy.exploration_target, cov["monitored"], policy.max_active,
+            cov["waiting"], f" (oldest {cov['oldest_waiting_hours']} h)" if cov["oldest_waiting_hours"] is not None else "", cov["coverage_pct"],
+        )  # fmt: skip
         counts = registry_counts(boards)
         run.boards_discovered, run.boards_validated, run.boards_monitored = counts["discovered"], counts["validated"], counts["monitored"]
 
@@ -357,6 +416,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 save_values[dsc.LAST_RUN_KEY] = json.dumps({"at": lg.stamp(now), "kind": found.kind, "queries": found.summary()}, separators=(",", ":"))
             if pending_changed or pending:
                 save_values[dsc.PENDING_KEY] = dsc.dump_pending(pending)
+            save_values.update(rebalance_values)
             if save_values != discovery_state:
                 d.state.save_discovery_state(save_values, lg.stamp(now))
         else:

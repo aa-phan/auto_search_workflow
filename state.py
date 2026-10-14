@@ -41,6 +41,8 @@ RUN_COLUMNS = [
     "Boards_Discovered", "Boards_Validated", "Boards_Monitored", "Boards_Activated",
     "Search_Queries", "Search_Pages", "Search_Credits", "Search_Repeated", "New_Unique_Boards",
     "Eligible_Boards", "Promoted_Boards", "Verified_Fresh_Matches",
+    "Pool_Established", "Pool_Exploration", "Waiting_Relevant", "Oldest_Waiting_Hours", "Relevant_Coverage_Pct",
+    "Graduated", "Demoted", "Parked_Policy", "Rebalance",
 ]  # fmt: skip
 APPEND_CHUNK = 2000
 
@@ -74,6 +76,15 @@ class RunRecord:
     eligible_boards: int = 0  # result boards that passed admission (validated, monitored)
     promoted_boards: int = 0  # result boards promoted into monitoring this run
     verified_fresh_matches: int = 0  # unique result jobs verified fresh and matching the title gate
+    pool_established: int = 0  # monitored boards in the established pool at the end of the run
+    pool_exploration: int = 0  # monitored boards on an exploration trial
+    waiting_relevant: int = 0  # validated boards with something open for the user's targets, waiting for a slot
+    oldest_waiting_hours: int | None = None  # how long the longest-waiting of them has waited
+    relevant_coverage_pct: int | None = None  # share of boards with open relevant jobs that are actually monitored
+    graduated: int = 0  # boards that became established this run
+    demoted: int = 0  # boards returned to the waiting list this run
+    parked_policy: int = 0  # monitored boards parked by provider policy this run
+    rebalance: str = ""  # "" = not due, "report" = plan recorded only, "applied"
 
     def to_row(self) -> list[Any]:
         out = []
@@ -97,7 +108,7 @@ class RunRecord:
         return cls(row[0], row[1] == "yes", num(2) or 0, num(3) or 0, num(4) or 0, num(5) or 0, num(6) or 0, num(7) or 0,
                    num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
-                   *(num(i) or 0 for i in range(19, 27)))  # fmt: skip
+                   *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35])  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:

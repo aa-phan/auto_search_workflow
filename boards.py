@@ -10,7 +10,7 @@ import collections
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs, urlsplit
 
@@ -322,6 +322,9 @@ STATUS_CANDIDATE, STATUS_VALIDATED, STATUS_NEW, STATUS_ACTIVE = "candidate", "va
 STATUS_INVALID, STATUS_DEFERRED, STATUS_DISABLED = "invalid", "deferred", "disabled"
 MONITORED = frozenset({STATUS_NEW, STATUS_ACTIVE})
 
+# Pools inside the monitored set (pools.py explains the policy).
+POOL_ESTABLISHED, POOL_EXPLORATION = "established", "exploration"
+
 # Validation outcomes.
 V_VALID, V_EMPTY, V_INVALID, V_TRANSIENT, V_DEFERRED = "valid", "valid_empty", "invalid", "transient", "deferred"
 
@@ -446,22 +449,53 @@ def registry_counts(registry: dict[str, BoardRecord]) -> dict[str, int]:
     }
 
 
+def open_jobs(rec: BoardRecord) -> int:
+    """Open relevant jobs a board lists right now (uncapped): the location-eligible count when it
+    has been measured, else the relevant count. Used to decide whether a board is worth a slot."""
+    return rec.eligible_jobs if rec.eligible_jobs is not None else rec.relevant_jobs
+
+
+def is_waiting_candidate(rec: BoardRecord, blocked: Callable[[str], Any] | None = None) -> bool:
+    """A validated board with something open for the user's targets that no provider policy blocks."""
+    return (
+        rec.status == STATUS_VALIDATED and rec.validation == V_VALID and open_jobs(rec) > 0
+        and not (blocked and blocked(rec.ats))
+    )  # fmt: skip
+
+
 def activate_waiting(
-    registry: dict[str, BoardRecord], *, max_monitored: int, per_run: int
+    registry: dict[str, BoardRecord],
+    *,
+    max_monitored: int,
+    per_run: int,
+    now: datetime | None = None,
+    trial_days: int = 7,
+    blocked: Callable[[str], Any] | None = None,
 ) -> list[BoardRecord]:
     """Promote validated boards into monitoring without ever exceeding the polling budget.
 
     At most `per_run` boards are promoted at once (each promotion baselines a whole board) and
-    never beyond `max_monitored` in total. Boards with listed jobs that match the user's targets
-    go first; a board with nothing relevant right now keeps waiting."""
+    never beyond `max_monitored` in total. Every promoted board enters the EXPLORATION pool on a
+    `trial_days` trial. Boards never tried before go first (the fair route in for boards with no
+    observation history), then the most open eligible jobs; a board with nothing open right now,
+    or whose provider is blocked by policy, keeps waiting."""
+    now = now or datetime.now(timezone.utc)
     room = min(per_run, max(0, max_monitored - sum(1 for r in registry.values() if r.status in MONITORED)))
     if room <= 0:
         return []
-    ready = [r for r in registry.values() if r.status == STATUS_VALIDATED and r.validation == V_VALID and r.relevant_jobs > 0]
-    ready.sort(key=lambda r: (-r.relevant_jobs, r.last_job_count, r.key))
+    ready = [r for r in registry.values() if is_waiting_candidate(r, blocked)]
+    ready.sort(key=lambda r: (r.trials > 0, -open_jobs(r), -r.relevant_jobs, r.last_job_count, r.key))
     promoted = ready[:room]
+    until = now + timedelta(days=trial_days)
     for r in promoted:
-        r.status = STATUS_NEW
+        eligible = "unknown" if r.eligible_jobs is None else r.eligible_jobs
+        r.status, r.pool, r.weak_streak = STATUS_NEW, POOL_EXPLORATION, 0
+        r.trials += 1
+        r.pool_since, r.trial_until = now.strftime(STAMP), until.strftime(STAMP)
+        r.pool_reason = (
+            f"explore {now:%Y-%m-%d}: trial until {until:%Y-%m-%d}; {eligible} eligible / {r.relevant_jobs} relevant open jobs "
+            f"({'first trial' if r.trials == 1 else f're-entry, trial {r.trials}'})"
+        )[:200]
     return promoted
 
 
