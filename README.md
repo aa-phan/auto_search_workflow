@@ -48,6 +48,8 @@ Three sources feed one list: a rotating Google search (every 12 hours; see below
 
 Not every listed board is checked every hour. New boards are first **validated** (does it exist? does it have jobs that match your targets?) by a separate workflow (**Board Inventory**, weekly refresh plus a daily validation pass), then the best matches are added to the hourly checks within the limit set by `Max_Active_Boards`. Each newly watched board is read once as a starting point, so its existing jobs never look "just posted". The hidden `Boards` tab shows every board, where it came from, and its status; the hidden `Runs` tab shows how many were discovered, validated and actively watched.
 
+**Which boards get the hourly slots.** `Max_Active_Boards` (default 500) is shared by two groups: about 400 **proven** boards and about 100 **trial** boards (`Exploration_Share_Percent`, 20% by default; a starting choice, not a proven best value). Every newly added board joins the trial group for `Exploration_Days` (7 by default) and boards that were never tried come first, so a company with no history still gets a fair chance. Every hour each watched board's list of open matching jobs, and how many *new* matching jobs it posted in the last 7 and 30 days, is refreshed from the list the app already downloaded (blank means "not enough history yet", not "nothing new"). Once a week (`Rebalance_Every_Days`), boards that finished their trial are compared with the weakest proven boards using a simple score (open US-eligible matching jobs plus how often the board posts new ones). A trial board replaces a proven one only if it clearly wins, the proven board was the weakest in two weeks in a row, there is enough data, and at most `Max_Replacements_Per_Rebalance` (20) boards change per week. A board that leaves keeps everything we learned about it (seen jobs, scores, pending alerts); when it comes back, its existing jobs are re-checked against the company's own publish dates rather than all being called new. **This starts in report-only mode** (`Rebalance_Mode` = `report`): it writes a weekly report to the hidden `Discovery` tab and moves nobody. To preview it, run the **Job Hunter** workflow with **rebalance_report** ticked (or `python hunter.py --rebalance-report`); when you are happy, set `Rebalance_Mode` to `on`.
+
 Providers these lists contain but this app cannot read yet (for example Breezy, Recruitee, Teamtailor, Workday, BambooHR, Personio) are counted in the import report and ignored. **SmartRecruiters** boards from the lists are parked rather than bulk-checked, because that company's own `robots.txt` asks automated tools to stay away.
 
 ## What you'll use (all have free tiers)
@@ -118,6 +120,13 @@ The first runs mostly *learn* the boards (quietly recording what is already ther
 | `Discovery_Credit_Budget` | Most search credits one Google discovery run may spend (default 10). A hard cap. Sheets made before this setting existed use the default. |
 | `Max_Active_Boards` | Most company boards checked every hour (default 500). Imported boards join gradually, best matches first, up to this limit. |
 | `Max_New_Boards_Per_Run` | Most new boards added to the hourly checks in one run (default 50). |
+| `Exploration_Share_Percent` | Share (0-100) of `Max_Active_Boards` kept for boards on a trial (default 20). A starting choice, not a proven best value. |
+| `Exploration_Days` | Days a new board is tried before being compared with the others (default 7). A starting choice. |
+| `Rebalance_Every_Days` | How often boards that finished a trial are compared with the weakest proven boards (default 7). |
+| `Max_Replacements_Per_Rebalance` | Most proven boards replaced in one weekly comparison (default 20). |
+| `Rebalance_Mode` | `report` (default): the weekly comparison only writes a report. `on`: it replaces boards. |
+
+Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defaults then apply (add the rows to change them). `Target_Levels` now defaults to `Coordinator, Associate, Specialist, Intern, Assistant, Junior, Entry Level, New Grad`; a Sheet that already has its own value keeps it, so add `Entry Level` and `New Grad` there if you want those titles. "Internship" matches `Intern`, "Jr"/"Jr." matches `Junior`, and "Entry-Level" matches `Entry Level`; seniority words such as Senior or Lead still exclude a title.
 
 **Job Tracker tab** shows jobs scoring 50 or higher. The script only ever *adds* rows, so your edits are safe:
 
@@ -174,6 +183,8 @@ python hunter.py --discover                          # force a board-discovery p
 python hunter.py --discover --no-tbs                 # discovery without the 3-day search window
 python hunter.py --import-inventory                  # download both company lists and merge new boards (idempotent)
 python hunter.py --validate --max-validations 500    # check unvalidated boards (Lever is limited to 1 request/second)
+python hunter.py --validate --max-validations 500 --max-revalidations 500   # candidates and overdue re-checks have separate budgets (re-checks oldest first)
+python hunter.py --rebalance-report                  # dry run: pool targets, coverage, queue ages, planned decisions; writes nothing
 python hunter.py --inventory-report                  # counts: discovered / validated / actively monitored
 python hunter.py --import-inventory --offline        # re-merge from the saved copies (no download)
 python -m unittest discover -s tests                 # offline tests

@@ -6,6 +6,9 @@ name: Board Inventory
 #   - daily:  validate only (the first import is ~20,000 boards; a weekly run alone cannot finish)
 # Neither run scores jobs or sends alerts. Boards only start being polled hourly when they are
 # promoted within the polling budget (Settings: Max_Active_Boards, Max_New_Boards_Per_Run).
+# Two independently budgeted queues: never-validated candidates (--max-validations) and overdue
+# re-checks of validated/invalid boards (--max-revalidations, oldest first), so the candidate
+# backlog cannot starve the re-checks.
 
 on:
   schedule:
@@ -23,7 +26,8 @@ permissions:
 
 # Own concurrency group: the hourly poller keeps running. The two writers touch different
 # registry rows (the importer owns candidates, the poller owns monitored boards) and both
-# write row-level updates, never a full rewrite.
+# write row-level updates, never a full rewrite. The importer also skips any row whose current
+# status is new/active/disabled at write time, so it cannot undo a promotion or demotion.
 concurrency:
   group: job-hunter-inventory
   cancel-in-progress: false
@@ -59,7 +63,7 @@ jobs:
           REFRESH=false
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "23 5 * * 1" ]; then REFRESH=true; fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.refresh }}" = "true" ]; then REFRESH=true; fi
-          ARGS="--validate --max-validations 4000 --max-seconds 1500"
+          ARGS="--validate --max-validations 4000 --max-revalidations 2000 --max-seconds 1500"
           if [ "$REFRESH" = "true" ]; then ARGS="--import-inventory $ARGS"; fi
           python hunter.py $ARGS
 

@@ -463,6 +463,14 @@ def is_waiting_candidate(rec: BoardRecord, blocked: Callable[[str], Any] | None 
     )  # fmt: skip
 
 
+def admission_order(registry: dict[str, BoardRecord], blocked: Callable[[str], Any] | None = None) -> list[BoardRecord]:
+    """Waiting boards in the order they would be promoted: boards never tried before first (the fair
+    route in for boards with no observation history), then the most open eligible jobs."""
+    ready = [r for r in registry.values() if is_waiting_candidate(r, blocked)]
+    ready.sort(key=lambda r: (r.trials > 0, -open_jobs(r), -r.relevant_jobs, r.last_job_count, r.key))
+    return ready
+
+
 def activate_waiting(
     registry: dict[str, BoardRecord],
     *,
@@ -483,9 +491,7 @@ def activate_waiting(
     room = min(per_run, max(0, max_monitored - sum(1 for r in registry.values() if r.status in MONITORED)))
     if room <= 0:
         return []
-    ready = [r for r in registry.values() if is_waiting_candidate(r, blocked)]
-    ready.sort(key=lambda r: (r.trials > 0, -open_jobs(r), -r.relevant_jobs, r.last_job_count, r.key))
-    promoted = ready[:room]
+    promoted = admission_order(registry, blocked)[:room]
     until = now + timedelta(days=trial_days)
     for r in promoted:
         eligible = "unknown" if r.eligible_jobs is None else r.eligible_jobs

@@ -15,4 +15,4 @@ Before changing any behavior, read in this order: `SPEC.md` (the contract), `DEC
 
 ## Layout
 
-`hunter.py` entry/orchestration; `boards.py` (identity, adapters, registry), `inventory.py` (inventory import + validation), `freshness.py`, `ledger.py`, `eligibility.py`, `state.py`, `pipeline.py` core; `tests/` offline tests; `legacy/` archived earlier version (reference only).
+`hunter.py` entry/orchestration; `boards.py` (identity, adapters, registry), `inventory.py` (inventory import + validation), `freshness.py`, `ledger.py`, `eligibility.py`, `state.py`, `pools.py` (board evidence, pools, rebalance), `pipeline.py` core; `tests/` offline tests; `legacy/` archived earlier version (reference only).

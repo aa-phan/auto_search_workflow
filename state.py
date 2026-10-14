@@ -208,22 +208,52 @@ class SheetState:
                 self._row_of[b.key] = i
         return out
 
-    def save_boards(self, records: Iterable[BoardRecord]) -> None:
+    def _current_statuses(self, ws: Any) -> dict[str, tuple[int, str]]:
+        """Board key -> (sheet row, CURRENT status), read fresh from the sheet (two column reads when the
+        worksheet supports them, else one full read)."""
+        if hasattr(ws, "col_values"):
+            keys, statuses = ws.col_values(1), ws.col_values(4)
+        else:
+            values = ws.get_all_values()
+            keys = [r[0] if r else "" for r in values]
+            statuses = [r[3] if len(r) > 3 else "" for r in values]
+        return {k: (i, statuses[i - 1] if i - 1 < len(statuses) else "") for i, k in enumerate(keys, start=1) if i > 1 and k}
+
+    def save_boards(self, records: Iterable[BoardRecord], *, skip_if_status: frozenset[str] | set[str] = frozenset()) -> list[str]:
         """Upsert ONLY the given records: known rows are updated in place, unknown ones appended.
         Writers own different rows (the poller owns monitored boards, the importer owns
-        candidates), so a long-running writer can never overwrite another's progress."""
+        candidates), so a long-running writer can never overwrite another's progress.
+
+        `skip_if_status` is a compare-and-set for the importer: a record whose row CURRENTLY has one
+        of these statuses (another process promoted it since this one loaded it) is not written.
+        Returns the keys that were skipped."""
         recs = list(records)
+        skipped: list[str] = []
         if not recs:
-            return
+            return skipped
         ws = self.sh.worksheet(BOARDS_TAB)
+        current: dict[str, tuple[int, str]] | None = None
+        if skip_if_status:
+            current = self._current_statuses(ws)
+            keep = []
+            for r in recs:
+                row = current.get(r.key)
+                if row is not None:
+                    self._row_of[r.key] = row[0]
+                if row is not None and row[1] in skip_if_status:
+                    skipped.append(r.key)
+                else:
+                    keep.append(r)
+            recs = keep
         updates = [(self._row_of[r.key], r) for r in recs if r.key in self._row_of]
         fresh = [r for r in recs if r.key not in self._row_of]
         if fresh:  # another process may have appended some of these since we loaded: look again
-            index = {}
-            for i, row in enumerate(ws.get_all_values()[1:], start=2):
-                b = board_from_row(row)
-                if b:
-                    index[b.key] = i
+            index = {k: v[0] for k, v in current.items()} if current is not None else {}
+            if current is None:
+                for i, row in enumerate(ws.get_all_values()[1:], start=2):
+                    b = board_from_row(row)
+                    if b:
+                        index[b.key] = i
             appended = []
             for r in fresh:
                 if r.key in index:
@@ -237,6 +267,7 @@ class SheetState:
             ws.batch_update([{"range": f"A{row}", "values": [board_to_row(r)]} for row, r in chunk], value_input_option="RAW")
         for chunk in _chunks([board_to_row(r) for r in fresh]):
             ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
+        return skipped
 
     def load_events(self) -> list[Event]:
         rows = self.sh.worksheet(EVENTS_TAB).get_all_values()[1:]
@@ -310,14 +341,21 @@ class CsvState:
         recs = (board_from_row(r) for r in self._rows(BOARDS_TAB))
         return {b.key: b for b in recs if b}
 
-    def save_boards(self, records: Iterable[BoardRecord]) -> None:
-        """Upsert the given records into the registry file (atomic replace)."""
+    def save_boards(self, records: Iterable[BoardRecord], *, skip_if_status: frozenset[str] | set[str] = frozenset()) -> list[str]:
+        """Upsert the given records into the registry file (atomic replace). Records whose CURRENT
+        status in the file is in `skip_if_status` are not written; their keys are returned."""
         recs = list(records)
+        skipped: list[str] = []
         if not recs:
-            return
+            return skipped
         boards = self.load_boards()
         for r in recs:
+            if skip_if_status and (cur := boards.get(r.key)) is not None and cur.status in skip_if_status:
+                skipped.append(r.key)
+                continue
             boards[r.key] = r
+        if len(skipped) == len(recs):
+            return skipped
         p = self._path(BOARDS_TAB)
         fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
@@ -325,6 +363,7 @@ class CsvState:
             w.writerow(BOARD_COLUMNS)
             w.writerows(board_to_row(b) for b in sorted(boards.values(), key=lambda b: b.key))
         os.replace(tmp, p)  # atomic
+        return skipped
 
     def load_events(self) -> list[Event]:
         return [e for e in (Event.from_row(r) for r in self._rows(EVENTS_TAB)) if e]

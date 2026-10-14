@@ -483,6 +483,108 @@ class RunValidationTests(unittest.TestCase):
         self.assertEqual(order, ["pair"])
 
 
+class ValidationQueueTests(unittest.TestCase):
+    """Two independently budgeted queues: never-validated candidates and overdue re-checks (D-29)."""
+
+    def registry(self, n_candidates: int, overdue: list[tuple[str, str, int]] = (), **kw: Any) -> dict[str, bd.BoardRecord]:  # type: ignore[assignment]
+        reg: dict[str, bd.BoardRecord] = {}
+        bd.merge_candidates(reg, [cand("greenhouse", f"c{i:04d}", inv.OPEN_ATS_FEED) for i in range(n_candidates)], now=NOW, new_status=bd.STATUS_CANDIDATE)
+        for ats, name, days_over in overdue:  # validated boards whose re-check is `days_over` days late
+            r = bd.BoardRecord(ats, name, ago(days=90), inv.OPEN_ATS_FEED, bd.STATUS_VALIDATED, validation=bd.V_VALID, relevant_jobs=1,
+                               last_validated_at=(NOW - timedelta(days=7 + days_over)).strftime(bd.STAMP))  # fmt: skip
+            reg[r.key] = r
+        return reg
+
+    def run_it(self, reg: dict, order: list[str] | None = None, **kw: Any) -> inv.ValidationSummary:
+        def fetch(b: bd.BoardId) -> list[bd.ListedJob]:
+            if order is not None:
+                order.append(b.board)
+            return listed(2)
+
+        kw.setdefault("workers", 1)
+        return inv.run_validation(reg, save=lambda recs: None, now=NOW, fetch=fetch, title_gate=gate,
+                                  limiter=inv.HostLimiter(sleep=lambda s: None), sleep=lambda s: None, **kw)  # fmt: skip
+
+    def test_a_huge_candidate_backlog_cannot_starve_overdue_revalidations(self) -> None:
+        overdue = [("greenhouse", f"r{i}", d) for i, d in enumerate((1, 9, 3, 30, 5))]  # r3 is the most overdue, then r1, then r4
+        reg = self.registry(1000, overdue)
+        order: list[str] = []
+        s = self.run_it(reg, order, max_boards=10, max_revalidations=3)
+        self.assertEqual((s.attempted_candidates, s.attempted_revalidations, s.attempted), (10, 3, 13))
+        self.assertEqual({b for b in order if b.startswith("r")}, {"r3", "r1", "r4"})  # the three MOST overdue, nobody else
+        self.assertEqual([b[0] for b in order[:6]], ["r", "c", "r", "c", "r", "c"])  # strict alternation, a re-check first
+        self.assertEqual((s.candidates_due, s.revalidations_due, s.remaining_due), (1000, 5, 990 + 2))  # both queues counted
+
+    def test_revalidations_run_oldest_first_within_a_provider(self) -> None:
+        reg = self.registry(0, [("greenhouse", f"r{i}", d) for i, d in enumerate((2, 20, 8, 12))])
+        invalid = bd.BoardRecord("greenhouse", "inv1", ago(days=90), "s", bd.STATUS_INVALID, validation=bd.V_INVALID, last_attempt_at=(NOW - timedelta(days=60)).strftime(bd.STAMP))
+        reg[invalid.key] = invalid  # an invalid board re-checked 30 days after its last attempt: 30 days overdue, so after r1 (20) ... before r3 (12)
+        order: list[str] = []
+        self.run_it(reg, order, max_boards=0)
+        self.assertEqual(order, ["inv1", "r1", "r3", "r2", "r0"])
+
+    def test_boards_without_a_timestamp_are_re_checked_first(self) -> None:
+        reg = self.registry(0, [("greenhouse", "dated", 5)])
+        blank = bd.BoardRecord("greenhouse", "blank", ago(days=90), "s", bd.STATUS_VALIDATED, validation=bd.V_VALID, relevant_jobs=1)
+        reg[blank.key] = blank
+        order: list[str] = []
+        self.run_it(reg, order, max_boards=0)
+        self.assertEqual(order, ["blank", "dated"])
+
+    def test_the_two_budgets_are_independent(self) -> None:
+        reg = self.registry(5, [("greenhouse", f"r{i}", 1) for i in range(5)])
+        none = self.run_it(reg, max_boards=3, max_revalidations=0)
+        self.assertEqual((none.attempted_candidates, none.attempted_revalidations), (3, 0))  # zero re-checks means none
+        reg2 = self.registry(5, [("greenhouse", f"r{i}", 1) for i in range(5)])
+        only = self.run_it(reg2, max_boards=0, max_revalidations=4)
+        self.assertEqual((only.attempted_candidates, only.attempted_revalidations), (0, 4))
+        reg3 = self.registry(2, [("greenhouse", "r0", 1)])
+        both = self.run_it(reg3, max_boards=500, max_revalidations=500)
+        self.assertEqual((both.attempted, both.remaining_due), (3, 0))
+
+    def test_summary_ages_and_report_lines(self) -> None:
+        reg = self.registry(2, [("greenhouse", "r0", 3), ("greenhouse", "r1", 10)])
+        for r in reg.values():
+            if r.status == bd.STATUS_CANDIDATE:
+                r.discovered_at = (NOW - timedelta(hours=50)).strftime(bd.STAMP)
+        stats = inv.queue_stats(reg, NOW)
+        self.assertEqual((stats["candidates_due"], stats["revalidations_due"], stats["oldest_candidate_hours"], stats["oldest_overdue_hours"]), (2, 2, 50, 240))
+        s = self.run_it(reg, max_boards=1, max_revalidations=1)
+        self.assertEqual((s.oldest_candidate_hours, s.oldest_overdue_hours, s.remaining_due), (50, 240, 2))
+        text = inv.format_report(None, s, bd.registry_counts(reg))
+        self.assertIn("candidates:    due 2, attempted 1, oldest waiting 50 h", text)
+        self.assertIn("revalidations: overdue 2, attempted 1, oldest overdue 240 h", text)
+
+    def test_waiting_smartrecruiters_boards_are_parked_while_blocked(self) -> None:
+        reg = self.registry(0, [("smartrecruiters", "SrWait", 1), ("greenhouse", "gh", 1)])
+        s = self.run_it(reg)
+        parked = reg["smartrecruiters|srwait"]
+        self.assertEqual((parked.status, parked.validation, s.deferred_by_policy), (bd.STATUS_DEFERRED, bd.V_DEFERRED, 1))
+        self.assertIn("robots.txt", parked.last_error)
+        self.assertEqual(reg["greenhouse|gh"].status, bd.STATUS_VALIDATED)
+        again = self.registry(0, [("smartrecruiters", "SrWait", 1)])
+        self.run_it(again, allow_smartrecruiters=True)
+        self.assertEqual(again["smartrecruiters|srwait"].status, bd.STATUS_VALIDATED)  # opted in: re-checked like the rest
+
+    def test_validation_records_eligible_jobs_and_starts_the_waiting_clock_once(self) -> None:
+        reg = self.registry(1)
+        us, abroad = job("b", "1", location="Remote"), job("b", "2", location="London")
+        dup = job("b", "1", location="Remote")  # the same posting listed twice counts once
+        other = job("b", "3", title="Software Engineer")
+
+        def fetch(b: bd.BoardId) -> list[bd.ListedJob]:
+            return [us, abroad, dup, other]
+
+        inv.run_validation(reg, save=lambda r: None, now=NOW, fetch=fetch, title_gate=gate, workers=1, limiter=inv.HostLimiter(sleep=lambda s: None), sleep=lambda s: None)
+        rec = reg["greenhouse|c0000"]
+        self.assertEqual((rec.relevant_jobs, rec.eligible_jobs, rec.last_job_count, rec.relevance_at), (2, 1, 3, NOW.strftime(bd.STAMP)))
+        self.assertEqual(rec.pool_since, NOW.strftime(bd.STAMP))
+        self.assertIn("validated 2026-10-14: waiting for a slot", rec.pool_reason)
+        later = NOW + timedelta(days=8)
+        inv.run_validation(reg, save=lambda r: None, now=later, fetch=fetch, title_gate=gate, workers=1, limiter=inv.HostLimiter(sleep=lambda s: None), sleep=lambda s: None)
+        self.assertEqual((rec.pool_since, rec.last_validated_at), (NOW.strftime(bd.STAMP), later.strftime(bd.STAMP)))  # a re-check does not reset the clock
+
+
 def collections_counter() -> Any:
     import collections
 
@@ -626,6 +728,10 @@ class FakeWs:
     def row_values(self, n: int) -> list[str]:
         return [str(c) for c in self.values[n - 1]] if len(self.values) >= n else []
 
+    def col_values(self, col: int) -> list[str]:
+        self.calls.append(f"col_values:{col}")
+        return [str(r[col - 1]) if len(r) >= col else "" for r in self.values]
+
     def append_rows(self, rows: list, **kw: Any) -> None:
         self.calls.append("append")
         self.values.extend(list(r) for r in rows)
@@ -717,6 +823,39 @@ class SheetBoardsTests(unittest.TestCase):
         rec = self.state.load_boards()["greenhouse|old"]
         self.assertEqual((rec.status, rec.provenance, rec.validation, rec.region), ("active", {}, "", ""))
 
+    def test_importer_write_guard_skips_a_row_the_poller_promoted_meanwhile(self) -> None:
+        a, b = self.rec("greenhouse", "a", status=bd.STATUS_VALIDATED), self.rec("greenhouse", "b", status=bd.STATUS_VALIDATED)
+        self.state.save_boards([a, b])
+        importer = stm.SheetState(self.sh)  # the importer loaded both rows as `validated`
+        importer.load_boards()
+        poller = stm.SheetState(self.sh)
+        promoted = poller.load_boards()["greenhouse|a"]
+        promoted.status, promoted.pool = bd.STATUS_NEW, "exploration"
+        poller.save_boards([promoted])
+        a.relevant_jobs, b.relevant_jobs = 99, 77  # the importer's stale view of both
+        skipped = importer.save_boards([a, b, self.rec("greenhouse", "c", status=bd.STATUS_CANDIDATE)], skip_if_status=inv.POLLER_OWNED)
+        self.assertEqual(skipped, ["greenhouse|a"])
+        rows = {r[0]: r for r in self.ws.values[1:]}
+        self.assertEqual((rows["greenhouse|a"][3], str(rows["greenhouse|a"][16])), (bd.STATUS_NEW, "0"))  # the promotion survived
+        self.assertEqual(str(rows["greenhouse|b"][16]), "77")  # an unpromoted row is written as usual
+        self.assertIn("greenhouse|c", rows)  # a new row is appended
+
+    def test_guard_works_without_column_reads_and_without_a_guard_everything_is_written(self) -> None:
+        a = self.rec("greenhouse", "a", status=bd.STATUS_ACTIVE)
+        self.state.save_boards([a])
+        self.ws.col_values = None  # type: ignore[assignment]
+        del self.ws.col_values  # a worksheet object offering only get_all_values (the fallback path)
+        self.assertEqual(self.state.save_boards([self.rec("greenhouse", "a", status=bd.STATUS_VALIDATED)], skip_if_status=inv.POLLER_OWNED), ["greenhouse|a"])
+        self.assertEqual(self.ws.values[1][3], bd.STATUS_ACTIVE)
+        self.assertEqual(self.state.save_boards([self.rec("greenhouse", "a", status=bd.STATUS_VALIDATED)]), [])  # no guard requested
+        self.assertEqual(self.ws.values[1][3], bd.STATUS_VALIDATED)
+
+    def test_guard_costs_two_column_reads_not_a_full_scan(self) -> None:
+        self.state.save_boards([self.rec("greenhouse", f"b{i}") for i in range(30)])
+        self.ws.calls.clear()
+        self.state.save_boards([self.rec("greenhouse", "b1", status=bd.STATUS_VALIDATED), self.rec("greenhouse", "new1")], skip_if_status=inv.POLLER_OWNED)
+        self.assertEqual([c for c in self.ws.calls if c.startswith("col_values")], ["col_values:1", "col_values:4"])
+
     def test_never_clears_the_registry(self) -> None:
         self.state.save_boards([self.rec("greenhouse", f"b{i}") for i in range(1200)])  # also exercises chunking
         self.assertEqual(len(self.state.load_boards()), 1200)
@@ -728,6 +867,27 @@ class SheetBoardsTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- CLI
+
+
+class CsvWriterGuardTests(unittest.TestCase):
+    def test_importer_write_guard_on_the_local_files(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            s = stm.CsvState(Path(d))
+            s.ensure()
+            a = bd.BoardRecord("greenhouse", "a", "t", "s", bd.STATUS_VALIDATED, relevant_jobs=1)
+            b = bd.BoardRecord("greenhouse", "b", "t", "s", bd.STATUS_VALIDATED, relevant_jobs=1)
+            s.save_boards([a, b])
+            promoted = s.load_boards()["greenhouse|a"]
+            promoted.status = bd.STATUS_ACTIVE  # the poller, meanwhile
+            s.save_boards([promoted])
+            a.relevant_jobs, b.relevant_jobs = 9, 8
+            skipped = s.save_boards([a, b], skip_if_status=inv.POLLER_OWNED)
+            self.assertEqual(skipped, ["greenhouse|a"])
+            rows = s.load_boards()
+            self.assertEqual((rows["greenhouse|a"].status, rows["greenhouse|a"].relevant_jobs, rows["greenhouse|b"].relevant_jobs), (bd.STATUS_ACTIVE, 1, 8))
+            self.assertEqual(s.save_boards([a], skip_if_status=inv.POLLER_OWNED), ["greenhouse|a"])  # nothing to write: file untouched
+
+
 
 
 class CliTests(unittest.TestCase):
@@ -764,6 +924,44 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(inv, "http_get_bytes", side_effect=inv.InventoryError("down")):
             self.assertEqual(h.main(["--import-inventory", "--inventory-cache", str(self.dir / "empty")]), 1)
         self.assertEqual(self.store.state.load_boards(), {})
+
+    def test_rebalance_report_prints_the_plan_and_writes_nothing(self) -> None:
+        import contextlib
+        import io
+
+        state = self.store.state
+        state.ensure()
+        ended = (NOW - timedelta(hours=2)).strftime(bd.STAMP)
+        recs = [
+            bd.BoardRecord("greenhouse", "est1", "t", "s", bd.STATUS_ACTIVE, baselined_at=ago(days=50), validation=bd.V_VALID, relevant_jobs=1, eligible_jobs=1,
+                           pool="established", relevance_at=ago(hours=1), activity_since=ago(days=40), complete_polls=300, new_relevant_30d=0, new_relevant_7d=0),
+            bd.BoardRecord("greenhouse", "trial1", "t", "s", bd.STATUS_ACTIVE, baselined_at=ago(days=8), validation=bd.V_VALID, relevant_jobs=5, eligible_jobs=5,
+                           pool="exploration", trial_until=ended, relevance_at=ago(hours=1), activity_since=ago(days=8), complete_polls=90, new_relevant_30d=6, new_relevant_7d=6),
+            bd.BoardRecord("lever", "legacy", "t", "s", bd.STATUS_ACTIVE, baselined_at=ago(days=50), validation=bd.V_VALID, relevant_jobs=2),
+            bd.BoardRecord("smartrecruiters", "SrActive", "t", "s", bd.STATUS_ACTIVE, baselined_at=ago(days=50), validation=bd.V_VALID, relevant_jobs=2),
+            bd.BoardRecord("ashby", "waiting1", "t", "s", bd.STATUS_VALIDATED, validation=bd.V_VALID, relevant_jobs=4, eligible_jobs=4, last_validated_at=ago(days=1)),
+            bd.BoardRecord("ashby", "cand1", "t", "s", bd.STATUS_CANDIDATE),
+        ]
+        state.save_boards(recs)
+        files = sorted(p for p in (self.dir / "state").glob("*.csv"))
+        before = {p.name: p.read_bytes() for p in files}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(fr, "utcnow", return_value=NOW):
+            code = h.main(["--rebalance-report"])
+        self.assertEqual(code, 0)  # no Groq key needed
+        text = out.getvalue()
+        self.assertIn("BOARD REBALANCE REPORT (dry run)", text)
+        self.assertIn("mode: report", text)
+        self.assertIn("Max_Active_Boards 500 = established 400 + exploration 100", text)
+        self.assertIn("COVERAGE", text)
+        self.assertIn("monitored SmartRecruiters boards parked by provider policy: 1", text)
+        self.assertIn("boards monitored before pools existed that would start an exploration trial: 1", text)
+        self.assertIn("ashby|waiting1", text)  # the waiting list
+        self.assertIn("candidates:    due", text)
+        self.assertIn("revalidations: overdue", text)
+        self.assertRegex(text, r"graduate\s+greenhouse\|trial1")  # the ended trial would graduate into a free established slot
+        self.assertIn("dry run: nothing was written", text)
+        self.assertEqual({p.name: p.read_bytes() for p in sorted((self.dir / "state").glob("*.csv"))}, before)  # byte-identical
 
     def test_settings_expose_the_polling_budget(self) -> None:
         with mock.patch.dict(os.environ):

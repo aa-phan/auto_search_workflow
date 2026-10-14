@@ -15,6 +15,10 @@ on:
         description: "MANUAL ONLY: broad Google searches without the date window (boards only, capped credits)"
         type: boolean
         default: false
+      rebalance_report:
+        description: "Print the dry-run board rebalance report (pool targets, coverage, planned decisions); changes nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write # only used by the local-CSV fallback (no Google Sheet configured)
@@ -43,6 +47,7 @@ jobs:
       # Rotating discovery runs on its own schedule (Settings > Discovery_Every_Hours) within
       # Settings > Discovery_Credit_Budget. Unfiltered search only runs when 'backfill' is ticked by hand.
       - name: Poll boards, detect new jobs, score, deliver
+        if: ${{ !inputs.rebalance_report }}
         run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
         env:
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
@@ -53,6 +58,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional; default qdr:d3. Blank/none cannot make scheduled discovery unfiltered.
+
+      # Dry-run report only (tick 'rebalance_report' by hand): prints what the weekly board rebalance
+      # would do. Reads the registry, ledger and Settings; writes nothing; sends no alerts. Same job and
+      # same concurrency group as the hourly run, so it never overlaps a poll.
+      - name: Board rebalance report (dry run)
+        if: ${{ inputs.rebalance_report }}
+        run: python hunter.py --rebalance-report
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
 
       # Only does anything when GOOGLE_SHEET_ID is NOT set: the CSV files are then the state,
       # so they must survive between runs. always(): keep what was written even if the run failed.

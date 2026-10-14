@@ -53,6 +53,30 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("Marketing", s.roles)
         self.assertEqual((s.min_score, s.max_age_days, s.fresh_window_hours, s.discovery_every_hours), (70, 30, 1, 12))
 
+    def test_pool_settings_defaults_clamps_and_mode_note(self) -> None:
+        with mock.patch.dict(os.environ):
+            for key in h.SETTING_DEFAULTS:
+                os.environ.pop(key.upper(), None)
+            d = h.Settings.from_values({})
+            self.assertEqual((d.exploration_share_percent, d.exploration_days, d.rebalance_every_days, d.max_replacements_per_rebalance, d.rebalance_mode), (20, 7, 7, 20, "report"))
+            p = d.pool_policy
+            self.assertEqual((p.max_active, p.exploration_target, p.established_target, p.mode), (500, 100, 400, "report"))
+            odd = h.Settings.from_values({"Exploration_Share_Percent": "250", "Exploration_Days": "0", "Rebalance_Every_Days": "-3", "Max_Replacements_Per_Rebalance": "-5", "Rebalance_Mode": "ON"})
+            self.assertEqual((odd.exploration_share_percent, odd.exploration_days, odd.rebalance_every_days, odd.max_replacements_per_rebalance, odd.rebalance_mode), (100, 1, 1, 0, "on"))
+            low = h.Settings.from_values({"Exploration_Share_Percent": "-4", "Max_Replacements_Per_Rebalance": "abc"})
+            self.assertEqual((low.exploration_share_percent, low.max_replacements_per_rebalance), (0, 20))
+            bad = h.Settings.from_values({"Rebalance_Mode": "yes please"})
+            self.assertEqual(bad.rebalance_mode, "report")  # an unknown mode never turns rebalancing on
+            self.assertEqual(h.settings_notes({}), [])
+            self.assertEqual(h.settings_notes({"Rebalance_Mode": "on"}), [])
+            notes = h.settings_notes({"Rebalance_Mode": "yes please"})
+            self.assertTrue(notes and "Rebalance_Mode" in notes[0] and "report" in notes[0])
+        keys = [k for k, _, note in h.DEFAULT_SETTINGS]
+        for k in ("Exploration_Share_Percent", "Exploration_Days", "Rebalance_Every_Days", "Max_Replacements_Per_Rebalance", "Rebalance_Mode"):
+            self.assertIn(k, keys)
+        notes_text = " ".join(note for key, _, note in h.DEFAULT_SETTINGS if key in ("Exploration_Share_Percent", "Exploration_Days"))
+        self.assertIn("not a proven best value", notes_text)
+
     def test_excluded_words_are_whole_word_case_insensitive(self) -> None:
         rx = h.excluded_title_regex(settings().excluded)
         assert rx is not None

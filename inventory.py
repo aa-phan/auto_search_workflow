@@ -31,6 +31,7 @@ from typing import Any, Callable, Iterable
 import requests
 
 import boards as bd
+import eligibility
 from boards import (
     ASHBY, GREENHOUSE, LEVER, SMARTRECRUITERS, WORKABLE, BoardGone, BoardError, BoardId, BoardRecord, Candidate,
     STATUS_CANDIDATE, STATUS_DEFERRED, STATUS_DISABLED, STATUS_INVALID, STATUS_VALIDATED, V_DEFERRED, V_EMPTY, V_INVALID,
@@ -47,6 +48,10 @@ OPEN_ATS_FEED_URL = "https://raw.githubusercontent.com/veresk06/open-ats-feed/ma
 ATS_SCRAPERS_LIST_URL = "https://api.github.com/repos/kalil0321/ats-scrapers/contents/ats-companies?ref=main"
 ATS_SCRAPERS_RAW = "https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies/{name}.csv"
 SUPPORTED_ATS = set(bd.ATS_LIST)
+
+# Rows only the hourly poller may write (D-28). The importer's writes skip a row whose CURRENT
+# status is one of these, so it can never overwrite a promotion or demotion made meanwhile.
+POLLER_OWNED = frozenset({bd.STATUS_NEW, bd.STATUS_ACTIVE, bd.STATUS_DISABLED})
 
 HTTP_TIMEOUT = 40
 MAX_DOWNLOAD_BYTES = 40_000_000
@@ -368,6 +373,7 @@ class ValidationResult:
     jobs: int = 0
     relevant: int = 0
     error: str = ""
+    eligible: int = 0  # relevant jobs whose listing location is not excluded by the US rule
 
 
 def validate_board(
@@ -391,8 +397,12 @@ def validate_board(
             continue
         except Exception as exc:  # adapter bug: still not evidence the board is closed
             return ValidationResult(V_TRANSIENT, error=f"{type(exc).__name__}: {exc}")
-        relevant = sum(1 for j in jobs if title_gate is None or title_gate(j.title) is None)
-        return ValidationResult(V_VALID if jobs else V_EMPTY, jobs=len({j.ident.key for j in jobs}), relevant=relevant)
+        unique: dict[str, Any] = {}
+        for j in jobs:
+            unique.setdefault(j.ident.key, j)  # some boards repeat a posting once per location
+        relevant_jobs = [j for j in unique.values() if title_gate is None or title_gate(j.title) is None]
+        eligible = sum(1 for j in relevant_jobs if eligibility.location_blocks(j.location) is None)
+        return ValidationResult(V_VALID if jobs else V_EMPTY, jobs=len(unique), relevant=len(relevant_jobs), eligible=eligible)
     return ValidationResult(V_TRANSIENT, error=error or "unavailable")
 
 
@@ -414,8 +424,11 @@ def apply_validation(rec: BoardRecord, res: ValidationResult, now: datetime) -> 
     elif res.outcome == V_DEFERRED:
         rec.status, rec.last_error = STATUS_DEFERRED, res.error[:200]
     else:
+        if rec.status != STATUS_VALIDATED and not rec.pool_since:
+            rec.pool_since, rec.pool_reason = stamp, f"validated {now:%Y-%m-%d}: waiting for a slot"  # waiting-time clock starts
         rec.status, rec.last_validated_at = STATUS_VALIDATED, stamp
         rec.last_job_count, rec.relevant_jobs = res.jobs, res.relevant
+        rec.eligible_jobs, rec.relevance_at = res.eligible, stamp
     return True
 
 
@@ -469,6 +482,53 @@ def interleave_by_ats(ordered: list[BoardRecord]) -> list[BoardRecord]:
     return out
 
 
+def _due_basis(rec: BoardRecord) -> tuple[str, timedelta]:
+    """The timestamp a re-check is measured from and how long it may wait: validated boards from their
+    last good listing, invalid boards from the last attempt."""
+    if rec.status == STATUS_INVALID:
+        return rec.last_attempt_at, REVALIDATE_INVALID_AFTER
+    return rec.last_validated_at, REVALIDATE_VALID_AFTER
+
+
+def revalidation_order(rec: BoardRecord) -> tuple[int, str, str]:
+    """Oldest-first: boards with no usable timestamp first (they have never been re-checked), then the
+    one whose basis timestamp is earliest. Stamps sort chronologically as strings."""
+    basis, _ = _due_basis(rec)
+    try:
+        datetime.strptime(basis, STAMP)
+        parsed = True
+    except ValueError:
+        parsed = False
+    return (1 if parsed else 0, basis if parsed else "", rec.key)
+
+
+def is_revalidation(rec: BoardRecord) -> bool:
+    return rec.status in (STATUS_VALIDATED, STATUS_INVALID)
+
+
+def queue_stats(registry: dict[str, BoardRecord], now: datetime, *, allow_smartrecruiters: bool = False) -> dict[str, int | None]:
+    """Both validation queues: how many boards are due and how long the oldest has waited / is overdue."""
+    cands = [r for r in registry.values() if not is_revalidation(r) and validation_due(r, now, allow_smartrecruiters=allow_smartrecruiters)]
+    revals = [r for r in registry.values() if is_revalidation(r) and validation_due(r, now, allow_smartrecruiters=allow_smartrecruiters)]
+    oldest_c: float | None = None
+    for r in cands:
+        age = _age(r.discovered_at, now)
+        if age is not None:
+            oldest_c = age.total_seconds() / 3600 if oldest_c is None else max(oldest_c, age.total_seconds() / 3600)
+    oldest_o: float | None = None
+    for r in revals:
+        basis, limit = _due_basis(r)
+        age = _age(basis, now)
+        if age is not None:
+            over = (age - limit).total_seconds() / 3600
+            oldest_o = over if oldest_o is None else max(oldest_o, over)
+    return {
+        "candidates_due": len(cands), "revalidations_due": len(revals),
+        "oldest_candidate_hours": None if oldest_c is None else int(oldest_c),
+        "oldest_overdue_hours": None if oldest_o is None else max(0, int(oldest_o)),
+    }  # fmt: skip
+
+
 @dataclass
 class ValidationSummary:
     attempted: int = 0
@@ -476,8 +536,14 @@ class ValidationSummary:
     by_ats: dict[str, dict[str, int]] = field(default_factory=dict)
     deferred_by_policy: int = 0
     paused: list[str] = field(default_factory=list)  # providers skipped after a streak of transient failures
-    remaining_due: int = 0
+    remaining_due: int = 0  # both queues together
     seconds: float = 0.0
+    candidates_due: int = 0  # never-validated (or parked) boards due at the start
+    revalidations_due: int = 0  # validated / invalid boards past their re-check age at the start
+    attempted_candidates: int = 0
+    attempted_revalidations: int = 0
+    oldest_candidate_hours: int | None = None
+    oldest_overdue_hours: int | None = None
 
 
 def run_validation(
@@ -496,23 +562,36 @@ def run_validation(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     breaker_after: int = 15,
+    max_revalidations: int = 500,
 ) -> ValidationSummary:
     """Validate due boards in bounded, persisted waves. Bounded by count, time and per-provider
-    rate limits; a provider that fails `breaker_after` times in a row is paused for the run."""
+    rate limits; a provider that fails `breaker_after` times in a row is paused for the run.
+
+    Two queues with their OWN budgets: never-validated candidates (`max_boards`) and overdue
+    re-checks of validated / invalid boards (`max_revalidations`, oldest first), merged by strict
+    alternation, so an enormous candidate backlog can never starve the re-checks (or vice versa)."""
     summary = ValidationSummary()
     started = clock()
     limiter = limiter or HostLimiter(sleep=sleep)
     changed_all: dict[str, BoardRecord] = {}
 
-    # Policy: boards a provider's robots.txt does not allow us to bulk-check are parked, not dropped.
+    # Policy: boards a provider's robots.txt does not allow us to bulk-check are parked, not dropped
+    # (waiting boards too: they must not be promoted into polling a disallowed host).
     for rec in registry.values():
-        if rec.status in (STATUS_CANDIDATE, STATUS_DEFERRED) and (why := policy_blocks(rec.ats, allow_smartrecruiters=allow_smartrecruiters)):
+        if rec.status in (STATUS_CANDIDATE, STATUS_DEFERRED, STATUS_VALIDATED) and (why := policy_blocks(rec.ats, allow_smartrecruiters=allow_smartrecruiters)):
             if rec.status != STATUS_DEFERRED or rec.validation != V_DEFERRED:
                 apply_validation(rec, ValidationResult(V_DEFERRED, error=why), now)
+                rec.pool_reason = f"parked {now:%Y-%m-%d}: provider policy (SmartRecruiters robots.txt); history kept"
                 changed_all[rec.key] = rec
                 summary.deferred_by_policy += 1
-    due = interleave_by_ats(sorted((r for r in registry.values() if validation_due(r, now, allow_smartrecruiters=allow_smartrecruiters)), key=_priority))
-    summary.remaining_due = max(0, len(due) - max_boards)
+    stats = queue_stats(registry, now, allow_smartrecruiters=allow_smartrecruiters)
+    summary.candidates_due, summary.revalidations_due = stats["candidates_due"] or 0, stats["revalidations_due"] or 0
+    summary.oldest_candidate_hours, summary.oldest_overdue_hours = stats["oldest_candidate_hours"], stats["oldest_overdue_hours"]
+    due = [r for r in registry.values() if validation_due(r, now, allow_smartrecruiters=allow_smartrecruiters)]
+    cand_queue = interleave_by_ats(sorted((r for r in due if not is_revalidation(r)), key=_priority))[: max(0, max_boards)]
+    reval_queue = interleave_by_ats(sorted((r for r in due if is_revalidation(r)), key=revalidation_order))[: max(0, max_revalidations)]
+    reval_keys = {r.key for r in reval_queue}
+    summary.remaining_due = (summary.candidates_due - len(cand_queue)) + (summary.revalidations_due - len(reval_queue))
     streak: dict[str, int] = collections.defaultdict(int)
     lock = threading.Lock()
 
@@ -527,7 +606,12 @@ def run_validation(
             streak[rec.ats] = streak[rec.ats] + 1 if res.outcome == V_TRANSIENT else 0
         return rec, res
 
-    todo = due[:max_boards]
+    todo: list[BoardRecord] = []  # strict alternation starting with a re-check, then whichever queue remains
+    for i in range(max(len(cand_queue), len(reval_queue))):
+        if i < len(reval_queue):
+            todo.append(reval_queue[i])
+        if i < len(cand_queue):
+            todo.append(cand_queue[i])
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         for i in range(0, len(todo), wave):
             if clock() - started > max_seconds:
@@ -537,6 +621,10 @@ def run_validation(
                 if res is None:
                     continue
                 summary.attempted += 1
+                if rec.key in reval_keys:
+                    summary.attempted_revalidations += 1
+                else:
+                    summary.attempted_candidates += 1
                 summary.by_outcome[res.outcome] = summary.by_outcome.get(res.outcome, 0) + 1
                 summary.by_ats.setdefault(rec.ats, {}).setdefault(res.outcome, 0)
                 summary.by_ats[rec.ats][res.outcome] += 1
@@ -703,6 +791,15 @@ def format_report(res: ImportResult | None, summary: ValidationSummary | None, c
     return "\n".join(lines)
 
 
+def queue_lines(cand_due: int, cand_done: int, cand_oldest: int | None, reval_due: int, reval_done: int, reval_oldest: int | None) -> list[str]:
+    """The two validation queues, each with its own budget: how many are due, how many this run did, how long the oldest waits."""
+    hours = lambda h: "n/a" if h is None else f"{h} h"  # noqa: E731
+    return [
+        f"  candidates:    due {cand_due}, attempted {cand_done}, oldest waiting {hours(cand_oldest)}",
+        f"  revalidations: overdue {reval_due}, attempted {reval_done}, oldest overdue {hours(reval_oldest)}",
+    ]
+
+
 def _registry_lines(summary: ValidationSummary | None, counts: dict[str, int]) -> str:
     lines: list[str] = []
     if summary:
@@ -711,6 +808,8 @@ def _registry_lines(summary: ValidationSummary | None, counts: dict[str, int]) -
                   + (f" | parked by policy: {summary.deferred_by_policy}" if summary.deferred_by_policy else "")]  # fmt: skip
         for ats, c in sorted(summary.by_ats.items()):
             lines.append(f"  {ats:<16}{c}")
+        lines += queue_lines(summary.candidates_due, summary.attempted_candidates, summary.oldest_candidate_hours,
+                             summary.revalidations_due, summary.attempted_revalidations, summary.oldest_overdue_hours)  # fmt: skip
     lines += ["", f"REGISTRY: discovered {counts['discovered']} | validated {counts['validated']} | actively monitored {counts['monitored']} | "
               f"waiting for a slot {counts['waiting']} | unvalidated candidates {counts['candidates']} | invalid {counts['invalid']} | parked {counts['deferred']} | disabled {counts['disabled']}"]  # fmt: skip
     return "\n".join(lines)

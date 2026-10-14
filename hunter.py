@@ -38,6 +38,7 @@ import discovery as dsc
 import freshness as fr
 import ledger as lg
 import pipeline as pl
+import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
 from freshness import parse_posted
 from state import CsvState, SheetState
@@ -152,6 +153,21 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
     ("Max_Active_Boards", "500", "Most company boards checked every hour. Imported boards join gradually, best matches first, up to this limit."),
     ("Max_New_Boards_Per_Run", "50", "Most new boards added to the hourly checks in a single run (each one is read once as a starting point)."),
+    (
+        "Exploration_Share_Percent",
+        "20",
+        "Share (0-100) of Max_Active_Boards kept for newly added boards on a trial; the rest is for boards that proved themselves. "
+        "20 is a starting choice, not a proven best value.",
+    ),
+    ("Exploration_Days", "7", "How many days a newly added board is tried before it is compared with the others. 7 is a starting choice, not a proven best value."),
+    ("Rebalance_Every_Days", "7", "How often, in days, boards that finished their trial are compared with the weakest proven boards."),
+    ("Max_Replacements_Per_Rebalance", "20", "Most proven boards that can be replaced in one weekly comparison."),
+    (
+        "Rebalance_Mode",
+        "report",
+        "report = the weekly comparison only writes a report (nothing is replaced); on = it replaces boards. "
+        "Check the report first: run the Job Hunter workflow with 'rebalance_report' ticked.",
+    ),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
 
@@ -183,6 +199,18 @@ class Settings:
     timezone: str = ""
     max_active_boards: int = 500
     max_new_boards_per_run: int = 50
+    exploration_share_percent: int = 20
+    exploration_days: int = 7
+    rebalance_every_days: int = 7
+    max_replacements_per_rebalance: int = 20
+    rebalance_mode: str = "report"
+
+    @property
+    def pool_policy(self) -> pools.PoolPolicy:
+        return pools.PoolPolicy(
+            max_active=self.max_active_boards, exploration_pct=self.exploration_share_percent, exploration_days=self.exploration_days,
+            rebalance_every_days=self.rebalance_every_days, max_replacements=self.max_replacements_per_rebalance, mode=self.rebalance_mode,
+        )  # fmt: skip
 
     @classmethod
     def from_values(cls, raw: dict[str, str], resume_fallback: str = "") -> Settings:
@@ -205,6 +233,11 @@ class Settings:
             timezone=pick("Timezone"),
             max_active_boards=max(1, _int_or(pick("Max_Active_Boards"), 500)),
             max_new_boards_per_run=max(1, _int_or(pick("Max_New_Boards_Per_Run"), 50)),
+            exploration_share_percent=min(100, max(0, _int_or(pick("Exploration_Share_Percent"), 20))),
+            exploration_days=max(1, _int_or(pick("Exploration_Days"), 7)),
+            rebalance_every_days=max(1, _int_or(pick("Rebalance_Every_Days"), 7)),
+            max_replacements_per_rebalance=max(0, _int_or(pick("Max_Replacements_Per_Rebalance"), 20)),
+            rebalance_mode=pick("Rebalance_Mode").lower() if pick("Rebalance_Mode").lower() in REBALANCE_MODES else "report",
         )
 
     @property
@@ -212,6 +245,7 @@ class Settings:
         return f"Stale (>{self.max_age_days}d old)"
 
 
+REBALANCE_MODES = ("report", "on")
 LEGACY_FRESH_WINDOW_HOURS = 4  # the default before the 12-hour window; kept if the user still has it
 
 
@@ -226,6 +260,9 @@ def settings_notes(raw: dict[str, str]) -> list[str]:
                 f"{key} is {LEGACY_FRESH_WINDOW_HOURS} (the old default; the new default is {fr.DEFAULT_FRESH_WINDOW_HOURS}) - "
                 f"kept as configured; change it in Settings to use {fr.DEFAULT_FRESH_WINDOW_HOURS}"
             )
+    mode = (raw.get("Rebalance_Mode") or "").strip() or (os.getenv("REBALANCE_MODE") or "").strip()
+    if mode and mode.lower() not in REBALANCE_MODES:
+        notes.append(f"Rebalance_Mode is '{mode}' (expected 'report' or 'on') - using 'report': the weekly rebalance only writes a report")
     return notes
 
 
@@ -1442,7 +1479,10 @@ def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excl
 
     def save(recs: list[Any]) -> None:
         if not dry:
-            state.save_boards(recs)
+            # Compare-and-set (D-28): a row the poller promoted since we loaded it is not overwritten.
+            skipped = state.save_boards(recs, skip_if_status=inventory.POLLER_OWNED)
+            if skipped:
+                log.info("Skipped %d registry rows now owned by the hourly poller (monitored or disabled since this run loaded them)", len(skipped))
 
     cache = inventory.InventoryCache(Path(args.inventory_cache) if args.inventory_cache else INVENTORY_CACHE_DIR)
     sources = inventory.SOURCES if args.source == "all" else (args.source,)
@@ -1462,10 +1502,35 @@ def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excl
         summary = inventory.run_validation(
             registry, save=save, now=now, title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
             max_boards=args.max_validations, max_seconds=args.max_seconds, allow_smartrecruiters=allow_sr,
+            max_revalidations=args.max_revalidations,
         )  # fmt: skip
     print(inventory.format_report(res, summary, boards_mod.registry_counts(registry)))
     if res and all(r.status == "failed" for r in res.overlap.per_source.values()):
         return 1
+    return 0
+
+
+def run_rebalance_report(store: Any, settings: Settings, allow_sr: bool) -> int:
+    """Dry-run board rebalance report: what the next run and the next weekly rebalance would do.
+    Read-only: it loads the registry, ledger and Discovery tab and writes nothing."""
+    now = fr.utcnow()
+    state = store.state
+    registry = state.load_boards()
+    states = lg.replay(state.load_events())
+    stamp_json = state.load_discovery_state().get(pools.REBALANCE_KEY)
+
+    def blocked(ats: str) -> str | None:
+        return inventory.policy_blocks(ats, allow_smartrecruiters=allow_sr)
+
+    pv = pools.preview(registry, states, settings.pool_policy, now, blocked, stamp_json)
+    print(pools.format_report(pv, settings.pool_policy, now))
+    stats = inventory.queue_stats(registry, now, allow_smartrecruiters=allow_sr)
+    print("\nVALIDATION QUEUES (each has its own budget)")
+    print("\n".join(inventory.queue_lines(
+        int(stats["candidates_due"] or 0), 0, stats["oldest_candidate_hours"],
+        int(stats["revalidations_due"] or 0), 0, stats["oldest_overdue_hours"],
+    )))  # fmt: skip
+    print(inventory.format_report(None, None, boards_mod.registry_counts(registry)))
     return 0
 
 
@@ -1491,11 +1556,13 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--source", choices=["all", *inventory.SOURCES], default="all", help="limit --import-inventory to one source")
     inv.add_argument("--offline", action="store_true", help="import from the cached copies only (no download)")
     inv.add_argument("--max-validations", type=int, default=500, help="most boards to validate in this run")
+    inv.add_argument("--max-revalidations", type=int, default=500, help="most overdue re-checks of validated / invalid boards per --validate run (separate budget, oldest first)")
     inv.add_argument("--max-seconds", type=float, default=900.0, help="time budget for --validate")
     inv.add_argument("--allow-smartrecruiters", action="store_true", help="also bulk-validate SmartRecruiters boards (its robots.txt disallows generic crawlers)")
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
+    parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -1521,6 +1588,9 @@ def main(argv: list[str] | None = None) -> int:
         config_notes.append(tz_warning)
     for note in config_notes:
         log.warning("Settings: %s", note)
+    if args.rebalance_report:
+        allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
+        return run_rebalance_report(store, settings, allow_sr)
     if inventory_mode:
         return run_inventory(args, store, settings, excluded)
     groq = GroqClient(cfg)
@@ -1562,6 +1632,7 @@ def main(argv: list[str] | None = None) -> int:
         max_age_days=settings.max_age_days,
         max_monitored_boards=settings.max_active_boards,
         max_new_boards_per_run=settings.max_new_boards_per_run,
+        pool_policy=settings.pool_policy,
         max_jobs=cfg.max_jobs,
         discovery_every_hours=settings.discovery_every_hours,
         force_discovery=args.discover or args.backfill,

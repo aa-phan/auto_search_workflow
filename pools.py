@@ -9,6 +9,7 @@ Rules: SPEC.md "Board registry" and DECISIONS.md D-23 (evidence), D-26 (pools), 
 from __future__ import annotations
 
 import collections
+import copy
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ import eligibility
 import ledger as lg
 from boards import (
     MONITORED, POOL_ESTABLISHED, POOL_EXPLORATION, STAMP, STATUS_ACTIVE, STATUS_DEFERRED, STATUS_DISABLED, STATUS_NEW,
-    STATUS_VALIDATED, V_DEFERRED, BoardId, BoardRecord, ListedJob, is_waiting_candidate, open_jobs as open_jobs_uncapped,
+    STATUS_VALIDATED, V_DEFERRED, BoardId, BoardRecord, ListedJob, admission_order, is_waiting_candidate, open_jobs as open_jobs_uncapped,
 )  # fmt: skip
 
 # A board needs a stint this long before "no new postings" may be read as a real zero.
@@ -573,3 +574,77 @@ def plan_json(plan: RebalancePlan, now: datetime, mode: str) -> str:
         body["omitted_decisions"] = omitted
         text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
     return text
+
+
+# --------------------------------------------------------------------------- dry run (D-30)
+
+
+@dataclass
+class Preview:
+    sync: SyncResult
+    plan: RebalancePlan
+    cov: dict[str, Any]
+    due: bool
+    admission: list[BoardRecord]
+    last_rebalance: str = ""
+
+
+def preview(registry: dict[str, BoardRecord], states: dict[str, lg.JobState], policy: PoolPolicy, now: datetime,
+            blocked: Callable[[str], Any] | None, stamp_json: str | None) -> Preview:
+    """What the next run would do, computed on a deep copy: nothing in `registry` is changed and
+    nothing is written. The plan is computed as if a rebalance were due right now."""
+    work = copy.deepcopy(registry)
+    sync = sync_pools(work, policy, now, blocked)
+    index = ActivityIndex.from_states(states)
+    for rec in work.values():
+        if rec.status in MONITORED:
+            refresh_activity(rec, index, now)
+    plan = plan_rebalance(work, policy, now, blocked)
+    last = ""
+    try:
+        last = str(json.loads(stamp_json).get("at", "")) if stamp_json else ""
+    except (ValueError, AttributeError):
+        last = ""
+    return Preview(sync, plan, coverage(work, now, blocked), rebalance_due(stamp_json, registry, now, policy), admission_order(work, blocked), last)
+
+
+def format_report(pv: Preview, policy: PoolPolicy, now: datetime) -> str:
+    """The dry-run board rebalance report (hunter.py --rebalance-report). Read-only."""
+    p, cov = pv.plan, pv.cov
+    lines = [
+        "BOARD REBALANCE REPORT (dry run)", "",
+        f"mode: {policy.mode} ({'the weekly rebalance is applied' if policy.mode == 'on' else 'the weekly rebalance only records a report; nobody moves'})",
+        f"policy: Max_Active_Boards {policy.max_active} = established {policy.established_target} + exploration {policy.exploration_target} "
+        f"({policy.exploration_pct}% exploration, initial choices, not proven values) | trial {policy.exploration_days} days | "
+        f"rebalance every {policy.rebalance_every_days} days | at most {policy.max_replacements} established boards replaced per cycle",
+        f"score = {RATE_WEIGHT:g} x min(new relevant postings per week, {RATE_CAP:g}) + min(open eligible jobs, {OPEN_CAP}); a trial must beat an "
+        f"established board by more than {MARGIN:g}, which must be weak in {WEAK_CYCLES_TO_DEMOTE} consecutive cycles; decisions need "
+        f"{policy.min_complete_polls} complete polls, a good last poll and evidence under 24 h old",
+        "",
+        "COVERAGE",
+        f"  monitored {cov['monitored']}/{policy.max_active}: established {cov['established']}/{policy.established_target}, exploration {cov['exploration']}/{policy.exploration_target}",
+        f"  relevant boards waiting for a slot: {cov['waiting']}"
+        + (f" (oldest has waited {cov['oldest_waiting_hours']} h)" if cov["oldest_waiting_hours"] is not None else ""),
+        f"  monitored boards with open relevant jobs: {cov['open_monitored']} -> relevant-board coverage "
+        + (f"{cov['coverage_pct']}%" if cov["coverage_pct"] is not None else "n/a"),
+        "",
+        "WHAT THE NEXT RUN WOULD CHANGE BEFORE ANY REBALANCE",
+        f"  monitored SmartRecruiters boards parked by provider policy: {len(pv.sync.parked)}",
+        f"  boards monitored before pools existed that would start an exploration trial: {len(pv.sync.migrated)}",
+        f"  stale pool labels that would be cleared: {len(pv.sync.cleared)}",
+        "",
+        "REBALANCE PLAN (as if run now)",
+    ]
+    lines += [f"  {ln}" for ln in format_plan(p, pv.cov, policy)]
+    lines += ["", f"NEXT BOARDS TO ENTER A FREE SLOT (never-tried boards first; {len(pv.admission)} waiting in all)"]
+    for r in pv.admission[:20]:
+        lines.append(f"  {r.key}: {open_jobs_uncapped(r)} open eligible, {r.relevant_jobs} relevant jobs, {'trial ' + str(r.trials + 1) if r.trials else 'never tried'}")
+    if not pv.admission:
+        lines.append("  none")
+    lines += [
+        "",
+        f"scheduled rebalance: {'due at the next run' if pv.due else 'not due yet'}"
+        + (f" (last recorded {pv.last_rebalance})" if pv.last_rebalance else " (none recorded)"),
+        "dry run: nothing was written",
+    ]
+    return "\n".join(lines)
