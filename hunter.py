@@ -32,6 +32,7 @@ from bs4 import BeautifulSoup
 
 import boards as boards_mod
 import eligibility
+import inventory
 import freshness as fr
 import ledger as lg
 import pipeline as pl
@@ -51,6 +52,7 @@ log = logging.getLogger("hunter")
 BASE_DIR = Path(__file__).resolve().parent
 TRACKER_PATH = BASE_DIR / "tracked_jobs.csv"
 STATE_DIR = BASE_DIR / "state"  # local fallback for Boards / Events / Runs
+INVENTORY_CACHE_DIR = STATE_DIR / "inventory"  # last-known-good copies of the downloaded inventories
 RESUME_PATH = BASE_DIR / "resume.txt"
 
 SETTINGS_TAB = "Settings"
@@ -137,6 +139,8 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ("Max_Job_Age_Days", "14", "Jobs published more than this many days ago are skipped as stale."),
     ("Fresh_Window_Hours", "4", "Only jobs published (or first listed) within this many hours trigger a Telegram alert."),
     ("Discovery_Every_Hours", "12", "How often the app searches Google for new company job boards to watch."),
+    ("Max_Active_Boards", "500", "Most company boards checked every hour. Imported boards join gradually, best matches first, up to this limit."),
+    ("Max_New_Boards_Per_Run", "50", "Most new boards added to the hourly checks in a single run (each one is read once as a starting point)."),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
 
@@ -164,6 +168,8 @@ class Settings:
     max_age_days: int
     fresh_window_hours: int = 4
     discovery_every_hours: int = 12
+    max_active_boards: int = 500
+    max_new_boards_per_run: int = 50
 
     @classmethod
     def from_values(cls, raw: dict[str, str], resume_fallback: str = "") -> Settings:
@@ -182,6 +188,8 @@ class Settings:
             max_age_days=_int_or(pick("Max_Job_Age_Days"), 14),
             fresh_window_hours=max(1, _int_or(pick("Fresh_Window_Hours"), 4)),
             discovery_every_hours=max(1, _int_or(pick("Discovery_Every_Hours"), 12)),
+            max_active_boards=max(1, _int_or(pick("Max_Active_Boards"), 500)),
+            max_new_boards_per_run=max(1, _int_or(pick("Max_New_Boards_Per_Run"), 50)),
         )
 
     @property
@@ -224,11 +232,11 @@ class Config:
         return cls(
             search_api_key=env("SERPER_API_KEY", env("SEARCH_API_KEY")),
             groq_api_key=env("GROQ_API_KEY"),
-            groq_model=env("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            groq_fallback_model=env("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant"),
+            groq_model=env("GROQ_MODEL", "openai/gpt-oss-120b"),
+            groq_fallback_model=env("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b"),
             # Free-tier tokens-per-minute budgets; a 429 from Groq still wins over these.
-            groq_tpm=_int_or(env("GROQ_TPM"), 12000),
-            groq_fallback_tpm=_int_or(env("GROQ_FALLBACK_TPM"), 6000),
+            groq_tpm=_int_or(env("GROQ_TPM"), 8000),
+            groq_fallback_tpm=_int_or(env("GROQ_FALLBACK_TPM"), 8000),
             llm_interval=float(env("LLM_MIN_INTERVAL_SECONDS", "2.2")),
             sheet_id=env("GOOGLE_SHEET_ID"),
             service_account=env("GOOGLE_SERVICE_ACCOUNT_JSON"),
@@ -673,7 +681,7 @@ def hydrate_posting(ref: AtsRef) -> Posting:
 
 JD_CHARS = 7000  # keep each call small: Groq's free tier is limited by tokens per minute
 RESUME_CHARS = 7000
-MAX_OUTPUT_TOKENS = 400
+MAX_OUTPUT_TOKENS = 1000  # gpt-oss models spend hidden reasoning tokens first; 400 truncated the JSON (verified live)
 GROQ_ATTEMPTS = 6
 FALLBACK_HOLD_SECONDS = 90  # after a 429 on the primary model, stay on the fallback this long
 
@@ -814,9 +822,10 @@ class GroqClient:
         }
         self._last_call = 0.0
         self._fallback_until = 0.0
+        self.unavailable: set[str] = set()  # models Groq reported as not existing / not accessible
 
     def _model(self) -> str:
-        if time.monotonic() < self._fallback_until:
+        if self.cfg.groq_model in self.unavailable or time.monotonic() < self._fallback_until:
             return self.cfg.groq_fallback_model
         return self.cfg.groq_model
 
@@ -825,6 +834,15 @@ class GroqClient:
         if wait > 0:
             time.sleep(wait)
         self._last_call = time.monotonic()
+
+    def _learn_limit(self, model: str, resp: requests.Response) -> None:
+        """Use the tokens-per-minute limit Groq reports for this model instead of a guess."""
+        try:
+            limit = int(resp.headers.get("x-ratelimit-limit-tokens", ""))
+        except ValueError:
+            return
+        if limit > 0 and model in self.budgets:
+            self.budgets[model].tpm = limit
 
     def evaluate(self, s: Settings, posting: Posting) -> Evaluation:
         """Score one job. Raises TransientError if Groq stays unavailable (retry next run),
@@ -865,12 +883,23 @@ class GroqClient:
                 continue
             if code in {401, 403}:
                 raise GroqAuthError(f"Groq rejected the API key (HTTP {code}); check GROQ_API_KEY")
+            if code == 404 and "model_not_found" in resp.text:
+                self.unavailable.add(model)
+                log.warning("Groq model %s does not exist or is not accessible to this key", model)
+                if {self.cfg.groq_model, self.cfg.groq_fallback_model} <= self.unavailable:
+                    raise GroqAuthError(
+                        f"Neither Groq model is available to this key ({self.cfg.groq_model}, {self.cfg.groq_fallback_model}). "
+                        "List usable ones with GET https://api.groq.com/openai/v1/models and set GROQ_MODEL / GROQ_FALLBACK_MODEL."
+                    )
+                continue
+            self._learn_limit(model, resp)
             if code >= 500:
                 time.sleep(min(30, 3 * 2**attempt))
                 continue
             if code >= 400:
                 if "json_validate_failed" in resp.text:  # model emitted bad JSON: just retry
                     parse_failures += 1
+                    log.warning("Groq (%s) produced invalid JSON: %s", model, resp.text[:240].replace("\n", " "))
                     continue
                 raise ValueError(f"Groq HTTP {code}: {resp.text[:200]}")
             data = resp.json()
@@ -1295,6 +1324,42 @@ def load_resume_file(path: Path = RESUME_PATH) -> str:
     return "\n".join(lines).strip()
 
 
+def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excluded: re.Pattern[str] | None) -> int:
+    """Manual / weekly inventory commands: import, validate, report. Never scores or alerts."""
+    now = fr.utcnow()
+    state = store.state
+    registry = state.load_boards()
+    dry = args.dry_run
+
+    def save(recs: list[Any]) -> None:
+        if not dry:
+            state.save_boards(recs)
+
+    cache = inventory.InventoryCache(Path(args.inventory_cache) if args.inventory_cache else INVENTORY_CACHE_DIR)
+    sources = inventory.SOURCES if args.source == "all" else (args.source,)
+    res = summary = None
+    if args.import_inventory:
+        def offline(url: str) -> bytes:
+            raise inventory.InventoryError("--offline: using cached copies only")
+
+        meta = state.load_inventory_meta()
+        res = inventory.import_inventories(
+            registry, cache=cache, save=save, now=now, sources=sources, meta=meta, get=offline if args.offline else inventory.http_get_bytes
+        )
+        if not dry:
+            state.save_inventory_meta(meta)
+    if args.validate:
+        allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
+        summary = inventory.run_validation(
+            registry, save=save, now=now, title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
+            max_boards=args.max_validations, max_seconds=args.max_seconds, allow_smartrecruiters=allow_sr,
+        )  # fmt: skip
+    print(inventory.format_report(res, summary, boards_mod.registry_counts(registry)))
+    if res and all(r.status == "failed" for r in res.overlap.per_source.values()):
+        return 1
+    return 0
+
+
 def _seed(value: str) -> BoardId:
     ats, _, board = value.partition(":")
     if ats not in boards_mod.ATS_LIST or not board:
@@ -1309,7 +1374,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--discover", action="store_true", help="run the Serper discovery loop now, regardless of schedule")
     parser.add_argument("--no-tbs", action="store_true", help="discovery without the 3-day search window (unfiltered backfill)")
     parser.add_argument("--seed", action="append", default=[], type=_seed, metavar="ATS:BOARD", help="register a board manually (repeatable)")
+    inv = parser.add_argument_group("inventory (seed the registry from public company lists; never scores or alerts)")
+    inv.add_argument("--import-inventory", action="store_true", help="download both inventories and merge new boards into the registry")
+    inv.add_argument("--validate", action="store_true", help="validate unvalidated / due boards through the ATS adapters")
+    inv.add_argument("--inventory-report", action="store_true", help="print registry counts (discovered / validated / monitored)")
+    inv.add_argument("--source", choices=["all", *inventory.SOURCES], default="all", help="limit --import-inventory to one source")
+    inv.add_argument("--offline", action="store_true", help="import from the cached copies only (no download)")
+    inv.add_argument("--max-validations", type=int, default=500, help="most boards to validate in this run")
+    inv.add_argument("--max-seconds", type=float, default=900.0, help="time budget for --validate")
+    inv.add_argument("--allow-smartrecruiters", action="store_true", help="also bulk-validate SmartRecruiters boards (its robots.txt disallows generic crawlers)")
+    inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
     args = parser.parse_args(argv)
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -1317,19 +1393,21 @@ def main(argv: list[str] | None = None) -> int:
         cfg = replace(cfg, search_tbs="")
 
     try:
-        if not cfg.groq_api_key:
+        if not cfg.groq_api_key and not inventory_mode:
             raise RuntimeError("GROQ_API_KEY is not set")
         store = make_store(cfg)
         resume_file = load_resume_file()
         store.bootstrap(resume_file)
         settings = Settings.from_values(store.load_settings(), resume_fallback=resume_file)
-        if len(settings.resume) < MIN_JD_CHARS:
+        if len(settings.resume) < MIN_JD_CHARS and not inventory_mode:
             raise RuntimeError("Resume_Text is empty. Paste your resume into the Settings tab (or resume.txt).")
     except Exception as exc:
         log.error("Startup failed: %s", exc)
         return 2
 
     excluded = excluded_title_regex(settings.excluded)
+    if inventory_mode:
+        return run_inventory(args, store, settings, excluded)
     groq = GroqClient(cfg)
     evaluate = make_evaluator(settings, groq, excluded)
 
@@ -1364,6 +1442,8 @@ def main(argv: list[str] | None = None) -> int:
         hydrate_listed=make_serper_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),
         max_age_days=settings.max_age_days,
+        max_monitored_boards=settings.max_active_boards,
+        max_new_boards_per_run=settings.max_new_boards_per_run,
         max_jobs=cfg.max_jobs,
         discovery_every_hours=settings.discovery_every_hours,
         force_discovery=args.discover,

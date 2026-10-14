@@ -6,6 +6,7 @@ Adapters read each ATS's public list endpoint (one request per board; SmartRecru
 
 from __future__ import annotations
 
+import collections
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -37,14 +38,27 @@ _RESERVED_SEGMENTS = {"embed", "api", "static", "assets", "v1", "robots.txt", "f
 # --------------------------------------------------------------------------- identity
 
 
+# Identifier casing is real data: Lever and Workable APIs 404 on a wrongly cased slug, while
+# Greenhouse, Ashby and SmartRecruiters ignore case (verified live). Board identity follows that.
+CASE_SENSITIVE_ATS = frozenset({LEVER, WORKABLE})
+
+
+def _prefix(ats: str, region: str) -> str:
+    """Provider plus region/API host. Empty region = the default (US) host, so keys for every
+    board we already track are unchanged."""
+    return f"{ats}@{region.lower()}" if region else ats
+
+
 @dataclass(frozen=True)
 class BoardId:
     ats: str
-    board: str  # as the ATS spells it (case matters for some APIs)
+    board: str  # as the ATS spells it; this exact string is what API calls use
+    region: str = ""  # "" = default host; e.g. "eu" for a regional API host
 
     @property
     def key(self) -> str:
-        return f"{self.ats}|{self.board.lower()}"
+        ident = self.board if self.ats in CASE_SENSITIVE_ATS else self.board.lower()
+        return f"{_prefix(self.ats, self.region)}|{ident}"
 
 
 @dataclass(frozen=True)
@@ -52,16 +66,19 @@ class JobIdentity:
     ats: str
     board: str
     job_id: str
+    region: str = ""
 
     @property
     def board_id(self) -> BoardId:
-        return BoardId(self.ats, self.board)
+        return BoardId(self.ats, self.board, self.region)
 
     @property
     def key(self) -> str:
-        """The dedupe key. Independent of URL host, slug, case of the board, or tracking params."""
+        """The dedupe key. Independent of URL host, slug, case of the board, or tracking params.
+        The board part stays lowercase for every ATS (job IDs are globally unique per ATS), so
+        keys written before region/casing support remain valid."""
         jid = self.job_id.upper() if self.ats == WORKABLE else self.job_id.lower()
-        return f"{self.ats}|{self.board.lower()}|{jid}"
+        return f"{_prefix(self.ats, self.region)}|{self.board.lower()}|{jid}"
 
     @property
     def url(self) -> str:
@@ -281,42 +298,145 @@ def fetch_board(board: BoardId) -> list[ListedJob]:
 
 # --------------------------------------------------------------------------- registry
 
-STATUS_NEW, STATUS_ACTIVE, STATUS_DISABLED = "new", "active", "disabled"
+# Registry statuses.
+#   candidate  imported from an inventory, not validated yet (never polled)
+#   validated  validated OK (valid, possibly empty) and waiting for a monitoring slot
+#   new        activated, not yet baselined: the next poll baselines it
+#   active     baselined and polled every run
+#   invalid    validation proved the board does not exist (kept, never auto-deleted)
+#   deferred   validation blocked by policy (see inventory.HOST_POLICY); kept, not polled
+#   disabled   a monitored board that kept failing; polling stopped
+STATUS_CANDIDATE, STATUS_VALIDATED, STATUS_NEW, STATUS_ACTIVE = "candidate", "validated", "new", "active"
+STATUS_INVALID, STATUS_DEFERRED, STATUS_DISABLED = "invalid", "deferred", "disabled"
+MONITORED = frozenset({STATUS_NEW, STATUS_ACTIVE})
+
+# Validation outcomes.
+V_VALID, V_EMPTY, V_INVALID, V_TRANSIENT, V_DEFERRED = "valid", "valid_empty", "invalid", "transient", "deferred"
+
+STAMP = "%Y-%m-%dT%H:%M:%SZ"
 
 
 @dataclass
 class BoardRecord:
     ats: str
     board: str
-    discovered_at: str  # ISO UTC
-    source: str  # serper | seed
-    status: str = STATUS_NEW  # new = not yet baselined
+    discovered_at: str  # ISO UTC: first time ANY source told us about this board
+    source: str  # the source that discovered it first
+    status: str = STATUS_NEW
     baselined_at: str = ""
     last_attempt_at: str = ""
-    last_success_at: str = ""
+    last_success_at: str = ""  # last successful list of the board (poll or validation)
     consecutive_failures: int = 0
     last_job_count: int = 0
     last_error: str = ""
+    region: str = ""
+    name: str = ""  # display name from an inventory, if any
+    validation: str = ""  # one of V_*; "" = never validated
+    last_validated_at: str = ""  # last time the board's adapter call succeeded
+    relevant_jobs: int = 0  # listed jobs passing the title gate at the last validation
+    provenance: dict[str, Any] = field(default_factory=dict)  # source -> {"first": ts, ...}
 
     @property
     def board_id(self) -> BoardId:
-        return BoardId(self.ats, self.board)
+        return BoardId(self.ats, self.board, self.region)
 
     @property
     def key(self) -> str:
         return self.board_id.key
 
 
-def upsert_boards(registry: dict[str, BoardRecord], found: Iterable[BoardId], *, now: datetime, source: str) -> list[BoardRecord]:
-    """Add every unseen board to the registry (never removes or rewrites existing ones)."""
+@dataclass(frozen=True)
+class Candidate:
+    """A board an inventory or search says exists. Nothing more is assumed."""
+
+    board: BoardId
+    source: str
+    name: str = ""
+    info: dict[str, Any] = field(default_factory=dict)  # source-specific facts (kept as provenance)
+
+
+def add_provenance(rec: BoardRecord, source: str, now: datetime, info: dict[str, Any] | None = None) -> bool:
+    """Record that `source` knows this board. Idempotent: returns True only if something changed."""
+    entry = rec.provenance.get(source)
+    if entry is None:
+        rec.provenance[source] = {"first": now.strftime(STAMP), **(info or {})}
+        return True
+    changed = False
+    for k, v in (info or {}).items():
+        if k != "first" and entry.get(k) != v:
+            entry[k] = v
+            changed = True
+    return changed
+
+
+def merge_candidates(
+    registry: dict[str, BoardRecord], candidates: Iterable[Candidate], *, now: datetime, new_status: str
+) -> tuple[list[BoardRecord], list[BoardRecord]]:
+    """Merge discoveries into the one registry. Returns (added, updated).
+
+    Only provenance, name and the discovery-time facts of an EXISTING board may change here.
+    Status, polling history and validation state are never touched, so re-importing an inventory
+    cannot reset, deactivate or delete anything. A board an upstream list later drops is simply
+    not mentioned again."""
     added: list[BoardRecord] = []
-    for b in found:
-        if b.key in registry:
+    updated: dict[str, BoardRecord] = {}
+    for c in candidates:
+        rec = registry.get(c.board.key)
+        if rec is None:
+            rec = BoardRecord(
+                c.board.ats, c.board.board, now.strftime(STAMP), c.source, new_status, region=c.board.region, name=c.name
+            )
+            add_provenance(rec, c.source, now, c.info)
+            registry[rec.key] = rec
+            added.append(rec)
             continue
-        rec = BoardRecord(b.ats, b.board, now.strftime("%Y-%m-%dT%H:%M:%SZ"), source)
-        registry[b.key] = rec
-        added.append(rec)
+        changed = add_provenance(rec, c.source, now, c.info)
+        if c.name and not rec.name:
+            rec.name, changed = c.name, True
+        if changed and rec not in added:
+            updated[rec.key] = rec
+    return added, list(updated.values())
+
+
+def upsert_boards(registry: dict[str, BoardRecord], found: Iterable[BoardId], *, now: datetime, source: str) -> list[BoardRecord]:
+    """Serper-style discovery: boards found through live job/board URLs are activated for
+    monitoring straight away (status `new`: the next poll baselines them). Returns new boards only."""
+    added, _ = merge_candidates(registry, (Candidate(b, source) for b in found), now=now, new_status=STATUS_NEW)
     return added
+
+
+def registry_counts(registry: dict[str, BoardRecord]) -> dict[str, int]:
+    """discovered / validated / monitored, for the Runs log and the import report."""
+    by_status = collections.Counter(r.status for r in registry.values())
+    return {
+        "discovered": len(registry),
+        "validated": sum(1 for r in registry.values() if r.validation in (V_VALID, V_EMPTY)),
+        "monitored": sum(by_status[s] for s in MONITORED),
+        "waiting": by_status[STATUS_VALIDATED],
+        "candidates": by_status[STATUS_CANDIDATE],
+        "invalid": by_status[STATUS_INVALID],
+        "deferred": by_status[STATUS_DEFERRED],
+        "disabled": by_status[STATUS_DISABLED],
+    }
+
+
+def activate_waiting(
+    registry: dict[str, BoardRecord], *, max_monitored: int, per_run: int
+) -> list[BoardRecord]:
+    """Promote validated boards into monitoring without ever exceeding the polling budget.
+
+    At most `per_run` boards are promoted at once (each promotion baselines a whole board) and
+    never beyond `max_monitored` in total. Boards with listed jobs that match the user's targets
+    go first; a board with nothing relevant right now keeps waiting."""
+    room = min(per_run, max(0, max_monitored - sum(1 for r in registry.values() if r.status in MONITORED)))
+    if room <= 0:
+        return []
+    ready = [r for r in registry.values() if r.status == STATUS_VALIDATED and r.validation == V_VALID and r.relevant_jobs > 0]
+    ready.sort(key=lambda r: (-r.relevant_jobs, r.last_job_count, r.key))
+    promoted = ready[:room]
+    for r in promoted:
+        r.status = STATUS_NEW
+    return promoted
 
 
 @dataclass
@@ -361,13 +481,14 @@ def apply_poll_result(res: PollResult, *, now: datetime) -> tuple[BoardRecord, t
     gap: timedelta | None = None
     if prev:
         try:
-            gap = now - datetime.strptime(prev, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=now.tzinfo)
+            gap = now - datetime.strptime(prev, STAMP).replace(tzinfo=now.tzinfo)
         except ValueError:
             gap = None
     rec.last_attempt_at = stamp
     if res.ok:
         rec.last_success_at, rec.consecutive_failures, rec.last_error = stamp, 0, ""
         rec.last_job_count = len({j.ident.key for j in res.jobs})  # unique IDs (some boards repeat a job per location)
+        rec.validation, rec.last_validated_at = (V_VALID if res.jobs else V_EMPTY), stamp  # a good poll is a validation
         if rec.status == STATUS_DISABLED:
             rec.status = STATUS_ACTIVE if rec.baselined_at else STATUS_NEW
     else:

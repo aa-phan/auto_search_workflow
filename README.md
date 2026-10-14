@@ -34,6 +34,14 @@ Jobs already on a board when we first discover it are **not** treated as new: th
 
 If GitHub runs the job late or skips a run, the hidden `Runs` tab records the real gap, and jobs found after a long gap are labelled honestly (they will show as *Recent*, not *Verified fresh*).
 
+## Where the list of boards comes from
+
+Three sources feed one list: Google searches (every 12 hours), and two public company lists that are imported weekly: [open-ats-feed](https://github.com/veresk06/open-ats-feed) and [ats-scrapers](https://github.com/kalil0321/ats-scrapers) (MIT, see `NOTICE.md`). Together that is about **21,900 boards** on the five supported systems. Only the *names of boards* come from those lists: every job is read from the company's own board.
+
+Not every listed board is checked every hour. New boards are first **validated** (does it exist? does it have jobs that match your targets?) by a separate workflow (**Board Inventory**, weekly refresh plus a daily validation pass), then the best matches are added to the hourly checks within the limit set by `Max_Active_Boards`. Each newly watched board is read once as a starting point, so its existing jobs never look "just posted". The hidden `Boards` tab shows every board, where it came from, and its status; the hidden `Runs` tab shows how many were discovered, validated and actively watched.
+
+Providers these lists contain but this app cannot read yet (for example Breezy, Recruitee, Teamtailor, Workday, BambooHR, Personio) are counted in the import report and ignored. **SmartRecruiters** boards from the lists are parked rather than bulk-checked, because that company's own `robots.txt` asks automated tools to stay away.
+
 ## What you'll use (all have free tiers)
 
 | Service | What it does | Where to get the key |
@@ -98,6 +106,8 @@ The first runs mostly *learn* the boards (quietly recording what is already ther
 | `Max_Job_Age_Days` | Jobs published longer ago than this are skipped. |
 | `Fresh_Window_Hours` | How recent "verified fresh" must be (default 4). |
 | `Discovery_Every_Hours` | How often it searches Google for new boards to watch (default 12). |
+| `Max_Active_Boards` | Most company boards checked every hour (default 500). Imported boards join gradually, best matches first, up to this limit. |
+| `Max_New_Boards_Per_Run` | Most new boards added to the hourly checks in one run (default 50). |
 
 **Job Tracker tab** shows jobs scoring 50 or higher. The script only ever *adds* rows, so your edits are safe:
 
@@ -152,9 +162,13 @@ python hunter.py --seed greenhouse:gyde --dry-run   # poll one board, classify j
 python hunter.py --url "https://boards.greenhouse.io/<board>/jobs/<id>"   # run one job through the real gates and scorer
 python hunter.py --discover                          # force a board-discovery pass now
 python hunter.py --discover --no-tbs                 # discovery without the 3-day search window
+python hunter.py --import-inventory                  # download both company lists and merge new boards (idempotent)
+python hunter.py --validate --max-validations 500    # check unvalidated boards (Lever is limited to 1 request/second)
+python hunter.py --inventory-report                  # counts: discovered / validated / actively monitored
+python hunter.py --import-inventory --offline        # re-merge from the saved copies (no download)
 python -m unittest discover -s tests                 # offline tests
 ```
 
-Optional environment variables: `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES`, `SEARCH_TBS` (default `qdr:d3`), `ALERT_WEBHOOK_URL`.
+Optional environment variables: `GROQ_MODEL` (default `openai/gpt-oss-120b`), `GROQ_FALLBACK_MODEL` (default `openai/gpt-oss-20b`), `ALLOW_SMARTRECRUITERS_BULK`, `MAX_JOBS_PER_RUN`, `SEARCH_PAGES`, `SEARCH_TBS` (default `qdr:d3`), `ALERT_WEBHOOK_URL`.
 
 Project documents for contributors and agents: `SPEC.md` (requirements), `DECISIONS.md` (why), `STATUS.md` (what is verified), `AGENTS.md`. The earlier keyword-scoring version is kept in `legacy/`.

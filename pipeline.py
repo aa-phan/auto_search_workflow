@@ -19,8 +19,8 @@ from typing import Any, Callable
 import freshness as fr
 import ledger as lg
 from boards import (
-    STATUS_ACTIVE, STATUS_DISABLED, BoardId, BoardRecord, JobIdentity, ListedJob, fetch_board,
-    poll_boards, upsert_boards, apply_poll_result,
+    MONITORED, STATUS_ACTIVE, BoardId, BoardRecord, JobIdentity, ListedJob, activate_waiting, fetch_board,
+    poll_boards, registry_counts, upsert_boards, apply_poll_result,
 )  # fmt: skip
 from state import RunRecord
 
@@ -74,6 +74,8 @@ class Deps:
     max_jobs: int = 30
     discovery_every_hours: int = 12
     force_discovery: bool = False
+    max_monitored_boards: int = 500  # polling budget: validated boards are only promoted up to this many
+    max_new_boards_per_run: int = 50  # each promotion baselines a whole board, so surges are capped
     seeds: list[BoardId] = field(default_factory=list)  # manually registered boards (testing / bootstrap)
     workers: int = 8
     dry_run: bool = False
@@ -109,6 +111,7 @@ def run_cycle(d: Deps) -> RunRecord:
         run.gap_since_prev_run_min = _minutes(now - prev)
     pending_events: list[lg.Event] = []
     pending_rows: list[dict[str, Any]] = []
+    dirty: dict[str, BoardRecord] = {}  # registry rows changed by THIS run (only these are written back)
 
     def write() -> None:
         """Tracker rows first, then events (rule 2)."""
@@ -125,7 +128,9 @@ def run_cycle(d: Deps) -> RunRecord:
 
     try:
         if d.seeds:
-            run.boards_added += len(upsert_boards(boards, d.seeds, now=now, source="seed"))
+            for rec in upsert_boards(boards, d.seeds, now=now, source="seed"):
+                dirty[rec.key] = rec
+                run.boards_added += 1
 
         # ---------------------------------------------------------------- 1. discovery loop
         serper_jobs: list[SerperJob] = []
@@ -133,13 +138,20 @@ def run_cycle(d: Deps) -> RunRecord:
             run.discovery = True
             try:
                 found, serper_jobs = d.discover()
-                run.boards_added += len(upsert_boards(boards, found, now=now, source="serper"))
+                for rec in upsert_boards(boards, found, now=now, source="serper"):
+                    dirty[rec.key] = rec
+                    run.boards_added += 1
             except Exception as exc:  # discovery is best-effort; polling must still happen
                 log.warning("Discovery failed: %s", exc)
                 run.notes += f"discovery failed: {exc}; "
 
         # ---------------------------------------------------------------- 2. polling loop
-        active = [b for b in boards.values() if b.status != STATUS_DISABLED]
+        # Validated inventory boards enter monitoring only within the polling budget; the poll
+        # below then baselines them (their existing jobs never look "just posted").
+        for rec in activate_waiting(boards, max_monitored=d.max_monitored_boards, per_run=d.max_new_boards_per_run):
+            dirty[rec.key] = rec
+            run.boards_activated += 1
+        active = [b for b in boards.values() if b.status in MONITORED]
         run.boards_total = len(active)
         max_gap: timedelta | None = None
         for res in poll_boards(active, fetch=d.fetch, workers=d.workers):
@@ -148,6 +160,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 res.ok, res.error = False, "suspicious empty listing (previously had jobs)"
             rec, gap = apply_poll_result(res, now=now)
             boards[rec.key] = rec
+            dirty[rec.key] = rec
             if not res.ok:
                 run.boards_failed += 1
                 continue
@@ -175,6 +188,8 @@ def run_cycle(d: Deps) -> RunRecord:
             if baseline_pass and not rec.baselined_at:
                 rec.baselined_at, rec.status = lg.stamp(now), STATUS_ACTIVE
         run.max_board_gap_min = _minutes(max_gap)
+        counts = registry_counts(boards)
+        run.boards_discovered, run.boards_validated, run.boards_monitored = counts["discovered"], counts["validated"], counts["monitored"]
 
         # Serper-found jobs not on any listing we read: hydrate for an authoritative date first.
         hydrated = 0
@@ -200,7 +215,7 @@ def run_cycle(d: Deps) -> RunRecord:
         if not d.dry_run:
             d.state.append_events(pending_events)
             pending_events = []
-            d.state.save_boards(boards)
+            d.state.save_boards(dirty.values())
         else:
             pending_events = []
 

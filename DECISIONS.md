@@ -51,9 +51,35 @@ Keyword and exclusion checks on listing titles run before any fetch (most board 
 
 `.env`, `Resume.pdf` and `resume.txt` are git-ignored. The resume lives in the Sheet (`Settings > Resume_Text`). `.env.example` could not be written in this environment (permission rule); its template is in the README.
 
+## D-11 Seed the registry from two public inventories
+
+`veresk06/open-ats-feed` (`actor/data/companies.json`: Greenhouse, Ashby, Lever + three providers we do not support) and `kalil0321/ats-scrapers` (`ats-companies/*.csv`: 47 providers, five supported). Both MIT; attribution in `NOTICE.md`. Only board identifiers are used; postings still come from the ATS. Unsupported providers (Breezy, Recruitee, Teamtailor, Workday, Join, BambooHR, ...) are counted and reported, not imported. The feed's README calls its data "public domain" but its LICENSE is MIT; we follow the license.
+
+## D-12 Identity: provider + region + identifier, casing per provider
+
+Verified live: Lever and Workable APIs 404 on a re-cased slug; Greenhouse, Ashby, SmartRecruiters ignore case. So board keys keep case for Lever/Workable only. **Job keys are unchanged** (`ats|board-lowercase|id`; IDs are globally unique per provider), so every existing event and tracker row stays valid. `region` is part of the board and job key when non-empty; neither inventory has regional hosts and no regional adapter is added in this task.
+
+## D-13 Validation semantics and provider policy
+
+404/410 -> `invalid`; 200+jobs -> `valid`; 200+none -> `valid_empty` (Greenhouse, Lever, Ashby and Workable distinguish this from 404; SmartRecruiters does not); timeouts/5xx/429/non-JSON/adapter errors -> retried (1.5 s, 3 s backoff) then `transient`, with exponential re-try spacing across runs. A provider that fails 15 times in a row is paused for the run. Per-provider spacing (Lever 1 s, per its `Crawl-delay`). **SmartRecruiters' API host `robots.txt` says `Disallow: /` for generic agents**; we park its imported boards (`deferred`) unless the user sets `ALLOW_SMARTRECRUITERS_BULK=1`. Existing behavior for SmartRecruiters boards found via Serper (a handful) is unchanged; flagged below.
+
+## D-14 Activation budget (what is "monitored")
+
+Importing ~22,000 boards must not become 22,000 hourly requests. Validated boards wait; the poller promotes the best-matching ones (most title-gate matches first) up to `Max_Active_Boards` (default 500) and `Max_New_Boards_Per_Run` (default 50). Serper-discovered boards keep the old behavior (monitored immediately) and count against the budget. Relevance is a snapshot, so a waiting board with nothing relevant today is re-validated weekly rather than polled hourly.
+
+## D-15 Two writers, one registry
+
+The importer (weekly/daily workflow) and the poller (hourly) can overlap. Registry writes are row-level upserts of only the rows a run changed, never a full rewrite, and each side owns different rows (importer: candidate/validated/invalid/deferred; poller: new/active/disabled). Each workflow has its own concurrency group so imports never delay polling.
+
+## D-16 Groq models (deviation from the original request, needs your OK)
+
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` return 404 `model_not_found` for this account today. Defaults are now `openai/gpt-oss-120b` (primary) and `openai/gpt-oss-20b` (fallback); both verified live on real postings; override with `GROQ_MODEL` / `GROQ_FALLBACK_MODEL`. These are reasoning models, so the output cap rose from 400 to 1,000 tokens (400 truncated the JSON). A model Groq says does not exist is a configuration problem: the client switches models, and if neither works the run stops with a clear message; it no longer records per-job failures that would burn each job's retry attempts.
+
 ## D-10 Open requirement conflicts to confirm with the user
 
 - Earlier request: run every 2 hours on business days only (`0 13-23/2 * * 1-5`). Superseded by the board-polling brief: hourly, 24/7 (`17 * * * *`), because new postings should be caught nights and weekends too. Serper discovery is separately throttled (default every 12 h).
+- SmartRecruiters: imported boards are parked by `robots.txt` policy (D-13) while Serper-found ones are still polled. Say if you want both treated the same way.
+- Groq models changed from the requested pair to the available `gpt-oss` pair (D-16).
 - Earlier request: alert on every `To Apply` job. Now only `verified_fresh` jobs alert; others reach the tracker without a push (see SPEC).
 - Earlier request: hidden `Seen_Archive` tab. Now replaced by `Events` (D-03). Same purpose (dedupe without cluttering the tracker), different identity key.
 - Earlier request: `Date_Posted`-based stale gate for everything. Now: stale only when a source date exists; undated jobs are labelled `uncertain`/`observed_new` and never alerted.

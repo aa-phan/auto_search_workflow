@@ -17,7 +17,22 @@ Surface relevant jobs **within 4 hours of their publication** to a non-technical
 1. **Discovery loop** (Serper; every `Discovery_Every_Hours`, default 12): unfiltered role searches find job and board URLs; every `(ATS, board)` found is added to a persistent **Boards registry**. A second, date-windowed Serper search (`qdr:d3`) is **supplemental job discovery** for jobs on boards we may not poll yet.
 2. **Polling loop** (hourly, 24/7 including nights and weekends): for every active board, list all current jobs from the ATS public API and detect job IDs we have not seen.
 
+3. **Inventory loop** (weekly refresh + daily validation, separate workflow): two public company lists seed the same registry (see "Board registry"). It never scores or alerts.
+
 The user never selects companies.
+
+## Board registry
+
+One persistent registry (hidden `Boards` tab) holds every board from every source: Serper discoveries, the `open-ats-feed` inventory, the `ats-scrapers` inventory, and manual seeds.
+
+- **Identity:** provider + region/API host + board identifier. The default region is empty, so existing keys are unchanged. Casing follows the provider: Lever and Workable identifiers are case-sensitive (kept exactly); Greenhouse, Ashby and SmartRecruiters are not (compared lowercase, first-seen spelling used for API calls). Each unique board is polled once, however many sources list it.
+- **Provenance:** every source that listed a board is recorded with its first-seen time; `Discovered_At` is the first time any source knew it; `Last_Validated_At` is the last time its adapter call succeeded.
+- **Statuses:** `candidate` (imported, unvalidated) -> `validated` (exists; waiting for a monitoring slot) -> `new` (activated, not yet baselined) -> `active`. Also `invalid` (404/410), `deferred` (blocked by policy), `disabled` (monitored board that kept failing). Rows are never deleted, and an upstream list dropping a board changes nothing.
+- **Validation outcomes:** `valid` (jobs listed), `valid_empty` (exists, no jobs), `invalid` (404/410), `transient` (timeouts, 5xx, 429, bad payload: retried with backoff, never read as closed).
+- **Imports are additive and idempotent:** re-importing an unchanged inventory writes nothing and never alters polling history, posting IDs, alert state or Serper discoveries. A failed or malformed download keeps the last-known-good copy.
+- **Polling budget:** only `new`/`active` boards are polled. Validated boards are promoted by the poller, at most `Max_New_Boards_Per_Run` at a time and never beyond `Max_Active_Boards`, boards with jobs matching the user's targets first. Counts (discovered / validated / monitored) are logged per run.
+- **Baselining applies to imported boards exactly as to discovered ones:** the first poll records the existing jobs as `baseline` (not evaluated, no backfill); only a job whose source timestamp proves it fresh is evaluated.
+- **Provider limits honoured:** Lever's `Crawl-delay: 1` is enforced; SmartRecruiters' API host disallows generic crawlers in `robots.txt`, so bulk validation of its imported boards is off by default (`ALLOW_SMARTRECRUITERS_BULK=1` opts in). SmartRecruiters also answers 200/empty for unknown companies, so its boards cannot be proven to exist.
 
 ## Identity and dedupe
 

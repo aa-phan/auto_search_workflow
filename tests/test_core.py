@@ -65,6 +65,7 @@ class Harness:
 
     def __init__(self, tmp: str) -> None:
         self.state = st_mod.CsvState(Path(tmp) / "state")
+        self.state.ensure()  # the real entry point always creates the state files first
         self.now = T0
         self.listings: dict[str, Any] = {}  # board key -> list[ListedJob] | Exception
         self.tracker: list[dict[str, Any]] = []
@@ -584,7 +585,7 @@ class StatePersistenceTests(unittest.TestCase):
             s = st_mod.CsvState(Path(d))
             s.ensure()
             rec = bd.BoardRecord("lever", "acme", "2026-10-14T00:00:00Z", "serper", "active", "2026-10-14T01:00:00Z", "t", "t2", 2, 7, "x")
-            s.save_boards({rec.key: rec})
+            s.save_boards([rec])
             self.assertEqual(s.load_boards()[rec.key], rec)
             ev = lg.Event(ago(), "lever|acme|1", lg.SEEN, fr.VERIFIED_FRESH, lg.PENDING, ago(minutes=5), {"title": "Café ☕", "n": 1})
             s.append_events([ev])

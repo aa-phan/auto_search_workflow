@@ -293,7 +293,7 @@ class ParseTests(unittest.TestCase):
 
 class GroqTests(unittest.TestCase):
     def client(self, responses: list[FakeResponse]) -> tuple[h.GroqClient, mock.Mock]:
-        cfg = h.replace(h.Config.from_env(), groq_api_key="k", llm_interval=0.0)
+        cfg = h.replace(h.Config.from_env(), groq_api_key="k", llm_interval=0.0, groq_tpm=10**9, groq_fallback_tpm=10**9)
         c = h.GroqClient(cfg)
         c.http = mock.Mock()
         c.http.post.side_effect = responses
@@ -304,7 +304,7 @@ class GroqTests(unittest.TestCase):
         with mock.patch.object(h.time, "sleep"):
             ev = c.evaluate(settings(), posting())
         self.assertEqual(ev.score, 77)
-        self.assertEqual([call.kwargs["json"]["model"] for call in post.call_args_list], ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
+        self.assertEqual([call.kwargs["json"]["model"] for call in post.call_args_list], [c.cfg.groq_model, c.cfg.groq_fallback_model])
         self.assertEqual(post.call_args.kwargs["json"]["response_format"], {"type": "json_object"})
 
     def test_fallback_429_backs_off_then_succeeds(self) -> None:
@@ -317,6 +317,31 @@ class GroqTests(unittest.TestCase):
         c, _ = self.client([FakeResponse(429)] * h.GROQ_ATTEMPTS)
         with mock.patch.object(h.time, "sleep"), self.assertRaises(h.TransientError):
             c.evaluate(settings(), posting())
+
+    def test_a_model_the_key_cannot_use_switches_models_without_failing_the_job(self) -> None:
+        gone = FakeResponse(404, text='{"error":{"code":"model_not_found"}}')
+        c, post = self.client([gone, groq_ok(66)])
+        ev = c.evaluate(settings(), posting())
+        self.assertEqual(ev.score, 66)
+        self.assertEqual([x.kwargs["json"]["model"] for x in post.call_args_list], [c.cfg.groq_model, c.cfg.groq_fallback_model])
+        self.assertEqual(c.unavailable, {c.cfg.groq_model})
+        c.http.post.side_effect = [groq_ok(70)]
+        c.evaluate(settings(), posting())  # next job goes straight to the working model
+        self.assertEqual(c.http.post.call_args.kwargs["json"]["model"], c.cfg.groq_fallback_model)
+
+    def test_no_usable_model_is_fatal_not_a_per_job_failure(self) -> None:
+        gone = FakeResponse(404, text='{"error":{"code":"model_not_found"}}')
+        c, _ = self.client([gone, gone])
+        with self.assertRaises(h.GroqAuthError) as ctx:
+            c.evaluate(settings(), posting())
+        self.assertIn("GROQ_MODEL", str(ctx.exception))
+
+    def test_reported_rate_limit_replaces_the_guessed_budget(self) -> None:
+        ok = groq_ok()
+        ok.headers = {"x-ratelimit-limit-tokens": "6000"}
+        c, _ = self.client([ok])
+        c.evaluate(settings(), posting())
+        self.assertEqual(c.budgets[c.cfg.groq_model].tpm, 6000)
 
     def test_bad_key_aborts(self) -> None:
         c, _ = self.client([FakeResponse(401)])
@@ -406,14 +431,14 @@ class SheetTests(unittest.TestCase):
     def test_bootstrap_creates_user_tabs_and_hidden_state_tabs(self) -> None:
         sh = FakeSpreadsheet([FakeWorksheet("Sheet1", [])])
         sheet_store(sh).bootstrap("MY RESUME")
-        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs"})
+        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory"})
         self.assertEqual(sh.deleted, ["Sheet1"])
         by_key = {r[0]: r[1] for r in sh.tabs["Settings"].values[1:]}
         self.assertEqual((by_key["Resume_Text"], by_key["Min_Alert_Score"], by_key["Fresh_Window_Hours"], by_key["Discovery_Every_Hours"]), ("MY RESUME", "70", "4", "12"))
         self.assertEqual(sh.tabs["Job Tracker"].values[0], h.TRACKER_COLUMNS)
         self.assertEqual(h.TRACKER_COLUMNS[8], "Apply_URL")  # column I
         self.assertEqual(h.TRACKER_COLUMNS[-2:], ["Freshness", "Source"])
-        for hidden in ("Boards", "Events", "Runs"):
+        for hidden in ("Boards", "Events", "Runs", "Inventory"):
             self.assertTrue(sh.tabs[hidden].hidden, hidden)
         self.assertFalse(sh.tabs["Job Tracker"].hidden or sh.tabs["Settings"].hidden)
 
@@ -449,7 +474,7 @@ class SheetTests(unittest.TestCase):
         store = sheet_store(sh)
         store.bootstrap("R")
         rec = bd.BoardRecord("lever", "acme", "2026-10-14T00:00:00Z", "serper")
-        store.state.save_boards({rec.key: rec})
+        store.state.save_boards([rec])
         self.assertEqual(store.state.load_boards()[rec.key], rec)
         ev = lg.Event("2026-10-14T00:00:00Z", "lever|acme|1", lg.SEEN, fr.RECENT, lg.PENDING, "", {"a": 1})
         store.state.append_events([ev])

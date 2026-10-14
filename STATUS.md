@@ -4,46 +4,53 @@ Last updated 2026-10-14. Read `SPEC.md` (contract) and `DECISIONS.md` (why) firs
 
 ## State
 
-The smallest complete path is implemented: **board polling -> new-ID detection -> freshness classification -> filters/scoring -> Google Sheet -> Telegram**, with Serper-driven board discovery growing a persistent registry. The previous search-first pipeline was refactored in place (see D-01). Baseline commit `affaaa4` preserves the old behavior.
+Board polling -> new-ID detection -> freshness classification -> filters/scoring -> Sheet -> Telegram is implemented (D-01..D-09). This change adds the **inventory loop** (D-11..D-15): the registry is seeded from two public inventories, validated through the existing adapters, and promoted into hourly polling only within a budget. Groq model defaults changed because the requested models no longer exist for this key (D-16).
+
+## Inventory: live numbers (2026-10-14, real downloads)
+
+| Source | Rows (all providers) | Rows for supported providers | Rejected | Unique boards | Only in this source |
+|---|---:|---:|---:|---:|---:|
+| open-ats-feed (as of 2026-09-03) | 22,122 | 12,916 | 0 | 12,916 | 2,550 |
+| ats-scrapers | 80,390 | 19,380 | 50 | 19,330 | 8,964 |
+
+Overlap 10,366; **unique union 21,880** (Greenhouse 7,709, Workable 4,752, Ashby 4,041, SmartRecruiters 2,747, Lever 2,631). Case-only Lever/Workable variants across sources: 0. The 50 rejected rows are Ashby values with spaces (`hamming ai`): display names stored as slugs. Unsupported, reported and not imported: open-ats-feed 9,206 rows (Breezy 3,536, Teamtailor 2,840, Recruitee 2,830); ats-scrapers 61,010 rows across 42 providers (Join 23,547, BambooHR 5,632, Paycom 5,135, Workday 3,530, JazzHR 2,689, iCIMS 2,498, Personio 2,463, Rippling 1,923, ...). A second import changed **0 rows** (verified through the CLI).
+
+## Validation: live sampling (not the full list)
+
+Random sample, 25 boards per provider and source-group (250 total, SmartRecruiters excluded): 145 valid, 69 valid-empty, 36 invalid, 0 transient. Hit rate (valid with jobs): boards **both sources list 85%**, open-ats-feed only 60%, ats-scrapers only 36% (Ashby boards only ats-scrapers lists: 0 of 25 had jobs, 15 were invalid). Only 6 of 250 had a job matching the default title gate today (~2.4%): expect on the order of 500 relevant boards among ~21,900 at any moment. A balanced 600-board run (150 per provider, 174 s, Lever at its 1 req/s): 488 valid, 103 empty (Workable 85 of 150), 9 invalid. About 18,500 boards remain unvalidated; the daily workflow drains them.
+
+Registry after a real CLI run (450 validated, then the hourly run): 21 boards promoted and polled (the ones with relevant jobs), 1,809 existing jobs recorded as baseline, 5 verified-fresh jobs all rejected by the title gate, 0 alerts; the next poll found 0 new IDs.
 
 ## Verification: mocked vs live
 
 | Area | Result | How |
 |---|---|---|
-| Freshness classes (time/day precision, baseline, gaps, future dates) | pass | **Mocked**: unit tests (`tests/test_core.py`) |
-| Identity: GH host variants, embed `for`/`token`, `gh_jid`, SR slugs collapse to one key | pass | **Mocked** tests + checked on live URLs |
-| Baselining a new board; no alert on backlog | pass | **Mocked** scenario; **Live**: 335 IDs on 5 real boards recorded as baseline, 0 alerts |
-| Second poll is idempotent (no new IDs, no re-eval) | pass | **Live**: same boards polled twice; **Mocked** |
-| List adapters: Greenhouse, Lever, Ashby, Workable, SmartRecruiters | pass | **Live** public endpoints (7 boards: discovery + first poll 17.0 s, poll-only 4.4 s; 7 boards listed concurrently in 1.5 s) |
-| Serper discovery + 3-day window payload | pass | **Live** Serper: 7 and 17 boards found in two runs (varies) |
-| Failure cases: transient scoring (no attempt used), bounded permanent failures, alert outage, rejected alert (4xx) bounded, late alert abandoned, tracker write failure, events write failure after row append (no duplicate row), board outage gap, suspicious empty listing, ID flood re-baseline, board auto-disable, update/republication logging, dry-run writes/sends nothing | pass | **Mocked** (82 offline tests) |
-| `main()` wiring: seed, two polls, runs log, exit codes | pass | **Live** ATS, local CSV state, no credentials |
-| Groq invalid key -> fatal, clear error | pass | **Live** Groq API (401 with a dummy key) |
-| Groq success path (JSON scoring, 429 fallback) | not verified live | **Mocked** only: no Groq key available |
-| Google Sheets (tab creation, hidden tabs, append-only tracker, atomic Boards rewrite, dropdown) | not verified live | **Mocked** only (fake gspread): no service account / Sheet ID available |
-| Telegram delivery and message format | not verified live | **Mocked** only (captured request): no bot token available |
-| GitHub Actions hourly schedule, delays, skipped runs | not verified | Workflow YAML parses; never run on GitHub |
-
-## Findings from live runs
-
-- Coverage is small and uneven: one discovery pass found 7 boards, another 17. Discovery quality depends on Serper results; there is no curated list. Growth over days is unmeasured.
-- Aggregator boards exist (one Lever board lists 3,599 jobs): they inflate baseline writes and pass through the same filters.
-- Workable lists the same shortcode multiple times (once per location); keys collapse these.
-- Workable has day-precision dates only; a Workable job can be `verified_fresh` only via the board-gap rule.
-- In earlier unfiltered search, ~29 of 30 hits were stale: direct polling is what makes freshness measurable.
+| Identity (casing per provider, region, unchanged job keys), parsers, last-known-good cache, schema-change and shrink guards, merge idempotence, provenance, overlap math | pass | **Mocked** (`tests/test_inventory.py`), 145 offline tests in total |
+| Validation outcomes valid / empty / invalid / transient, retries and backoff, breaker, rate limits, SmartRecruiters policy, interleaving, batching | pass | **Mocked** |
+| Activation budget (ceiling, surge cap, relevance order), baselining of imported boards, row-level writes, concurrent importer+poller | pass | **Mocked** |
+| Downloading both inventories, parsing, merging, re-import, CLI (`--import-inventory`, `--validate`, `--offline`) | pass | **Live** (public GitHub + ATS endpoints) |
+| Validation against real ATS endpoints, per-provider limits | pass | **Live**, sampled (above) |
+| Transient-failure retry against a real outage | not observed | **Mocked** only (no outage occurred in live runs) |
+| Groq scoring success path | pass | **Live** with the new default models: real job scored (15), real verdict; 429 -> fallback and `model_not_found` handling are **mocked** |
+| Weekly/daily Board Inventory workflow, hourly schedule, GitHub cache | not verified | YAML parses; never run on GitHub |
+| Google Sheets (tabs, hidden tabs, row-level upsert, header widening) | not verified live | **Mocked** (fake gspread): service account / Sheet not provided (backlogged) |
+| Telegram delivery | not verified live | **Mocked**: token not provided (backlogged) |
 
 ## Known gaps / risks
 
-- Alerts are at-least-once; a crash between sending and recording could duplicate one.
-- `Events` grows with every observed ID (baselines included); revisit pruning near ~200k rows.
-- Existing sheets created before this refactor will not gain the new `Settings` rows (defaults apply) and have the old 10-column tracker header; a fresh Sheet is recommended.
-- `.env.example` cannot be written in this environment (permission rule); the template is in the README.
-- No latency metric from real data yet: `Runs.Max_Alert_Lag_Min` will fill once real alerts are sent.
+- Validation is still draining: ~18,500 candidates unvalidated; the daily workflow works through them (Lever alone needs ~44 min per full pass at 1 req/s).
+- Which boards are monitored depends on a snapshot of title relevance; a waiting board that posts a relevant job tomorrow is only re-checked weekly. Coverage = monitored boards, not all 21,900.
+- Baseline jobs are never scored (no backfill): the first read of a board is a starting point only.
+- SmartRecruiters: imported boards parked (robots.txt); existence of a SmartRecruiters board is unverifiable (API returns 200/empty for unknown companies).
+- Inventory data is a snapshot: open-ats-feed `as_of` 2026-09-03; boards may have gone. Validation catches 404s only when it runs.
+- `Events` grows with every observed ID (baselines included); a large activation wave adds thousands of rows.
+- Existing Sheets created before this change keep the old registry header until the next run widens it; new Settings rows (`Max_Active_Boards`, `Max_New_Boards_Per_Run`) are absent from old Settings tabs, so defaults apply.
+- Alerts are at-least-once. `.env.example` cannot be written in this environment (permission rule); the template is in the README.
 
 ## Blockers
 
-Credentials for a live end-to-end run: `GROQ_API_KEY`, `GOOGLE_SHEET_ID` + `GOOGLE_SERVICE_ACCOUNT_JSON` (Sheet shared with the service account), `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`.
+Sheets and Telegram credentials (backlogged at your request) for a full live end-to-end run; GitHub workflows have not run on GitHub.
 
 ## Next milestone
 
-One real end-to-end run with credentials: bootstrap a blank Sheet, discover and baseline boards, score at least one job with Groq, append a tracker row, and deliver one Telegram message; then watch 48 hours of hourly runs and read the `Runs` tab for actual poll gaps and alert lag before tuning anything.
+First run of both workflows on GitHub with a real Sheet: import, validate for a few days, watch `Runs` (discovered / validated / monitored, gaps) and confirm the hourly poller stays within its time budget as the monitored set grows toward `Max_Active_Boards`. Then Telegram.

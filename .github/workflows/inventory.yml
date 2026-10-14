@@ -1,0 +1,79 @@
+name: Board Inventory
+
+# Seeds the board registry from two public company lists and validates the new boards.
+# This is deliberately SEPARATE from the hourly "Job Hunter" polling workflow:
+#   - weekly: re-download both inventories, merge new boards, then validate (drain the backlog)
+#   - daily:  validate only (the first import is ~20,000 boards; a weekly run alone cannot finish)
+# Neither run scores jobs or sends alerts. Boards only start being polled hourly when they are
+# promoted within the polling budget (Settings: Max_Active_Boards, Max_New_Boards_Per_Run).
+
+on:
+  schedule:
+    - cron: "23 5 * * 1" # weekly: Monday 05:23 UTC, refresh + validate
+    - cron: "41 6 * * 2-6,0" # every other day of the week: validate only
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: "Re-download the inventories before validating"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # only used by the local-CSV fallback (no Google Sheet configured)
+
+# Own concurrency group: the hourly poller keeps running. The two writers touch different
+# registry rows (the importer owns candidates, the poller owns monitored boards) and both
+# write row-level updates, never a full rewrite.
+concurrency:
+  group: job-hunter-inventory
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Last-known-good copies of the downloaded inventories (a bad download never replaces them).
+      - name: Restore inventory cache
+        uses: actions/cache@v4
+        with:
+          path: state/inventory
+          key: inventory-cache-${{ github.run_id }}
+          restore-keys: inventory-cache-
+
+      - name: Refresh inventories and validate new boards
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: |
+          REFRESH=false
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "23 5 * * 1" ]; then REFRESH=true; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.refresh }}" = "true" ]; then REFRESH=true; fi
+          ARGS="--validate --max-validations 4000 --max-seconds 1500"
+          if [ "$REFRESH" = "true" ]; then ARGS="--import-inventory $ARGS"; fi
+          python hunter.py $ARGS
+
+      # Only does anything when GOOGLE_SHEET_ID is NOT set (the CSV files are then the state).
+      - name: Save local fallback state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -d state ] && git add -f state/boards.csv state/inventory.csv 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No local state changes."
+          else
+            git commit -m "chore: update board registry (local fallback) [skip ci]"
+            git pull --rebase
+            git push
+          fi

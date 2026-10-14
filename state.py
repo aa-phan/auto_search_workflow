@@ -8,12 +8,13 @@ single atomic request because rows are updated every poll.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import tempfile
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from boards import BoardRecord
 from ledger import EVENT_COLUMNS, Event
@@ -24,11 +25,15 @@ BOARDS_TAB, EVENTS_TAB, RUNS_TAB = "Boards", "Events", "Runs"
 BOARD_COLUMNS = [
     "Board_Key", "ATS", "Board", "Status", "Discovered_At", "Source", "Baselined_At",
     "Last_Attempt_At", "Last_Success_At", "Consecutive_Failures", "Last_Job_Count", "Last_Error",
+    "Region", "Name", "Validation", "Last_Validated_At", "Relevant_Jobs", "Provenance",
 ]  # fmt: skip
+INVENTORY_TAB = "Inventory"
+INVENTORY_COLUMNS = ["Source", "Fetched_At", "SHA256", "Rows", "As_Of", "Status", "Note"]
 RUN_COLUMNS = [
     "Run_At", "Discovery", "Boards_Total", "Boards_OK", "Boards_Failed", "Boards_Added", "New_Jobs",
     "Verified_Fresh", "Evaluated", "Alerts_Sent", "Alerts_Failed", "Gap_Since_Prev_Run_Min",
     "Max_Board_Gap_Min", "Max_Alert_Lag_Min", "Notes",
+    "Boards_Discovered", "Boards_Validated", "Boards_Monitored", "Boards_Activated",
 ]  # fmt: skip
 APPEND_CHUNK = 2000
 
@@ -50,6 +55,10 @@ class RunRecord:
     max_board_gap_min: int | None = None
     max_alert_lag_min: int | None = None
     notes: str = ""
+    boards_discovered: int = 0  # every board in the registry
+    boards_validated: int = 0  # validated OK (valid or valid-but-empty)
+    boards_monitored: int = 0  # actively polled (new + active)
+    boards_activated: int = 0  # promoted into monitoring this run
 
     def to_row(self) -> list[Any]:
         out = []
@@ -71,12 +80,15 @@ class RunRecord:
                 return None
 
         return cls(row[0], row[1] == "yes", num(2) or 0, num(3) or 0, num(4) or 0, num(5) or 0, num(6) or 0, num(7) or 0,
-                   num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14])  # fmt: skip
+                   num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
+                   num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0)  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
     return [b.key, b.ats, b.board, b.status, b.discovered_at, b.source, b.baselined_at, b.last_attempt_at,
-            b.last_success_at, b.consecutive_failures, b.last_job_count, b.last_error]  # fmt: skip
+            b.last_success_at, b.consecutive_failures, b.last_job_count, b.last_error,
+            b.region, b.name, b.validation, b.last_validated_at, b.relevant_jobs,
+            json.dumps(b.provenance, separators=(",", ":"), ensure_ascii=False)[:40000]]  # fmt: skip
 
 
 def board_from_row(row: list[str]) -> BoardRecord | None:
@@ -90,7 +102,14 @@ def board_from_row(row: list[str]) -> BoardRecord | None:
         except ValueError:
             return 0
 
-    return BoardRecord(row[1], row[2], row[4], row[5], row[3] or "new", row[6], row[7], row[8], num(row[9]), num(row[10]), row[11])
+    try:
+        prov = json.loads(row[17]) if row[17] else {}
+    except ValueError:
+        prov = {}
+    return BoardRecord(
+        row[1], row[2], row[4], row[5], row[3] or "new", row[6], row[7], row[8], num(row[9]), num(row[10]), row[11],
+        row[12], row[13], row[14], row[15], num(row[16]), prov if isinstance(prov, dict) else {},
+    )  # fmt: skip
 
 
 def _chunks(rows: list[list[Any]], n: int = APPEND_CHUNK):
@@ -101,12 +120,18 @@ def _chunks(rows: list[list[Any]], n: int = APPEND_CHUNK):
 class SheetState:
     """State in hidden tabs of the user's spreadsheet."""
 
+    UPDATE_CHUNK = 500
+
     def __init__(self, spreadsheet: Any) -> None:
         self.sh = spreadsheet
+        self._row_of: dict[str, int] = {}  # board key -> sheet row, learned at load time
 
     def ensure(self) -> None:
         tabs = {w.title: w for w in self.sh.worksheets()}
-        for title, columns, rows in ((BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000)):
+        for title, columns, rows in (
+            (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
+            (INVENTORY_TAB, INVENTORY_COLUMNS, 50),
+        ):  # fmt: skip
             if title in tabs:
                 continue
             ws = self.sh.add_worksheet(title=title, rows=rows, cols=len(columns))
@@ -117,21 +142,59 @@ class SheetState:
             except Exception as exc:
                 log.warning("Could not tidy the %s tab: %s", title, exc)
             log.info("Created the hidden %s tab", title)
+        self._widen_boards_header()
+
+    def _widen_boards_header(self) -> None:
+        """A registry created before provenance/validation columns gets the new header names
+        (header row only; no data row is touched)."""
+        try:
+            ws = self.sh.worksheet(BOARDS_TAB)
+            header = ws.row_values(1) if hasattr(ws, "row_values") else []
+            if header and header != BOARD_COLUMNS and header == BOARD_COLUMNS[: len(header)]:
+                ws.update(values=[BOARD_COLUMNS], range_name="A1", value_input_option="RAW")
+        except Exception as exc:  # cosmetic: rows are read positionally either way
+            log.warning("Could not widen the Boards header: %s", exc)
 
     def load_boards(self) -> dict[str, BoardRecord]:
         rows = self.sh.worksheet(BOARDS_TAB).get_all_values()[1:]
-        recs = (board_from_row(r) for r in rows)
-        return {b.key: b for b in recs if b}
+        self._row_of = {}
+        out: dict[str, BoardRecord] = {}
+        for i, row in enumerate(rows, start=2):
+            b = board_from_row(row)
+            if b:
+                out[b.key] = b
+                self._row_of[b.key] = i
+        return out
 
-    def save_boards(self, boards: dict[str, BoardRecord]) -> None:
-        """Rewrite the registry in ONE request so a crash can never leave it half-written."""
-        ws = self.sh.worksheet(BOARDS_TAB)
-        rows = [board_to_row(b) for b in sorted(boards.values(), key=lambda b: b.key)]
-        if not rows:
+    def save_boards(self, records: Iterable[BoardRecord]) -> None:
+        """Upsert ONLY the given records: known rows are updated in place, unknown ones appended.
+        Writers own different rows (the poller owns monitored boards, the importer owns
+        candidates), so a long-running writer can never overwrite another's progress."""
+        recs = list(records)
+        if not recs:
             return
-        if ws.row_count < len(rows) + 2:
-            ws.add_rows(len(rows) + 500 - ws.row_count)
-        ws.update(values=rows, range_name="A2", value_input_option="RAW")
+        ws = self.sh.worksheet(BOARDS_TAB)
+        updates = [(self._row_of[r.key], r) for r in recs if r.key in self._row_of]
+        fresh = [r for r in recs if r.key not in self._row_of]
+        if fresh:  # another process may have appended some of these since we loaded: look again
+            index = {}
+            for i, row in enumerate(ws.get_all_values()[1:], start=2):
+                b = board_from_row(row)
+                if b:
+                    index[b.key] = i
+            appended = []
+            for r in fresh:
+                if r.key in index:
+                    updates.append((index[r.key], r))
+                    self._row_of[r.key] = index[r.key]
+                else:
+                    appended.append(r)
+            fresh = appended
+        for i in range(0, len(updates), self.UPDATE_CHUNK):
+            chunk = updates[i : i + self.UPDATE_CHUNK]
+            ws.batch_update([{"range": f"A{row}", "values": [board_to_row(r)]} for row, r in chunk], value_input_option="RAW")
+        for chunk in _chunks([board_to_row(r) for r in fresh]):
+            ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
 
     def load_events(self) -> list[Event]:
         rows = self.sh.worksheet(EVENTS_TAB).get_all_values()[1:]
@@ -149,6 +212,17 @@ class SheetState:
         rows = self.sh.worksheet(RUNS_TAB).get_all_values()[1:]
         return [r for r in (RunRecord.from_row(x) for x in rows) if r]
 
+    # -- inventory bookkeeping (last-known-good metadata per source)
+    def load_inventory_meta(self) -> dict[str, dict[str, str]]:
+        rows = self.sh.worksheet(INVENTORY_TAB).get_all_values()[1:]
+        return {r[0]: dict(zip(INVENTORY_COLUMNS[1:], list(r[1:]) + [""] * 6)) for r in rows if r and r[0]}
+
+    def save_inventory_meta(self, meta: dict[str, dict[str, str]]) -> None:
+        ws = self.sh.worksheet(INVENTORY_TAB)
+        rows = [[src, *(m.get(c, "") for c in INVENTORY_COLUMNS[1:])] for src, m in sorted(meta.items())]
+        if rows:
+            ws.update(values=rows, range_name="A2", value_input_option="RAW")
+
 
 class CsvState:
     """Local-file fallback (development, or Sheets not configured)."""
@@ -161,7 +235,9 @@ class CsvState:
 
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        for title, columns in ((BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS)):
+        for title, columns in (
+            (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS)
+        ):
             p = self._path(title)
             if not p.exists() or p.stat().st_size == 0:
                 with p.open("w", newline="", encoding="utf-8") as fh:
@@ -178,7 +254,14 @@ class CsvState:
         recs = (board_from_row(r) for r in self._rows(BOARDS_TAB))
         return {b.key: b for b in recs if b}
 
-    def save_boards(self, boards: dict[str, BoardRecord]) -> None:
+    def save_boards(self, records: Iterable[BoardRecord]) -> None:
+        """Upsert the given records into the registry file (atomic replace)."""
+        recs = list(records)
+        if not recs:
+            return
+        boards = self.load_boards()
+        for r in recs:
+            boards[r.key] = r
         p = self._path(BOARDS_TAB)
         fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
@@ -200,3 +283,13 @@ class CsvState:
 
     def load_runs(self) -> list[RunRecord]:
         return [r for r in (RunRecord.from_row(x) for x in self._rows(RUNS_TAB)) if r]
+
+    def load_inventory_meta(self) -> dict[str, dict[str, str]]:
+        return {r[0]: dict(zip(INVENTORY_COLUMNS[1:], list(r[1:]) + [""] * 6)) for r in self._rows(INVENTORY_TAB) if r and r[0]}
+
+    def save_inventory_meta(self, meta: dict[str, dict[str, str]]) -> None:
+        p = self._path(INVENTORY_TAB)
+        with p.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(INVENTORY_COLUMNS)
+            w.writerows([src, *(m.get(c, "") for c in INVENTORY_COLUMNS[1:])] for src, m in sorted(meta.items()))
