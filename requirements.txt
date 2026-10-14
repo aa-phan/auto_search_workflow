@@ -1,0 +1,6 @@
+requests>=2.32,<3
+beautifulsoup4>=4.12,<5  # parses job-description HTML
+python-dotenv>=1.0,<2
+gspread>=6.0,<7
+google-auth>=2.30,<3
+pyyaml>=6.0,<7

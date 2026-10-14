@@ -1,0 +1,59 @@
+name: Job Hunter
+
+on:
+  schedule:
+    - cron: "0 13-23/2 * * 1-5" # every 2 hours, 13:00-23:00 UTC (US business hours), Mon-Fri
+  workflow_dispatch:
+
+permissions:
+  contents: write # only needed for the optional tracked_jobs.csv backup
+
+# Serialize runs so two runs never write the tracker at the same time.
+concurrency:
+  group: job-hunter
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # All settings (roles, locations, resume, minimum score...) live in the Google Sheet.
+      # Only the secret keys below are configured in GitHub.
+      - name: Run hunter
+        run: python hunter.py
+        env:
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional repository variable; default qdr:d3 (past 3 days)
+
+      # Only does anything when GOOGLE_SHEET_ID is NOT set (the CSV is then the tracker).
+      # always(): keep rows already written even if the run later fails or times out.
+      - name: Commit CSV backup
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tracked_jobs.csv
+          if git diff --cached --quiet; then
+            echo "No tracker changes."
+          else
+            git commit -m "chore: update tracked_jobs.csv [skip ci]"
+            git pull --rebase
+            git push
+          fi

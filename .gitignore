@@ -1,0 +1,16 @@
+# secrets and credentials
+.env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+
+# personal data: the resume lives in the Google Sheet (Settings > Resume_Text)
+Resume.pdf
+resume.txt
+
+# local environment / noise
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
