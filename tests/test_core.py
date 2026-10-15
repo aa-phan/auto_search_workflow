@@ -583,14 +583,14 @@ class DiscoveryTests(HarnessCase):
     def test_search_found_job_gets_an_authoritative_date_and_never_double_counts(self) -> None:
         listed = job("acme", "88", published=ago(minutes=40))
         self.baseline(job("acme", "1", published=ago(days=30)))
-        sj = pl.SerperJob(listed.ident, listed.title, listed.url)
+        sj = pl.SearchJob(listed.ident, listed.title, listed.url)
         self.w.listings[self.board.key].append(listed)  # on the board AND found by search
         self.w.run(minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[sj]), hydrate_listed=lambda s: listed, force_discovery=True)
         self.assertEqual(len(self.w.events(self.key("88"), lg.SEEN)), 1)
         off_board = job("acme", "89", published=ago(minutes=30, base=T0 + timedelta(minutes=120)))
-        sj2 = pl.SerperJob(off_board.ident, off_board.title, off_board.url)
+        sj2 = pl.SearchJob(off_board.ident, off_board.title, off_board.url)
         self.w.run(minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[sj2]), hydrate_listed=lambda s: off_board, force_discovery=True)
-        self.assertEqual(self.w.states()[self.key("89")].seen_detail["source"], "serper")
+        self.assertEqual(self.w.states()[self.key("89")].seen_detail["source"], "search")
         self.assertEqual(self.w.states()[self.key("89")].freshness, fr.VERIFIED_FRESH)
 
 
@@ -630,7 +630,7 @@ class StatePersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             s = st_mod.CsvState(Path(d))
             s.ensure()
-            rec = bd.BoardRecord("lever", "acme", "2026-10-14T00:00:00Z", "serper", "active", "2026-10-14T01:00:00Z", "t", "t2", 2, 7, "x")
+            rec = bd.BoardRecord("lever", "acme", "2026-10-14T00:00:00Z", "search", "active", "2026-10-14T01:00:00Z", "t", "t2", 2, 7, "x")
             s.save_boards([rec])
             self.assertEqual(s.load_boards()[rec.key], rec)
             ev = lg.Event(ago(), "lever|acme|1", lg.SEEN, fr.VERIFIED_FRESH, lg.PENDING, ago(minutes=5), {"title": "Café ☕", "n": 1})

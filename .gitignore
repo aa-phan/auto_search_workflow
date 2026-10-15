@@ -17,3 +17,8 @@ __pycache__/
 
 # local fallback state (CI force-adds it when Sheets is not configured)
 state/
+
+# the tracker and the board registry live in the Google Sheet; these are local fallback / scratch copies
+# with job-search data (scores, verdicts), not source
+tracked_jobs*.csv
+legacy/*.csv

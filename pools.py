@@ -16,14 +16,22 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 import eligibility
+import freshness as fr
 import ledger as lg
 from boards import (
     MONITORED, POOL_ESTABLISHED, POOL_EXPLORATION, STAMP, STATUS_ACTIVE, STATUS_DEFERRED, STATUS_DISABLED, STATUS_NEW,
     STATUS_VALIDATED, V_DEFERRED, BoardId, BoardRecord, ListedJob, admission_order, is_waiting_candidate, open_jobs as open_jobs_uncapped,
 )  # fmt: skip
 
-# A board needs a stint this long before "no new postings" may be read as a real zero.
+# A board needs a stint this long before "no new postings" may be read as a real zero. One hour of
+# slack, so a 7-day trial that ends one hour early at the weekly check is not read as "too short".
 ACTIVITY_MIN_DAYS = 7
+MIN_OBSERVED_DAYS = ACTIVITY_MIN_DAYS - 1 / 24
+# Two complete polls further apart than this leave a hole in the observation record (an outage, a
+# skipped schedule): the hole is not observed time, so it is not part of any rate denominator, and
+# a job first seen after it has no evidence of WHEN it appeared unless its own publication time says so.
+MAX_COVERED_GAP = timedelta(hours=6)
+COVERAGE_MIN = 0.8  # share of the 7-day window that must have been observed for the 7-day count to be known
 # Observation passes that must never count as board activity (they are the board's existing
 # backlog or jobs that appeared while the board was not watched).
 NON_ACTIVITY_PASSES = frozenset({"baseline", "reentry"})
@@ -34,6 +42,26 @@ def parse_stamp(value: str) -> datetime | None:
         return datetime.strptime(value, STAMP).replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
+
+
+def counts_as_new_posting(freshness: str, detail: dict[str, Any]) -> bool:
+    """Is this first observation evidence that the posting appeared on the board during the stint?
+
+    Yes when the source's own publication time/date says it is fresh (`verified_fresh`): that holds
+    for a job first found by search too (deduplicated by posting identity: one ledger key, and the
+    `source` stays in its `seen` event as provenance). An undated job counts only when the board was
+    polled shortly before (`observed_new`, gap within MAX_COVERED_GAP): after a longer gap we do not
+    know when it appeared. Baseline and re-entry passes, dated-but-old jobs (`recent`) and
+    `uncertain` ones never count: that would present a discovery as a publication."""
+    if detail.get("pass", "") in NON_ACTIVITY_PASSES or detail.get("source") not in ("poll", "search", "serper"):  # "serper": history written before Tavily
+        return False
+    if freshness == fr.VERIFIED_FRESH:
+        return True
+    gap = detail.get("gap_min")
+    return (
+        detail.get("source") == "poll" and freshness == fr.OBSERVED_NEW
+        and isinstance(gap, (int, float)) and gap * 60 <= MAX_COVERED_GAP.total_seconds()
+    )  # fmt: skip
 
 
 def board_key_for_job(job_key: str, board_spelling: str = "") -> str:
@@ -66,7 +94,7 @@ class ActivityIndex:
             if not st.seen or st.disposition != lg.PENDING:
                 continue
             detail = st.seen_detail or {}
-            if detail.get("source") != "poll" or detail.get("pass", "") in NON_ACTIVITY_PASSES:
+            if not counts_as_new_posting(st.freshness, detail):
                 continue
             seen_at = parse_stamp(st.seen_time)
             if seen_at is None:
@@ -95,9 +123,23 @@ def relevance_counts(jobs: Iterable[ListedJob], title_gate: Callable[[str], str 
     return len(relevant), len(eligible)
 
 
+def _prune_outages(rec: BoardRecord, now: datetime) -> None:
+    cutoff = now - timedelta(days=30)
+    kept = [o for o in rec.outages if len(o) == 2 and (e := parse_stamp(o[1])) is not None and e >= cutoff]
+    rec.outages = kept[-40:]
+
+
 def refresh_relevance(rec: BoardRecord, jobs: Iterable[ListedJob], title_gate: Callable[[str], str | None], now: datetime) -> None:
     """Refresh a board's open-job counts from a COMPLETE, SUCCESSFUL poll's own listing. The caller
-    must not call this for failed, suspicious-empty or truncated listings."""
+    must not call this for failed, suspicious-empty or truncated listings.
+
+    Also records the observation record: if the previous complete poll of this stint is further back
+    than MAX_COVERED_GAP, the time in between was not observed (a failed or incomplete poll, an outage,
+    a skipped schedule) and is stored as an outage."""
+    prev, since = parse_stamp(rec.relevance_at), parse_stamp(rec.activity_since)
+    if prev is not None and since is not None and prev >= since and now - prev > MAX_COVERED_GAP:
+        rec.outages.append([lg.stamp(prev), lg.stamp(now)])
+    _prune_outages(rec, now)
     rec.relevant_jobs, rec.eligible_jobs = relevance_counts(jobs, title_gate)
     rec.relevance_at = lg.stamp(now)
     rec.complete_polls += 1
@@ -109,6 +151,7 @@ def start_stint(rec: BoardRecord, now: datetime) -> None:
     rec.activity_since = lg.stamp(now)
     rec.complete_polls = 0
     rec.new_relevant_7d = rec.new_relevant_30d = None
+    rec.outages = []
 
 
 def stint_days(rec: BoardRecord, now: datetime) -> float | None:
@@ -116,23 +159,49 @@ def stint_days(rec: BoardRecord, now: datetime) -> float | None:
     return None if since is None else max(0.0, (now - since).total_seconds() / 86400)
 
 
+def observed_days(rec: BoardRecord, now: datetime, window_days: int) -> tuple[float, float]:
+    """(observed days, window days) over the last `window_days` or the stint, whichever is shorter.
+
+    Observed time excludes every outage, including the one that is still going on (no complete poll
+    for longer than MAX_COVERED_GAP). This is the rate denominator: a board that could not be read for
+    ten days is not a board with ten quiet days."""
+    since = parse_stamp(rec.activity_since)
+    if since is None:
+        return 0.0, 0.0
+    start = max(since, now - timedelta(days=window_days))
+    span = (now - start).total_seconds()
+    if span <= 0:
+        return 0.0, 0.0
+    holes = [(a, b) for o in rec.outages if len(o) == 2 and (a := parse_stamp(o[0])) and (b := parse_stamp(o[1]))]
+    last = parse_stamp(rec.relevance_at)
+    if last is not None and last >= since and now - last > MAX_COVERED_GAP:
+        holes.append((last, now))
+    lost = sum(max(0.0, (min(b, now) - max(a, start)).total_seconds()) for a, b in holes)
+    return max(0.0, span - lost) / 86400, span / 86400
+
+
 def refresh_activity(rec: BoardRecord, index: ActivityIndex, now: datetime) -> None:
     """Recompute the 7/30-day counts of new relevant postings from the ledger index.
 
-    Unknown is not zero: both counts stay None until the stint is ACTIVITY_MIN_DAYS old. Only
-    observations at or after Activity_Since count. `last_new_relevant_at` is a plain fact about
+    Unknown is not zero. The 7-day count is known only when the stint is old enough AND at least
+    COVERAGE_MIN of that week was actually observed; the 30-day count only when at least a week of
+    the 30-day window was observed (a partially observed window is allowed, its rate is taken over
+    the observed days: see `weekly_rate`). A board that has been unreadable for days therefore
+    shows UNKNOWN activity, never a real-looking zero. `last_new_relevant_at` is a plain fact about
     the observation history and is set whenever one exists."""
     times = index.times(rec.key)
     if times:
         rec.last_new_relevant_at = lg.stamp(times[-1])
     since = parse_stamp(rec.activity_since)
     days = stint_days(rec, now)
-    if since is None or days is None or days < ACTIVITY_MIN_DAYS:
+    if since is None or days is None or days < MIN_OBSERVED_DAYS:
         rec.new_relevant_7d = rec.new_relevant_30d = None
         return
     counted = [t for t in times if t >= since]
-    rec.new_relevant_7d = sum(1 for t in counted if t >= now - timedelta(days=7))
-    rec.new_relevant_30d = sum(1 for t in counted if t >= now - timedelta(days=30))
+    obs7, _ = observed_days(rec, now, 7)
+    obs30, _ = observed_days(rec, now, 30)
+    rec.new_relevant_7d = sum(1 for t in counted if t >= now - timedelta(days=7)) if obs7 >= COVERAGE_MIN * 7 else None
+    rec.new_relevant_30d = sum(1 for t in counted if t >= now - timedelta(days=30)) if obs30 >= MIN_OBSERVED_DAYS else None
 
 
 # --------------------------------------------------------------------------- policy and score (D-26, D-30)
@@ -147,7 +216,7 @@ EVIDENCE_MAX_AGE = timedelta(hours=24)
 SLACK = timedelta(hours=1)  # clock slack for "trial ended" and "rebalance due"
 REBALANCE_KEY = "rebalance"  # Discovery-tab key: when the last rebalance ran
 REBALANCE_REPORT_KEY = "rebalance_report"  # Discovery-tab key: the last plan as compact JSON
-ACTION_ORDER = ("replace", "graduate", "defer", "return", "keep", "extend", "shed")
+ACTION_ORDER = ("replace", "graduate", "defer", "return", "rotate", "keep", "extend", "shed")
 
 
 @dataclass(frozen=True)
@@ -179,18 +248,28 @@ class PoolPolicy:
     def interval(self) -> timedelta:
         return timedelta(days=max(1, self.rebalance_every_days))
 
+    @property
+    def cooldown(self) -> timedelta:
+        """How long a board that left monitoring waits before it can be offered a slot again."""
+        return timedelta(days=2 * max(1, self.exploration_days))
+
+    @property
+    def max_trial_age(self) -> timedelta:
+        """A trial that still cannot be judged this long after it began is rotated out (see plan_rebalance)."""
+        return timedelta(days=3 * max(1, self.exploration_days))
+
 
 def open_jobs(rec: BoardRecord) -> int:
     return min(open_jobs_uncapped(rec), OPEN_CAP)
 
 
 def weekly_rate(rec: BoardRecord, now: datetime) -> float | None:
-    """New relevant postings per week over the observed part of the last 30 days. Per OBSERVED day, so a
-    longer monitoring history never raises it. None = unknown."""
-    days = stint_days(rec, now)
-    if rec.new_relevant_30d is None or days is None or days <= 0:
+    """New relevant postings per week over the OBSERVED part of the last 30 days (outages are not
+    observed time), so neither a longer monitoring history nor an outage changes it. None = unknown."""
+    observed, _ = observed_days(rec, now, 30)
+    if rec.new_relevant_30d is None or observed < MIN_OBSERVED_DAYS:
         return None
-    return rec.new_relevant_30d * 7 / min(30.0, days)
+    return rec.new_relevant_30d * 7 / observed
 
 
 def score(rec: BoardRecord, now: datetime) -> float | None:
@@ -206,7 +285,7 @@ def evidence_problem(rec: BoardRecord, now: datetime, policy: PoolPolicy) -> str
     """Why a board's evidence is too thin to demote, shed or graduate it (None = sufficient). One empty,
     partial or failed fetch can never be enough: complete-poll history and fresh evidence are required."""
     if score(rec, now) is None:
-        return f"activity unknown: stint shorter than {ACTIVITY_MIN_DAYS} days"
+        return f"activity unknown: fewer than {ACTIVITY_MIN_DAYS} observed days (stint too short or outages)"
     if rec.complete_polls < policy.min_complete_polls:
         return f"{rec.complete_polls} complete polls, need {policy.min_complete_polls}"
     if rec.consecutive_failures > 0:
@@ -293,7 +372,7 @@ def _leave_monitoring_hygiene(rec: BoardRecord, now: datetime, reason: str) -> N
 @dataclass
 class Decision:
     key: str
-    action: str  # replace | graduate | defer | return | keep | extend | shed
+    action: str  # replace | graduate | defer | return | rotate | keep | extend | shed
     score: float | None = None
     partner: str = ""  # replace: the established board that leaves; defer: the board it would replace
     reason: str = ""
@@ -322,7 +401,7 @@ class RebalancePlan:
     def summary(self) -> str:
         return (
             f"would graduate {self.count('graduate') + self.count('replace')}, replace {self.count('replace')} (bound {self.bound}), "
-            f"defer {self.count('defer')}, extend {self.count('extend')}, return {self.count('return')}, keep {self.count('keep')}, "
+            f"defer {self.count('defer')}, extend {self.count('extend')}, return {self.count('return')}, rotate {self.count('rotate')}, keep {self.count('keep')}, "
             f"shed {self.count('shed')}"
         )
 
@@ -336,7 +415,7 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
     monitored = [r for r in recs if r.status in MONITORED]
     established = [r for r in monitored if r.pool == POOL_ESTABLISHED]
     exploring = [r for r in monitored if r.pool == POOL_EXPLORATION]
-    waiting = sum(1 for r in recs if is_waiting_candidate(r, blocked))
+    waiting = sum(1 for r in recs if is_waiting_candidate(r, blocked, now=now, cooldown=policy.cooldown))
     plan = RebalancePlan(
         exploration_target=policy.exploration_target, established_target=policy.established_target,
         established=len(established), exploration=len(exploring), monitored=len(monitored), max_active=policy.max_active,
@@ -347,14 +426,24 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
         value = score(r, now)
         return 0.0 if value is None else value
 
+    def overdue(r: BoardRecord) -> bool:
+        since = parse_stamp(r.pool_since)
+        return since is None or now - since > policy.max_trial_age
+
     # 2. Trials that ended (a trial with no parsable end counts as ended: nothing protects it forever).
+    # A trial whose evidence stays too thin is extended, but only until it is `max_trial_age` old: then it
+    # is "unjudged" and rotated out to make room (history kept, nothing said about its hiring activity).
     ended: list[BoardRecord] = []
+    unjudged: list[tuple[BoardRecord, str]] = []
     for r in exploring:
         until = parse_stamp(r.trial_until)
         if until is not None and until > now + SLACK:
             plan.protected_trials += 1
         elif problem := evidence_problem(r, now, policy):
-            plan.decisions.append(Decision(r.key, "extend", score(r, now), reason=f"trial extended ({problem})"))
+            if overdue(r):
+                unjudged.append((r, problem))
+            else:
+                plan.decisions.append(Decision(r.key, "extend", score(r, now), reason=f"trial extended ({problem})"))
         else:
             ended.append(r)
     # 3. Established boards with sufficient evidence can be compared; the rest are protected this cycle.
@@ -415,8 +504,12 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
                 continue
             losers.append(g)
         elif not victims and plan.unevidenced_established:
-            # Every established board lacks the evidence to be compared: do not lose a good trial over that.
-            plan.decisions.append(Decision(g.key, "defer", sg, reason="keeps its trial slot: no evidence-backed established board to compare with"))
+            # Every established board lacks the evidence to be compared: do not lose a good trial over that,
+            # but not forever either: an overdue trial is rotated out like any other unjudged one.
+            if overdue(g):
+                unjudged.append((g, "no established board could be compared"))
+            else:
+                plan.decisions.append(Decision(g.key, "defer", sg, reason="keeps its trial slot: no evidence-backed established board to compare with"))
         else:
             losers.append(g)
     plan.replacements = replacements
@@ -434,6 +527,16 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
             plan.decisions.append(Decision(g.key, "return", sg, reason=f"trial lost: score {sg:.1f} does not beat the weakest established board by more than {MARGIN:g}; returned to the waiting list"))
         else:
             plan.decisions.append(Decision(g.key, "keep", sg, reason="trial ended, kept (no relevant board waiting)"))
+    # Unjudged trials share what is left of the waiting list, oldest trial first. They were never
+    # shown to be weak: the reason says the evidence was missing, and their counts are left as recorded.
+    room = max(0, waiting - len(losers))
+    unjudged.sort(key=lambda t: (parse_stamp(t[0].pool_since) or now, t[0].key))
+    for i, (g, why) in enumerate(unjudged):
+        age = "unknown" if parse_stamp(g.pool_since) is None else f"{(now - parse_stamp(g.pool_since)).days} days"  # type: ignore[operator]
+        if i < room:
+            plan.decisions.append(Decision(g.key, "rotate", score(g, now), reason=f"rotated out: trial still unjudged after {age} ({why}); returned to the waiting list, no verdict on its hiring activity"))
+        else:
+            plan.decisions.append(Decision(g.key, "extend", score(g, now), reason=f"trial extended ({why}); unjudged after {age} but no relevant board is waiting for its slot"))
     return plan
 
 
@@ -469,7 +572,7 @@ def apply_plan(registry: dict[str, BoardRecord], plan: RebalancePlan, now: datet
             if (out := registry.get(d.partner)) is not None:
                 demote(out, now, f"{prefix}replaced by {d.key} (score {score_or_zero(rec, now):.1f} vs {score_or_zero(out, now):.1f})")
                 changed[out.key] = out
-        elif d.action in ("return", "shed"):
+        elif d.action in ("return", "shed", "rotate"):
             demote(rec, now, prefix + d.reason)
         elif d.action in ("extend", "keep"):
             rec.trial_until = lg.stamp(now + timedelta(days=plan.trial_days))
@@ -510,10 +613,12 @@ def rebalance_due(stamp_json: str | None, registry: dict[str, BoardRecord], now:
 # --------------------------------------------------------------------------- coverage and reporting (D12)
 
 
-def coverage(registry: dict[str, BoardRecord], now: datetime, blocked: Callable[[str], Any] | None = None) -> dict[str, Any]:
+def coverage(
+    registry: dict[str, BoardRecord], now: datetime, blocked: Callable[[str], Any] | None = None, cooldown: timedelta | None = None
+) -> dict[str, Any]:
     """Pool membership, the relevant waiting list and how much of the relevant boards are actually polled."""
     monitored = [r for r in registry.values() if r.status in MONITORED]
-    waiting = [r for r in registry.values() if is_waiting_candidate(r, blocked)]
+    waiting = [r for r in registry.values() if is_waiting_candidate(r, blocked, now=now, cooldown=cooldown)]
     open_monitored = sum(1 for r in monitored if open_jobs_uncapped(r) > 0)
     oldest: float | None = None
     for r in waiting:
@@ -605,7 +710,7 @@ def preview(registry: dict[str, BoardRecord], states: dict[str, lg.JobState], po
         last = str(json.loads(stamp_json).get("at", "")) if stamp_json else ""
     except (ValueError, AttributeError):
         last = ""
-    return Preview(sync, plan, coverage(work, now, blocked), rebalance_due(stamp_json, registry, now, policy), admission_order(work, blocked), last)
+    return Preview(sync, plan, coverage(work, now, blocked, policy.cooldown), rebalance_due(stamp_json, registry, now, policy), admission_order(work, blocked, now=now, cooldown=policy.cooldown), last)
 
 
 def format_report(pv: Preview, policy: PoolPolicy, now: datetime) -> str:

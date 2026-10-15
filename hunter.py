@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Job hunter: Serper discovery -> ATS hydration -> Groq scoring -> Google Sheet -> Telegram.
+"""Job hunter: web-search discovery (Tavily) -> ATS hydration -> Groq scoring -> Google Sheet -> Telegram.
 
 Google Sheets is both the settings panel (`Settings` tab) and the append-only tracker
 (`Job Tracker` tab). Without GOOGLE_SHEET_ID it falls back to local defaults + tracked_jobs.csv.
@@ -13,6 +13,7 @@ the run; transient failures are not recorded, so the next run retries them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import html
 import json
@@ -38,6 +39,8 @@ import discovery as dsc
 import freshness as fr
 import ledger as lg
 import pipeline as pl
+import search
+import pilot
 import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
 from freshness import parse_posted
@@ -73,7 +76,10 @@ TRACKER_COLUMNS = [
     "User_Notes",
     "Freshness",  # how sure we are the job is new (verified fresh / recent / age unverified)
     "Source",  # Board poll | Search
+    "My_Feedback",  # pilot: Would apply | Maybe | Irrelevant. The user's column: the script never writes or overwrites it
 ]
+FEEDBACK_CHOICES = ["Would apply", "Maybe", "Irrelevant"]
+FEEDBACK_COLUMN = TRACKER_COLUMNS.index("My_Feedback")  # 0-based
 URL_COLUMN = TRACKER_COLUMNS.index("Apply_URL") + 1  # 1-based sheet column (I)
 
 DEFAULT_TZ = ZoneInfo("America/Chicago")  # used only when neither Settings nor the Sheet names a zone
@@ -96,7 +102,6 @@ ATS_SITES = [
     "jobs.smartrecruiters.com",
 ]
 
-SERPER_URL = "https://google.serper.dev/search"
 GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}"
 LEVER_API = "https://api.lever.co/v0/postings/{company}/{posting_id}"
 ASHBY_API = "https://api.ashbyhq.com/posting-api/job-board/{company}"
@@ -110,9 +115,6 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 MIN_JD_CHARS = 200
-DEFAULT_SEARCH_TBS = "qdr:d3"  # Serper `tbs`: pages Google indexed in the last 3 days (candidate retrieval only)
-GOOGLE_QUERY_WORD_LIMIT = 30  # Google ignores terms past ~32 words; keep a margin
-MAX_QUERIES = 4
 
 
 # --------------------------------------------------------------------------- settings
@@ -144,7 +146,17 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ("Max_Job_Age_Days", "14", "Jobs published more than this many days ago are skipped as stale."),
     ("Fresh_Window_Hours", "12", "Only jobs whose company-stated publish time is within this many hours trigger a Telegram alert. Separate from how often Google is searched."),
     ("Discovery_Every_Hours", "12", "How often the app runs its rotating Google search for new company job boards (separate from the freshness window above)."),
-    ("Discovery_Credit_Budget", "10", "Most search credits (one per results page) one Google discovery run may spend. A hard cap."),
+    ("Discovery_Credit_Budget", "10", "Most search credits one discovery run may spend (a basic search costs 1). A hard cap."),
+    (
+        "Search_Monthly_Credits",
+        "1000",
+        "Most search credits the app may spend per calendar month (UTC), counting every search path. Tavily's free plan includes 1000.",
+    ),
+    (
+        "Search_Reserve_Credits",
+        "200",
+        "Part of the monthly credits kept back from the scheduled searches, for manual tests and backfills.",
+    ),
     (
         "Timezone",
         "",
@@ -196,6 +208,8 @@ class Settings:
     fresh_window_hours: int = fr.DEFAULT_FRESH_WINDOW_HOURS
     discovery_every_hours: int = 12
     discovery_credit_budget: int = dsc.DEFAULT_CREDIT_BUDGET
+    search_monthly_credits: int = search.DEFAULT_MONTHLY_CREDITS
+    search_reserve_credits: int = search.DEFAULT_RESERVE_CREDITS
     timezone: str = ""
     max_active_boards: int = 500
     max_new_boards_per_run: int = 50
@@ -230,6 +244,8 @@ class Settings:
             fresh_window_hours=max(1, _int_or(pick("Fresh_Window_Hours"), fr.DEFAULT_FRESH_WINDOW_HOURS)),
             discovery_every_hours=max(1, _int_or(pick("Discovery_Every_Hours"), 12)),
             discovery_credit_budget=max(1, _int_or(pick("Discovery_Credit_Budget"), dsc.DEFAULT_CREDIT_BUDGET)),
+            search_monthly_credits=max(0, _int_or(pick("Search_Monthly_Credits"), search.DEFAULT_MONTHLY_CREDITS)),
+            search_reserve_credits=max(0, _int_or(pick("Search_Reserve_Credits"), search.DEFAULT_RESERVE_CREDITS)),
             timezone=pick("Timezone"),
             max_active_boards=max(1, _int_or(pick("Max_Active_Boards"), 500)),
             max_new_boards_per_run=max(1, _int_or(pick("Max_New_Boards_Per_Run"), 50)),
@@ -276,7 +292,7 @@ def excluded_title_regex(words: list[str]) -> re.Pattern[str] | None:
 
 @dataclass(frozen=True)
 class Config:
-    search_api_key: str
+    tavily_api_key: str
     groq_api_key: str
     groq_model: str
     groq_fallback_model: str
@@ -289,9 +305,7 @@ class Config:
     telegram_chat_id: str
     webhook_url: str
     max_jobs: int
-    search_pages: int
-    serper_num: int
-    search_tbs: str
+    search_window_days: int
 
     @classmethod
     def from_env(cls) -> Config:
@@ -299,7 +313,7 @@ class Config:
             return (os.getenv(name) or "").strip() or default
 
         return cls(
-            search_api_key=env("SERPER_API_KEY", env("SEARCH_API_KEY")),
+            tavily_api_key=env("TAVILY_API_KEY"),
             groq_api_key=env("GROQ_API_KEY"),
             groq_model=env("GROQ_MODEL", "openai/gpt-oss-120b"),
             groq_fallback_model=env("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b"),
@@ -313,12 +327,9 @@ class Config:
             telegram_chat_id=env("TELEGRAM_CHAT_ID"),
             webhook_url=env("ALERT_WEBHOOK_URL"),
             max_jobs=_int_or(env("MAX_JOBS_PER_RUN"), 30),
-            search_pages=_int_or(env("SEARCH_PAGES"), 2),
-            # Serper's free tier rejects num > 10; 0 = omit and use pages instead.
-            serper_num=_int_or(env("SERPER_NUM"), 0),
-            # Layer 1: a 3-day sliding window rotates the results with newly indexed pages
-            # instead of returning the same evergreen top 20. "none" disables the filter.
-            search_tbs=env("SEARCH_TBS", DEFAULT_SEARCH_TBS),
+            # Candidate retrieval window (days) passed to Tavily as `start_date`. Scheduled discovery is
+            # always windowed; only the manual --backfill searches without one.
+            search_window_days=max(1, _int_or(env("SEARCH_WINDOW_DAYS"), search.DEFAULT_WINDOW_DAYS)),
         )
 
 
@@ -338,151 +349,65 @@ class AtsRef:
 # --------------------------------------------------------------------------- search
 
 
-def _term(word: str, prefix: str = "") -> str:
-    return f'{prefix}"{word}"' if " " in word else f"{prefix}{word}"
-
-
-def _group(terms: list[str]) -> str:
-    return terms[0] if len(terms) == 1 else "(" + " OR ".join(terms) + ")"
-
-
-def count_words(query: str) -> int:
-    """Approximate Google's word count: every term, but not OR / punctuation."""
-    bare = re.sub(r"-?intitle:", "", query)  # an operator isn't a word of its own
-    return sum(1 for t in re.sub(r'[()"]', " ", bare).split() if t.upper() != "OR")
-
-
-def build_queries(s: Settings, *, limit: int = GOOGLE_QUERY_WORD_LIMIT, max_queries: int = MAX_QUERIES) -> list[str]:
-    """Serper queries from the Settings, split so each stays under Google's word limit.
-
-    Roles are split across queries first; if it still doesn't fit, locations are dropped
-    (the AI checks location anyway). Excluded title words are added as -intitle: terms only
-    as far as the budget allows; the rest are enforced locally before any fetch.
-    """
-    if not s.roles:
-        raise RuntimeError("Target_Roles is empty; nothing to search for")
-    site_part = "(" + " OR ".join(f"site:{x}" for x in ATS_SITES) + ")"
-    roles = [_term(r, "intitle:") for r in s.roles]
-    levels = [_term(x, "intitle:") for x in s.levels]
-    locs: list[str] = []
-    for x in s.locations:  # postings say "Remote - US", rarely "US Remote": search plain Remote
-        term = "Remote" if "remote" in x.lower() else _term(x)
-        if term not in locs:
-            locs.append(term)
-    excl = [_term(w, "-intitle:") for w in s.excluded]
-
-    def core(role_chunk: list[str], with_locs: bool) -> str:
-        parts = [site_part, _group(role_chunk)]
-        if levels:
-            parts.append(_group(levels))
-        if with_locs and locs:
-            parts.append(_group(locs))
-        return " ".join(parts)
-
-    def with_exclusions(query: str) -> str:
-        for term in excl:  # fill the remaining word budget with exclusions
-            if count_words(query + " " + term) > limit:
-                break
-            query += " " + term
-        return query
-
-    for with_locs in (True, False):
-        for n in range(1, min(len(roles), max_queries) + 1):
-            chunks = [roles[i::n] for i in range(n)]
-            if all(count_words(core(c, with_locs)) <= limit for c in chunks):
-                if not with_locs:
-                    log.warning("Settings are too long for one search; location terms dropped from queries")
-                return [with_exclusions(core(c, with_locs)) for c in chunks]
-    log.warning("Settings are too long to fit Google's query limit; searching the first roles only")
-    return [with_exclusions(core([r], False)) for r in roles[:max_queries]]
-
-
-@dataclass(frozen=True)
-class SearchHit:
-    url: str
-    title: str = ""
-    date: str = ""  # Serper's `date` (often null for ATS pages); never used as a publication time
-
-
-def scheduled_tbs(cfg: Config) -> str:
-    """Scheduled discovery is ALWAYS date-windowed. A blank/none/off SEARCH_TBS cannot turn it
-    into an unfiltered search (that is the manual --backfill only)."""
-    tbs = cfg.search_tbs.strip()
-    if tbs.lower() in {"", "none", "off"}:
-        log.warning("SEARCH_TBS disables the date window; scheduled discovery keeps %s (use --backfill for unfiltered searches)", DEFAULT_SEARCH_TBS)
-        return DEFAULT_SEARCH_TBS
-    return tbs
-
-
-def search_page(cfg: Config, query: dsc.Query, page: int) -> list[SearchHit]:
-    """One Serper request = one results page = one credit. Raises on any failure."""
-    if not cfg.search_api_key:
-        raise RuntimeError("SERPER_API_KEY is not set")
-    body: dict[str, Any] = {"q": query.text, "page": page}
-    if cfg.serper_num > 0:
-        body["num"] = cfg.serper_num
-    if query.tbs:
-        body["tbs"] = query.tbs
-    resp = requests.post(
-        SERPER_URL, headers={"X-API-KEY": cfg.search_api_key, "Content-Type": "application/json"}, json=body, timeout=HTTP_TIMEOUT
-    )
-    resp.raise_for_status()
-    return [SearchHit(r["link"], r.get("title") or "", str(r.get("date") or "")) for r in resp.json().get("organic", []) if r.get("link")]
-
-
 def rotation_slots(s: Settings) -> list[dsc.Slot]:
-    """Site x role x location combinations to rotate through (locations as they appear in postings)."""
+    """Site x role combinations to rotate through. The ATS host becomes Tavily's `include_domains`
+    restriction (there is no `site:` operator); the role is the query. Level words, excluded-title
+    words and locations are NOT part of the query: they returned nothing in live probes of the
+    previous provider (D-35), and the title gate, the US rule and the scorer apply them locally."""
     if not s.roles:
         raise RuntimeError("Target_Roles is empty; nothing to search for")
-    locs: list[str] = []
-    for x in s.locations:  # postings say "Remote - US", rarely "US Remote": search plain Remote
-        term = "Remote" if "remote" in x.lower() else x
-        if term not in locs:
-            locs.append(term)
-    return dsc.make_slots(ATS_SITES, s.roles, locs)
+    return dsc.make_slots(ATS_SITES, s.roles, [])
 
 
-def slot_query(slot: dsc.Slot, s: Settings, *, limit: int = GOOGLE_QUERY_WORD_LIMIT) -> str:
-    """Query text for one rotation slot: one ATS site, one role, level words, one location, plus
-    as many excluded-title terms as fit Google's word limit (the rest are enforced locally)."""
-    parts = [f"site:{slot.site}", _term(slot.role, "intitle:")]
-    if s.levels:
-        parts.append(_group([_term(x, "intitle:") for x in s.levels]))
-    if slot.location:
-        parts.append(_term(slot.location))
-    query = " ".join(parts)
-    for w in s.excluded:
-        term = _term(w, "-intitle:")
-        if count_words(query + " " + term) > limit:
-            break
-        query += " " + term
-    return query
+def slot_query(slot: dsc.Slot, s: Settings) -> str:
+    """Query text for one slot: the role as a job search. Tavily ranks semantically, so the domain
+    restriction (`include_domains`) and the date window carry the ATS and recency constraints."""
+    return f"{slot.role} job" + (f" {slot.location}" if slot.location else "")
+
+
+def make_search_sync(cfg: Config) -> Callable[[search.SearchBudget], None]:
+    """Reads Tavily's own usage counter into the ledger (free; sees usage this application cannot)."""
+
+    def sync(budget: search.SearchBudget) -> None:
+        if cfg.tavily_api_key:
+            budget.observe_account(search.account_usage(cfg.tavily_api_key))
+
+    return sync
 
 
 def make_discovery(cfg: Config, s: Settings, *, backfill: bool = False, backfill_credits: int = 12) -> Callable[[pl.DiscoveryContext], dsc.DiscoveryResult]:
     """The discovery callable the pipeline runs when discovery is due (or forced).
 
-    Scheduled: the next slots of the persistent rotation, each date-windowed (qdr:d3), within
-    `Discovery_Credit_Budget` credits. Backfill (manual `--backfill` only): the old broad
-    queries WITHOUT the date window, boards only (undated results are not job candidates)."""
+    Scheduled: the next slots of the persistent rotation, each restricted to the last
+    `cfg.search_window_days` days (`start_date`), within `Discovery_Credit_Budget` credits per run AND
+    the monthly ledger. Backfill (manual `--backfill` only): the same slots on their own cursor WITHOUT a
+    date window, boards only (an undated result is not a job candidate). Every request is charged to the
+    shared monthly ledger as it is made, under the path that made it."""
 
     def run(ctx: pl.DiscoveryContext) -> dsc.DiscoveryResult:
-        def fetch_page(q: dsc.Query, page: int) -> list[SearchHit]:
-            return search_page(cfg, q, page)
+        path = "backfill" if backfill else "rotation" if ctx.scheduled else "manual"
 
-        if backfill:
-            queries = [dsc.Query(f"backfill:{i + 1}", q, "") for i, q in enumerate(build_queries(s))]
-            return dsc.run_queries(
-                queries, fetch_page, budget=backfill_credits, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
-                max_pages=max(cfg.search_pages, 3), kind=dsc.KIND_BACKFILL, take_jobs=False,
-            )  # fmt: skip
-        tbs = scheduled_tbs(cfg)
+        def fetch_page(q: dsc.Query, page: int) -> search.Page:
+            if page > 1:
+                return search.Page([], credits=0)  # Tavily cannot paginate
+            try:
+                result = search.search(cfg.tavily_api_key, q.text, q.domain, window_days=q.window_days)
+            except search.SearchLimitReached:
+                ctx.budget.limit_hit = True  # nothing more is spent this month; the ledger remembers it
+                raise
+            ctx.budget.charge(result.credits, path)
+            return result
+
         slots = rotation_slots(s)
-        chosen = dsc.plan_slots(ctx.rotation, slots, s.discovery_credit_budget)  # >= 1 credit each: never more than the budget
-        queries = [dsc.Query(sl.id, slot_query(sl, s), tbs) for sl in chosen]
+        per_run = backfill_credits if backfill else s.discovery_credit_budget
+        allowed = min(per_run, ctx.budget.remaining(scheduled=ctx.scheduled))
+        chosen = dsc.plan_slots(ctx.rotation, slots, allowed, backfill=backfill)  # >= 1 credit each: never more than the budget
+        window = None if backfill else cfg.search_window_days
+        queries = [dsc.Query(("backfill:" if backfill else "") + sl.id, slot_query(sl, s), sl.site, window) for sl in chosen]
         return dsc.run_queries(
-            queries, fetch_page, budget=s.discovery_credit_budget, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
+            queries, fetch_page, budget=allowed, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
             max_pages=dsc.DEFAULT_MAX_PAGES, stall_pages=dsc.DEFAULT_STALL_PAGES,
+            kind=dsc.KIND_BACKFILL if backfill else dsc.KIND_ROTATION, take_jobs=not backfill,
         )  # fmt: skip
 
     return run
@@ -1024,13 +949,28 @@ class GroqClient:
 # --------------------------------------------------------------------------- tracker
 
 
+FIXTURE_LABEL = "TEST FIXTURE (not a real job)"
+FIXTURE_URL = "https://example.invalid/test-fixture"  # not an ATS URL: never parsed as a job identity, so it can never dedupe or shadow a real job
+FIXTURE_POSTING = Posting(
+    url=FIXTURE_URL, ats="fixture", title="Marketing Coordinator (TEST FIXTURE)", company="Delivery Test Co (not a real company)",
+    description=(
+        "THIS IS A SYNTHETIC POSTING USED ONLY TO TEST DELIVERY. It is not a real job and must never be applied to.\n"
+        "Entry-level Marketing Coordinator, Austin, TX (hybrid). Support social media calendars, write short-form content, "
+        "assist with email campaigns and basic web updates, and report on engagement. 0-2 years of experience, a degree in "
+        "marketing, communications or a related field, and strong writing skills. Familiarity with Canva and social platforms is a plus. "
+        "Responsibilities include coordinating with designers, scheduling posts, tracking metrics, and helping organize events. "
+        "This fixture exists so that the scoring, tracker and Telegram steps can be exercised without a real qualifying job."
+    ),
+    location="Austin, TX", posted="", posted_source="fixture",
+)  # fmt: skip
+
 FRESHNESS_LABELS = {
     fr.VERIFIED_FRESH: "Verified fresh",
     fr.OBSERVED_NEW: "New on board (age unverified)",
     fr.RECENT: "Recent",
     fr.UNCERTAIN: "Age unverified",
 }
-SOURCE_LABELS = {"poll": "Board poll", "serper": "Search"}
+SOURCE_LABELS = {"poll": "Board poll", "search": "Search", "serper": "Search"}  # "serper": rows written before Tavily
 
 
 @dataclass(frozen=True)
@@ -1069,6 +1009,7 @@ class JobRow:
             "",  # User_Notes: the user's, never written by the script
             FRESHNESS_LABELS.get(self.freshness, self.freshness),
             SOURCE_LABELS.get(self.source, self.source),
+            "",  # My_Feedback: the user's, never written by the script
         ]
 
     def payload(self, visible: bool) -> dict[str, Any]:
@@ -1191,10 +1132,14 @@ class SheetStore:
             ws = self.sh.add_worksheet(title=TRACKER_TAB, rows=1000, cols=len(TRACKER_COLUMNS))
             ws.append_rows([TRACKER_COLUMNS], value_input_option="RAW")
             widths = {0: 120, 1: 130, 2: 120, 3: 70, 4: 320, 5: 180, 6: 380, 7: 300, 8: 260, 9: 220, 10: 170, 11: 100}
-            self._style(ws, header="A1:L1", widths=widths)
+            widths[12] = 130
+            self._style(ws, header="A1:M1", widths=widths)
             self._status_dropdown(ws)
+            self._feedback_dropdown(ws)
             tabs[TRACKER_TAB] = ws
             created = True
+        else:
+            self._ensure_feedback_column(tabs[TRACKER_TAB])
             log.info("Created the %s tab", TRACKER_TAB)
         self.state.ensure()
         if created:  # tidy: drop the blank default tab Google creates with a new spreadsheet
@@ -1221,17 +1166,35 @@ class SheetStore:
             log.warning("Sheet styling skipped: %s", exc)
 
     def _status_dropdown(self, ws: Any) -> None:
+        self._dropdown(ws, 2, STATUS_CHOICES, "Status")
+
+    def _feedback_dropdown(self, ws: Any) -> None:
+        self._dropdown(ws, FEEDBACK_COLUMN, FEEDBACK_CHOICES, "Feedback")
+
+    def _dropdown(self, ws: Any, column: int, choices: list[str], what: str) -> None:
         try:
             self.sh.batch_update({"requests": [{"setDataValidation": {
-                "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2000, "startColumnIndex": 2, "endColumnIndex": 3},
+                "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2000, "startColumnIndex": column, "endColumnIndex": column + 1},
                 "rule": {
-                    "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": s} for s in STATUS_CHOICES]},
+                    "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": s} for s in choices]},
                     "showCustomUi": True,
-                    "strict": False,  # the user may type their own statuses
+                    "strict": False,  # the user may type their own value
                 },
             }}]})  # fmt: skip
         except Exception as exc:
-            log.warning("Status dropdown skipped: %s", exc)
+            log.warning("%s dropdown skipped: %s", what, exc)
+
+    def _ensure_feedback_column(self, ws: Any) -> None:
+        """A tracker created before the pilot gets the My_Feedback header (cell M1 only) and its dropdown.
+        No data row is touched; an existing header cell is never overwritten."""
+        try:
+            header = ws.row_values(1) if hasattr(ws, "row_values") else []
+            if header and len(header) <= FEEDBACK_COLUMN and header == TRACKER_COLUMNS[: len(header)]:
+                ws.update(values=[["My_Feedback"]], range_name=f"{chr(ord('A') + FEEDBACK_COLUMN)}1", value_input_option="RAW")
+                self._feedback_dropdown(ws)
+                log.info("Added the My_Feedback column to the Job Tracker header")
+        except Exception as exc:  # cosmetic: rows are positional either way
+            log.warning("Could not add the My_Feedback header: %s", exc)
 
     # -- reads
     def load_settings(self) -> dict[str, str]:
@@ -1242,7 +1205,13 @@ class SheetStore:
         """Identity keys already in Job Tracker (read from Apply_URL, column I)."""
         return tracker_keys_from_urls(self.sh.worksheet(TRACKER_TAB).col_values(URL_COLUMN)[1:])
 
-    # -- writes: strictly append-only so the user's edits to My_Status / User_Notes survive
+    def tracker_rows(self) -> list[dict[str, str]]:
+        """Every tracker row as {column: value} (read only: used for the pilot report)."""
+        values = self.sh.worksheet(TRACKER_TAB).get_all_values()
+        header = values[0] if values else []
+        return [dict(zip(header, list(r) + [""] * (len(header) - len(r)))) for r in values[1:]]
+
+    # -- writes: strictly append-only so the user's edits to My_Status / User_Notes / My_Feedback survive
     def append_jobs(self, rows: list[JobRow]) -> None:
         if rows:
             self.sh.worksheet(TRACKER_TAB).append_rows(
@@ -1292,6 +1261,10 @@ class CsvStore:
     def tracked_keys(self) -> set[str]:
         with self.path.open(newline="", encoding="utf-8") as fh:
             return tracker_keys_from_urls(r.get("Apply_URL", "") for r in csv.DictReader(fh))
+
+    def tracker_rows(self) -> list[dict[str, str]]:
+        with self.path.open(newline="", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
 
     def append_jobs(self, rows: list[JobRow]) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as fh:
@@ -1439,12 +1412,12 @@ def make_evaluator(
     return evaluate
 
 
-def make_serper_hydrator(hydrate: Callable[[AtsRef], Posting] | None = None) -> Callable[[pl.SerperJob], ListedJob | None]:
+def make_search_hydrator(hydrate: Callable[[AtsRef], Posting] | None = None) -> Callable[[pl.SearchJob], ListedJob | None]:
     """For jobs found only by search: read the ATS for an authoritative date before observing.
     A closed posting returns None; a temporary failure raises RetryableHydration (queued)."""
     hydrate = hydrate or hydrate_posting
 
-    def hydrate_listed(sj: pl.SerperJob) -> ListedJob | None:
+    def hydrate_listed(sj: pl.SearchJob) -> ListedJob | None:
         try:
             p = hydrate(ref_for(sj.ident, sj.url))
         except TransientError as exc:
@@ -1470,6 +1443,60 @@ def load_resume_file(path: Path = RESUME_PATH) -> str:
     return "\n".join(lines).strip()
 
 
+LEASE_TTL = {"poller": timedelta(minutes=30), "inventory": timedelta(minutes=45)}  # a little over each workflow's run limit
+
+
+def local_write_refusal(*, uses_sheet: bool, in_actions: bool, allow_local: bool) -> str | None:
+    """Production writes happen only in the serialized GitHub workflows (D-37). A Sheet lease is a read
+    followed by a write: two writers can both believe they hold it (tests/test_deployment.py shows the
+    interleaving), so it cannot make a local command safe next to a scheduled run. A local command may
+    write to a Google Sheet only when the operator explicitly accepts that for a TEST sheet nobody else
+    writes (ALLOW_LOCAL_SHEET_WRITES=1). Local CSV state (no Sheet configured) is unaffected."""
+    if not uses_sheet or in_actions or allow_local:
+        return None
+    return (
+        "Local writes to a Google Sheet are disabled: the Sheet lease is not atomic, so a local command could overlap a scheduled "
+        "GitHub run. Use the GitHub workflow (Job Hunter / Board Inventory), or set ALLOW_LOCAL_SHEET_WRITES=1 for a TEST Sheet "
+        "that no workflow writes. Read-only commands (--dry-run, --url, --rebalance-report, --search-usage, --inventory-report) are not affected."
+    )
+
+
+class WriterBusy(Exception):
+    """Another process holds the state-writer lease."""
+
+
+@contextlib.contextmanager
+def writer_lease(store: Any, label: str, *, enabled: bool = True, wait_seconds: float | None = None, sleep: Callable[[float], None] = time.sleep):
+    """Hold the advisory writer lease for the length of a state-writing command. Waits (never cancels
+    the holder) up to `wait_seconds` (STATE_LEASE_WAIT_SECONDS, default 300), then raises WriterBusy.
+    The lease expires by itself (LEASE_TTL), so a crashed holder cannot block the registry for long."""
+    if not enabled:
+        yield
+        return
+    wait = float(os.getenv("STATE_LEASE_WAIT_SECONDS") or 300) if wait_seconds is None else wait_seconds
+    deadline = time.monotonic() + wait
+    while True:
+        lease = store.state.acquire_lease(label, LEASE_TTL[label], fr.utcnow())
+        if lease.ok:
+            break
+        if time.monotonic() >= deadline:
+            raise WriterBusy(lease.held_by)
+        log.info("Another writer holds the state lease (%s); waiting", lease.held_by)
+        sleep(15)
+    try:
+        yield
+    finally:
+        try:
+            if not store.state.holds_lease(lease.token, fr.utcnow()):
+                log.error(
+                    "The state lease expired or was taken over while this run was still writing: exclusion was NOT held for part of the run. "
+                    "Check the Runs and Boards tabs for overlap and raise LEASE_TTL / lower the workflow timeout."
+                )
+            store.state.release_lease(lease.token)
+        except Exception as exc:  # it expires on its own
+            log.warning("Could not release the state lease: %s", exc)
+
+
 def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excluded: re.Pattern[str] | None) -> int:
     """Manual / weekly inventory commands: import, validate, report. Never scores or alerts."""
     now = fr.utcnow()
@@ -1479,7 +1506,7 @@ def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excl
 
     def save(recs: list[Any]) -> None:
         if not dry:
-            # Compare-and-set (D-28): a row the poller promoted since we loaded it is not overwritten.
+            # Best-effort guard behind serialization (D-31): a row the poller promoted since we loaded it is not overwritten, its provenance is merged.
             skipped = state.save_boards(recs, skip_if_status=inventory.POLLER_OWNED)
             if skipped:
                 log.info("Skipped %d registry rows now owned by the hourly poller (monitored or disabled since this run loaded them)", len(skipped))
@@ -1507,6 +1534,75 @@ def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excl
     print(inventory.format_report(res, summary, boards_mod.registry_counts(registry)))
     if res and all(r.status == "failed" for r in res.overlap.per_source.values()):
         return 1
+    return 0
+
+
+def run_delivery_test(cfg: Config, store: Any, settings: Settings, groq: Any, to: str) -> int:
+    """Exercise scoring -> tracker -> Telegram with ONE clearly labelled synthetic posting.
+
+    Isolated on purpose: it writes no ledger event, no board row and no counter, uses a non-ATS URL (so it
+    can never dedupe against or shadow a real job), carries `Test fixture` in the Freshness and Source
+    columns and a label in the title, and the Telegram message starts with the same label. It validates the
+    delivery PLUMBING (the real Groq call, the real tracker append, the real Telegram send); it says nothing
+    about the quality of real jobs. The recipient must be named: `to` has to equal the configured chat id."""
+    if not cfg.telegram_chat_id or not cfg.telegram_token:
+        log.error("Delivery test not run: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not configured")
+        return 2
+    if str(to).strip() != cfg.telegram_chat_id:
+        log.error("Delivery test not run: --to must equal the configured TELEGRAM_CHAT_ID (the explicitly authorized recipient)")
+        return 2
+    ev = groq.evaluate(settings, FIXTURE_POSTING)
+    row = JobRow(
+        STATUS_APPLY if ev.score >= settings.min_score else STATUS_STRETCH, ev.score, FIXTURE_POSTING.company, FIXTURE_POSTING.title,
+        FIXTURE_POSTING.location, f"[{FIXTURE_LABEL}] {ev.verdict}", ev.missing_gaps, FIXTURE_URL, "", FIXTURE_LABEL, FIXTURE_LABEL,
+    )  # fmt: skip
+    store.append_jobs([row])  # the real tracker append
+    alerted = send_alert(cfg, row, store.sheet_url)  # the real Telegram send (message title is the fixture's)
+    print(json.dumps({"scored": ev.score, "status": row.status, "tracker_row_appended": True, "telegram_sent": bool(alerted), "label": FIXTURE_LABEL}))
+    return 0 if alerted else 1
+
+
+def run_search_usage(cfg: Config, store: Any, settings: Settings) -> int:
+    """Read-only: the local monthly credit ledger next to Tavily's own counter. Costs no credits."""
+    now = fr.utcnow()
+    budget = search.SearchBudget.load(
+        store.state.load_discovery_state().get(search.BUDGET_KEY), now, cap=settings.search_monthly_credits, reserve=settings.search_reserve_credits
+    )  # fmt: skip
+    usage = search.account_usage(cfg.tavily_api_key) if cfg.tavily_api_key else None
+    budget.observe_account(usage)
+    print(budget.summary())
+    print(
+        f"remaining this month: {budget.remaining(scheduled=True)} for scheduled runs, {budget.remaining(scheduled=False)} for manual runs"
+        + ("" if usage else " (Tavily's own counter could not be read: only this application's requests are counted)")
+    )
+    if usage:
+        print(f"Tavily account: plan '{usage['plan']}', {usage['used']} of {usage['limit'] if usage['limit'] is not None else 'unlimited'} credits used in its billing cycle (this key: {usage['key_used']})")
+    slots = len(rotation_slots(settings)) if settings.roles else 0
+    last = store.state.load_discovery_state().get(dsc.LAST_RUN_KEY)
+    try:
+        last_queries = json.loads(last).get("queries") if last else None
+    except (ValueError, AttributeError):
+        last_queries = None
+    est = search.rotation_estimate(slots, settings.discovery_credit_budget, 24 / max(1, settings.discovery_every_hours), budget, last_queries)
+    print(
+        f"rotation: {est.slots} site x role slots; {est.requests_per_slot:.2f} request(s) per slot x {est.credits_per_request:.2f} credit(s) per request "
+        f"({'measured from the last discovery and this month' if est.measured else 'ASSUMED: nothing measured yet'}) -> {est.slots_per_run} slots per run, "
+        f"{est.days_per_pass:.1f} days per full pass, {est.credits_per_month:.0f} credits a month at {est.runs_per_day:g} runs a day"
+    )
+    print("The local counter cannot see requests made outside this application (other keys or projects, curl, tests); Tavily's counter can, but its billing-cycle start day is not documented.")
+    return 0
+
+
+def run_pilot_report(store: Any, settings: Settings, days: int) -> int:
+    """Read-only pilot measurements from the state the system keeps (see pilot.py)."""
+    now = fr.utcnow()
+    state = store.state
+    rep = pilot.build_report(
+        now=now, days=days, runs=state.load_runs(), events=state.load_events(), boards=state.load_boards(),
+        discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
+        search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits,
+    )  # fmt: skip
+    print(pilot.format_report(rep))
     return 0
 
 
@@ -1545,9 +1641,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="evaluate one job URL (identity from the URL) and print the outcome; writes nothing")
     parser.add_argument("--dry-run", action="store_true", help="do not write any state, tracker rows or alerts")
-    parser.add_argument("--discover", action="store_true", help="run one rotating (date-windowed) Serper discovery now, regardless of schedule")
-    parser.add_argument("--backfill", action="store_true", help="MANUAL ONLY: broad Serper searches without the date window, boards only (never scheduled)")
+    parser.add_argument("--discover", action="store_true", help="run one rotating (date-windowed) web-search discovery now, regardless of schedule; may use the reserved credits")
+    parser.add_argument("--backfill", action="store_true", help="MANUAL ONLY: the same site x role searches WITHOUT the date window, boards only (never scheduled); may use the reserved credits")
     parser.add_argument("--backfill-credits", type=int, default=12, help="search-credit cap for --backfill (default 12)")
+    parser.add_argument("--pilot-report", nargs="?", type=int, const=7, default=None, metavar="DAYS", help="print the pilot measurements for the last DAYS days (default 7); read only")
+    parser.add_argument("--delivery-test", action="store_true", help="send ONE labelled synthetic fixture through scoring -> tracker -> Telegram (needs --to); writes no ledger state")
+    parser.add_argument("--to", help="the Telegram chat id that may receive --delivery-test messages; must equal TELEGRAM_CHAT_ID")
+    parser.add_argument("--search-usage", action="store_true", help="print this month's search credit ledger and Tavily's own usage counter (costs no credits; writes nothing)")
     parser.add_argument("--seed", action="append", default=[], type=_seed, metavar="ATS:BOARD", help="register a board manually (repeatable)")
     inv = parser.add_argument_group("inventory (seed the registry from public company lists; never scores or alerts)")
     inv.add_argument("--import-inventory", action="store_true", help="download both inventories and merge new boards into the registry")
@@ -1562,7 +1662,7 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -1588,13 +1688,39 @@ def main(argv: list[str] | None = None) -> int:
         config_notes.append(tz_warning)
     for note in config_notes:
         log.warning("Settings: %s", note)
+    if args.search_usage:
+        return run_search_usage(cfg, store, settings)
+    if args.pilot_report is not None:
+        return run_pilot_report(store, settings, max(1, args.pilot_report))
     if args.rebalance_report:
         allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
         return run_rebalance_report(store, settings, allow_sr)
+    writes = not args.dry_run and (bool(args.import_inventory or args.validate) if inventory_mode else not (args.url or args.delivery_test))
+    if writes and (why := local_write_refusal(
+        uses_sheet=bool(cfg.sheet_id), in_actions=(os.getenv("GITHUB_ACTIONS") or "").strip() == "true",
+        allow_local=(os.getenv("ALLOW_LOCAL_SHEET_WRITES") or "").strip() == "1",
+    )):  # fmt: skip
+        log.error("%s", why)
+        return 4
     if inventory_mode:
-        return run_inventory(args, store, settings, excluded)
+        try:
+            with writer_lease(store, "inventory", enabled=bool(args.import_inventory or args.validate) and not args.dry_run):
+                return run_inventory(args, store, settings, excluded)
+        except WriterBusy as exc:
+            log.error("Not started: another process is writing this registry (%s). Nothing was changed.", exc)
+            return 3
     groq = GroqClient(cfg)
     evaluate = make_evaluator(settings, groq, excluded)
+
+    if args.delivery_test:
+        why = local_write_refusal(
+            uses_sheet=bool(cfg.sheet_id), in_actions=(os.getenv("GITHUB_ACTIONS") or "").strip() == "true",
+            allow_local=(os.getenv("ALLOW_LOCAL_SHEET_WRITES") or "").strip() == "1",
+        )  # fmt: skip
+        if why:
+            log.error("%s", why)
+            return 4
+        return run_delivery_test(cfg, store, settings, groq, args.to or "")
 
     if args.url:  # single-job check through the real gates and scorer; nothing is written
         ident = parse_job_url(args.url)
@@ -1623,11 +1749,15 @@ def main(argv: list[str] | None = None) -> int:
         evaluate=evaluate,
         send_alert=alert,
         title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
-        discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.search_api_key else None,
+        discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.tavily_api_key else None,
+        search_sync=make_search_sync(cfg),
+        search_monthly_credits=settings.search_monthly_credits,
+        search_reserve_credits=settings.search_reserve_credits,
         rotation_slots=rotation_slots(settings) if settings.roles else [],
         allow_smartrecruiters=(os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1",
         config_notes=config_notes,
-        hydrate_listed=make_serper_hydrator(),
+        trigger=(os.getenv("GITHUB_EVENT_NAME") or "local").strip() or "local",
+        hydrate_listed=make_search_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),
         max_age_days=settings.max_age_days,
         max_monitored_boards=settings.max_active_boards,
@@ -1640,9 +1770,13 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
     )
     if deps.discover is None:
-        log.warning("SERPER_API_KEY is not set: skipping board discovery (registered boards are still polled)")
+        log.warning("TAVILY_API_KEY is not set: skipping board discovery (registered boards are still polled)")
     try:
-        run = pl.run_cycle(deps)
+        with writer_lease(store, "poller", enabled=not args.dry_run):
+            run = pl.run_cycle(deps)
+    except WriterBusy as exc:
+        log.error("Not started: another process is writing this registry (%s). Nothing was changed.", exc)
+        return 3
     except pl.FatalRunError as exc:
         log.error("Run stopped: %s", exc)
         return 2

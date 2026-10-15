@@ -3,35 +3,56 @@ name: Job Hunter
 on:
   schedule:
     # Hourly, around the clock (nights and weekends included). GitHub starts scheduled runs
-    # late under load and may skip some; every run records its real gap in the hidden "Runs" tab.
+    # late under load and may skip some; every run records its real gap and its trigger in the
+    # hidden "Runs" tab (Notes: trigger=schedule | workflow_dispatch).
     - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       discover:
-        description: "Run one rotating (date-windowed) Google discovery now, outside the 12-hour schedule"
+        description: "Run one rotating (date-windowed) web-search discovery now, outside the 12-hour schedule (spends search credits; may use the reserve)"
         type: boolean
         default: false
       backfill:
-        description: "MANUAL ONLY: broad Google searches without the date window (boards only, capped credits)"
+        description: "MANUAL ONLY: the same searches without the date window (boards only, capped credits, may use the reserve)"
         type: boolean
         default: false
       rebalance_report:
         description: "Print the dry-run board rebalance report (pool targets, coverage, planned decisions); changes nothing"
         type: boolean
         default: false
+      pilot_report:
+        description: "Print the pilot measurements for the last 7 days (polling gaps, fresh jobs by source, latency, failures, search usage, coverage, your feedback); changes nothing"
+        type: boolean
+        default: false
+      delivery_test:
+        description: "Send ONE clearly labelled synthetic job through scoring -> tracker -> Telegram to your TELEGRAM_CHAT_ID (you are authorizing that recipient by ticking this)"
+        type: boolean
+        default: false
 
+# Nothing in this repository is written by the workflow: state lives in the Google Sheet.
 permissions:
-  contents: write # only used by the local-CSV fallback (no Google Sheet configured)
+  contents: read
 
-# One run at a time, so two runs never write the same state.
+# One run at a time across BOTH workflows (see inventory.yml): scheduled and manually dispatched runs
+# queue instead of overlapping, and a running job is never cancelled. GitHub keeps only the newest
+# waiting run, so a poll queued behind a long import may be replaced by the next hourly one.
 concurrency:
-  group: job-hunter
+  group: job-hunter-state
   cancel-in-progress: false
 
 jobs:
   hunt:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      SEARCH_WINDOW_DAYS: ${{ vars.SEARCH_WINDOW_DAYS }} # optional; default 3 days. Scheduled discovery is always windowed (minimum 1).
     steps:
       - uses: actions/checkout@v4
 
@@ -43,45 +64,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Settings live in the Google Sheet; only the keys below are configured in GitHub.
-      # Rotating discovery runs on its own schedule (Settings > Discovery_Every_Hours) within
-      # Settings > Discovery_Credit_Budget. Unfiltered search only runs when 'backfill' is ticked by hand.
-      - name: Poll boards, detect new jobs, score, deliver
-        if: ${{ !inputs.rebalance_report }}
-        run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
-        env:
-          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          SEARCH_TBS: ${{ vars.SEARCH_TBS }} # optional; default qdr:d3. Blank/none cannot make scheduled discovery unfiltered.
+      # Names only, never values. A production run needs the Sheet; without it the app would fall back to local
+      # files that this workflow does not keep, so it refuses to run instead of silently losing state.
+      - name: Check configuration
+        run: |
+          missing=""
+          for name in GROQ_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON GOOGLE_SHEET_ID TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then echo "::error::Missing repository secrets:$missing"; exit 1; fi
+          if [ -z "$TAVILY_API_KEY" ]; then echo "::warning::TAVILY_API_KEY is not set: web-search discovery is skipped, board polling still runs"; fi
 
-      # Dry-run report only (tick 'rebalance_report' by hand): prints what the weekly board rebalance
-      # would do. Reads the registry, ledger and Settings; writes nothing; sends no alerts. Same job and
-      # same concurrency group as the hourly run, so it never overlaps a poll.
+      # Settings live in the Google Sheet; only the keys above are configured in GitHub.
+      # Rotating discovery runs on its own schedule (Settings > Discovery_Every_Hours) within
+      # Settings > Discovery_Credit_Budget and the monthly ledger (Settings > Search_Monthly_Credits, shared by
+      # every search path). When the month's credits are used up, discovery is skipped and polling continues.
+      # Unfiltered search only runs when 'backfill' is ticked by hand.
+      - name: Poll boards, detect new jobs, score, deliver
+        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test }}
+        run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
+
+      # Read-only reports (tick by hand): they read the registry, ledger, Runs and tracker and write nothing.
       - name: Board rebalance report (dry run)
         if: ${{ inputs.rebalance_report }}
         run: python hunter.py --rebalance-report
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
 
-      # Only does anything when GOOGLE_SHEET_ID is NOT set: the CSV files are then the state,
-      # so they must survive between runs. always(): keep what was written even if the run failed.
-      - name: Save local fallback state
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          [ -f tracked_jobs.csv ] && git add -f tracked_jobs.csv
-          [ -d state ] && git add -f state
-          if git diff --cached --quiet; then
-            echo "No local state changes."
-          else
-            git commit -m "chore: update local fallback state [skip ci]"
-            git pull --rebase
-            git push
-          fi
+      - name: Pilot report
+        if: ${{ inputs.pilot_report }}
+        run: python hunter.py --pilot-report 7
+
+      # The synthetic fixture is isolated: no ledger event, no board row, a non-ATS URL, labelled everywhere.
+      - name: Delivery test (labelled synthetic job)
+        if: ${{ inputs.delivery_test }}
+        run: python hunter.py --delivery-test --to "$TELEGRAM_CHAT_ID"

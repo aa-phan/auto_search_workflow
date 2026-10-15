@@ -22,14 +22,17 @@ on:
         default: true
 
 permissions:
-  contents: write # only used by the local-CSV fallback (no Google Sheet configured)
+  contents: read # nothing in the repository is written: state lives in the Google Sheet
 
-# Own concurrency group: the hourly poller keeps running. The two writers touch different
-# registry rows (the importer owns candidates, the poller owns monitored boards) and both
-# write row-level updates, never a full rewrite. The importer also skips any row whose current
-# status is new/active/disabled at write time, so it cannot undo a promotion or demotion.
+# SAME concurrency group as the hourly Job Hunter workflow: every workflow that writes the shared
+# registry (scheduled or started by hand) runs one at a time. A running job is never cancelled
+# (cancel-in-progress: false); a run that arrives while another is running waits, and GitHub keeps
+# only the NEWEST waiting run per group, so while a long import is running one waiting hourly poll
+# can be replaced by the next one. An hourly poll is therefore delayed or skipped at most once per
+# import (an import is capped at 40 minutes). The importer also takes the advisory writer lease and
+# skips any row that is already monitored (merging its provenance), as defence in depth.
 concurrency:
-  group: job-hunter-inventory
+  group: job-hunter-state
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +58,17 @@ jobs:
           key: inventory-cache-${{ github.run_id }}
           restore-keys: inventory-cache-
 
+      - name: Check configuration
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        run: |
+          missing=""
+          for name in GOOGLE_SERVICE_ACCOUNT_JSON GOOGLE_SHEET_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then echo "::error::Missing repository secrets:$missing"; exit 1; fi
+
       - name: Refresh inventories and validate new boards
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -66,18 +80,3 @@ jobs:
           ARGS="--validate --max-validations 4000 --max-revalidations 2000 --max-seconds 1500"
           if [ "$REFRESH" = "true" ]; then ARGS="--import-inventory $ARGS"; fi
           python hunter.py $ARGS
-
-      # Only does anything when GOOGLE_SHEET_ID is NOT set (the CSV files are then the state).
-      - name: Save local fallback state
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          [ -d state ] && git add -f state/boards.csv state/inventory.csv 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No local state changes."
-          else
-            git commit -m "chore: update board registry (local fallback) [skip ci]"
-            git pull --rebase
-            git push
-          fi

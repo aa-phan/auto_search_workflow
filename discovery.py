@@ -22,11 +22,12 @@ from typing import Any, Callable, Iterable, Sequence
 
 from boards import BoardId, JobIdentity, parse_board_url, parse_job_url
 
-PAGE_SIZE = 10  # Serper returns 10 organic results per page unless `num` is set
-CREDITS_PER_REQUEST = 1  # one Serper search request (one page of up to 10 results) = 1 credit
+PAGE_SIZE = 20  # Tavily returns at most 20 results per request and cannot paginate
+CREDITS_PER_REQUEST = 1  # a basic Tavily search; the real cost is read from each response (`Page.credits`)
 DEFAULT_CREDIT_BUDGET = 10  # per discovery run: 2 runs/day = at most 20 credits/day
-DEFAULT_MAX_PAGES = 3
-DEFAULT_STALL_PAGES = 2  # consecutive pages with nothing new before a query stops paging
+DEFAULT_MAX_PAGES = 1  # Tavily has no page parameter: one request per query
+DEFAULT_STALL_PAGES = 2  # the engine can still page (a provider that paginates); consecutive no-gain pages stop it
+PROVIDER = "tavily"  # the search provider whose queries the persisted rotation cursor belongs to
 
 KIND_ROTATION, KIND_BACKFILL = "rotation", "backfill"
 
@@ -36,7 +37,7 @@ MAX_HYDRATION_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
-class SerperJob:
+class SearchJob:
     ident: JobIdentity
     title: str
     url: str
@@ -80,24 +81,36 @@ class RotationState:
     cycles: int = 0  # completed passes through every slot
     runs: int = 0
     last_run_at: str = ""
+    provider: str = PROVIDER  # a cursor written for another search provider is not valid for this one
+    backfill_cursor: int = 0  # the manual backfill walks the same slots with its own cursor
+    migrated_from: str = ""  # set on load when a cursor from another provider was discarded; never persisted
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"))
+        data = asdict(self)
+        data.pop("migrated_from")
+        return json.dumps(data, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, raw: str | None) -> "RotationState":
+        """A cursor persisted by the previous search provider (Serper: no `provider` field) is NOT carried
+        over: its slot queries and coverage meant something else, so the rotation restarts at slot 0 and
+        `migrated_from` tells the pipeline to say so. Unreadable state also restarts."""
         try:
             data = json.loads(raw or "")
-            return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+            if not isinstance(data, dict):
+                return cls()
+            if data.get("provider") != PROVIDER:
+                return cls(migrated_from=str(data.get("provider") or "serper"))
+            return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data and k != "migrated_from"})
         except (ValueError, TypeError):
             return cls()
 
 
-def plan_slots(state: RotationState, slots: Sequence[Slot], count: int) -> list[Slot]:
+def plan_slots(state: RotationState, slots: Sequence[Slot], count: int, *, backfill: bool = False) -> list[Slot]:
     """The next `count` slots from the persisted cursor (wrapping), never the same slot twice."""
     if not slots or count <= 0:
         return []
-    start = state.cursor % len(slots)
+    start = (state.backfill_cursor if backfill else state.cursor) % len(slots)
     return [slots[(start + i) % len(slots)] for i in range(min(count, len(slots)))]
 
 
@@ -108,7 +121,18 @@ def advance(state: RotationState, slots: Sequence[Slot], used: int, now: datetim
     if n == 0:
         return state
     position = (state.cursor % n) + used
-    return RotationState(position % n, fingerprint(slots), n, state.cycles + position // n, state.runs + 1, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return RotationState(
+        position % n, fingerprint(slots), n, state.cycles + position // n, state.runs + 1, now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        backfill_cursor=state.backfill_cursor,
+    )  # fmt: skip
+
+
+def advance_backfill(state: RotationState, slots: Sequence[Slot], used: int) -> RotationState:
+    """Move only the manual backfill's own cursor, so a backfill never skips scheduled slots."""
+    n = len(slots)
+    if n == 0:
+        return state
+    return RotationState(**{**asdict(state), "migrated_from": "", "backfill_cursor": ((state.backfill_cursor % n) + used) % n})
 
 
 # --------------------------------------------------------------------------- engine
@@ -118,13 +142,14 @@ def advance(state: RotationState, slots: Sequence[Slot], used: int, now: datetim
 class Query:
     id: str  # query identity for logs and the Discovery tab
     text: str
-    tbs: str = ""  # Serper date window; "" = unfiltered (manual backfill only)
+    domain: str = ""  # the ATS host the search is restricted to (Tavily `include_domains`)
+    window_days: int | None = None  # retrieval window (`start_date`); None = no window (manual backfill only)
 
 
 @dataclass
 class QueryStats:
     id: str
-    tbs: str = ""
+    window: str = ""  # "3d" / "none"
     pages: int = 0
     credits: int = 0
     results: int = 0
@@ -140,12 +165,13 @@ class QueryStats:
 class DiscoveryResult:
     kind: str = KIND_ROTATION
     boards: list[BoardId] = field(default_factory=list)  # EVERY board found, new or known
-    jobs: list[SerperJob] = field(default_factory=list)  # unseen job candidates only
+    jobs: list[SearchJob] = field(default_factory=list)  # unseen job candidates only
     job_keys: set[str] = field(default_factory=set)  # every job identity returned (for reporting)
     queries: list[QueryStats] = field(default_factory=list)
     slots_used: int = 0  # queries started: the rotation cursor advances by this
     stopped: str = ""  # run-level stop reason (budget / exhausted)
     all_failed: bool = False  # every attempted request failed: do not advance the rotation
+    fatal: str = ""  # a failure that makes every further request pointless (bad key, plan limit): why the run stopped
 
     @property
     def credits(self) -> int:
@@ -188,14 +214,16 @@ def run_queries(
     `search_page(query, page)` returns objects with `.url` and `.title`, and raises on failure."""
     res = DiscoveryResult(kind=kind)
     boards: dict[str, BoardId] = {}
-    jobs: dict[str, SerperJob] = {}
+    jobs: dict[str, SearchJob] = {}
     returned: set[str] = set()
     credits = attempted = failed = 0
     for q in queries:
+        if res.fatal:
+            break
         if credits + CREDITS_PER_REQUEST > budget:
             res.stopped = "budget"
             break
-        st = QueryStats(q.id, q.tbs)
+        st = QueryStats(q.id, f"{q.window_days}d" if q.window_days else "none")
         res.queries.append(st)
         res.slots_used += 1
         attempted += 1
@@ -204,15 +232,18 @@ def run_queries(
             if credits + CREDITS_PER_REQUEST > budget:
                 st.stop, res.stopped = "budget", "budget"
                 break
-            credits += CREDITS_PER_REQUEST
-            st.credits += CREDITS_PER_REQUEST
             try:
                 hits = search_page(q, page)
             except Exception as exc:  # one failing request must not end discovery or hide earlier pages
                 st.error, st.stop = f"{type(exc).__name__}: {exc}"[:200], "error"
                 if page == 1:
                     failed += 1
+                if getattr(exc, "fatal", False):
+                    res.fatal, res.stopped = st.error, "provider"
                 break
+            cost = getattr(hits, "credits", CREDITS_PER_REQUEST)  # the provider's own figure when it reports one
+            credits += cost
+            st.credits += cost
             st.pages += 1
             st.results += len(hits)
             gained = 0
@@ -238,7 +269,7 @@ def run_queries(
                         gained += 1
                 # (2) the job is a candidate only if the ledger has never seen it
                 if ident and take_jobs and ident.key not in jobs and is_unseen_job(ident):
-                    jobs[ident.key] = SerperJob(ident, getattr(hit, "title", "") or "", hit.url)
+                    jobs[ident.key] = SearchJob(ident, getattr(hit, "title", "") or "", hit.url)
                     st.unseen_jobs += 1
                     gained += 1
             if len(hits) < PAGE_SIZE:
@@ -274,7 +305,7 @@ def dump_pending(pending: dict[str, dict[str, Any]]) -> str:
     return json.dumps(dict(newest), separators=(",", ":"))
 
 
-def pending_entry(job: SerperJob, now: datetime, attempts: int = 1, first_at: str = "") -> dict[str, Any]:
+def pending_entry(job: SearchJob, now: datetime, attempts: int = 1, first_at: str = "") -> dict[str, Any]:
     i = job.ident
     return {
         "ats": i.ats, "board": i.board, "id": i.job_id, "region": i.region, "title": job.title[:200], "url": job.url,
@@ -282,8 +313,8 @@ def pending_entry(job: SerperJob, now: datetime, attempts: int = 1, first_at: st
     }  # fmt: skip
 
 
-def job_from_pending(entry: dict[str, Any]) -> SerperJob | None:
+def job_from_pending(entry: dict[str, Any]) -> SearchJob | None:
     try:
-        return SerperJob(JobIdentity(entry["ats"], entry["board"], entry["id"], entry.get("region", "")), entry.get("title", ""), entry.get("url", ""))
+        return SearchJob(JobIdentity(entry["ats"], entry["board"], entry["id"], entry.get("region", "")), entry.get("title", ""), entry.get("url", ""))
     except KeyError:
         return None

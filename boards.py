@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import collections
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -175,6 +177,25 @@ class BoardError(Exception):
     """Temporary failure listing a board (timeout, 5xx, 429, bad payload): retry next poll."""
 
 
+RATE_LIMIT_DEFAULT_BACKOFF = 300.0  # seconds a provider is left alone after HTTP 429 without a Retry-After
+RATE_LIMIT_MAX_BACKOFF = 900.0
+
+
+class BoardRateLimited(BoardError):
+    """HTTP 429. The provider asked us to slow down: stop sending it requests for `retry_after` seconds."""
+
+    def __init__(self, retry_after: float = RATE_LIMIT_DEFAULT_BACKOFF) -> None:
+        super().__init__(f"HTTP 429 (provider backoff {retry_after:.0f}s)")
+        self.retry_after = retry_after
+
+
+def _retry_after(resp: Any) -> float:
+    try:
+        return max(1.0, min(RATE_LIMIT_MAX_BACKOFF, float(resp.headers.get("Retry-After"))))
+    except (TypeError, ValueError, AttributeError):
+        return RATE_LIMIT_DEFAULT_BACKOFF
+
+
 def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
     try:
         resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=HTTP_TIMEOUT)
@@ -182,6 +203,8 @@ def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
         raise BoardError(str(exc)) from exc
     if resp.status_code in {404, 410}:
         raise BoardGone(f"HTTP {resp.status_code}")
+    if resp.status_code == 429:
+        raise BoardRateLimited(_retry_after(resp))
     if resp.status_code >= 400:
         raise BoardError(f"HTTP {resp.status_code}")
     try:
@@ -283,17 +306,44 @@ class Listing(list):
         self.complete = complete
 
 
+CAP_SIZES = frozenset({10, 20, 25, 50, 100, 200, 250, 500, 1000})
+
+
+def looks_capped(n: int) -> bool:
+    """A listing whose length is exactly a typical page size is suspicious: a server-side cap would produce
+    this. Used only where the provider documents no pagination behaviour (Lever's default, Workable's widget)."""
+    return n in CAP_SIZES
+
+
 def fetch_board(board: BoardId) -> list[ListedJob]:
     """All currently listed jobs on a board. Raises BoardGone (deleted) or BoardError (transient)."""
     url = LIST_APIS[board.ats].format(board=board.board)
     if board.ats == GREENHOUSE:
-        return parse_greenhouse(board.board, _get_json(url))
+        data = _get_json(url)
+        parsed = parse_greenhouse(board.board, data)
+        total = ((data or {}).get("meta") or {}).get("total") if isinstance(data, dict) else None
+        # Greenhouse reports how many jobs the board has: a shorter list is a truncated listing.
+        return Listing(parsed, complete=False) if isinstance(total, int) and len(parsed) < total else parsed
     if board.ats == LEVER:
-        return parse_lever(board.board, _get_json(url, {"mode": "json"}))
+        # Lever documents `skip` and `limit` but not what an unpaged request returns; observed live, it returns the
+        # whole board. Defence against an undocumented cap: a list whose length is a typical page size is
+        # continued with `skip` until a short page.
+        items = list(_get_json(url, {"mode": "json"}) or [])
+        pages = 0
+        while looks_capped(len(items)) and pages < 20:
+            more = _get_json(url, {"mode": "json", "skip": len(items), "limit": 100}) or []
+            items.extend(more)
+            pages += 1
+            if len(more) < 100:
+                break
+        return parse_lever(board.board, items)
     if board.ats == ASHBY:
         return parse_ashby(board.board, _get_json(url))
     if board.ats == WORKABLE:
-        return parse_workable(board.board, _get_json(url))
+        # The widget endpoint is undocumented (no pagination parameter is known), so a list that stops at a typical
+        # page size cannot be continued: it is reported as possibly truncated rather than assumed complete.
+        parsed = parse_workable(board.board, _get_json(url))
+        return Listing(parsed, complete=False) if looks_capped(len(parsed)) else parsed
     items: list[dict[str, Any]] = []  # SmartRecruiters pages at 100
     offset = total = 0
     while True:
@@ -364,6 +414,7 @@ class BoardRecord:
     trials: int = 0  # exploration trials started
     weak_streak: int = 0  # consecutive rebalance cycles as a replacement target (established boards)
     pool_reason: str = ""  # last admission / graduation / demotion / park reason (max 200 chars)
+    outages: list[list[str]] = field(default_factory=list)  # [[start, end], ...] holes in the complete-poll record, last 30 days
 
     @property
     def board_id(self) -> BoardId:
@@ -428,7 +479,7 @@ def merge_candidates(
 
 
 def upsert_boards(registry: dict[str, BoardRecord], found: Iterable[BoardId], *, now: datetime, source: str) -> list[BoardRecord]:
-    """Serper-style discovery: boards found through live job/board URLs are activated for
+    """Search-style discovery: boards found through live job/board URLs are activated for
     monitoring straight away (status `new`: the next poll baselines them). Returns new boards only."""
     added, _ = merge_candidates(registry, (Candidate(b, source) for b in found), now=now, new_status=STATUS_NEW)
     return added
@@ -455,18 +506,56 @@ def open_jobs(rec: BoardRecord) -> int:
     return rec.eligible_jobs if rec.eligible_jobs is not None else rec.relevant_jobs
 
 
-def is_waiting_candidate(rec: BoardRecord, blocked: Callable[[str], Any] | None = None) -> bool:
-    """A validated board with something open for the user's targets that no provider policy blocks."""
+def merge_provenance(current: BoardRecord, incoming: BoardRecord) -> bool:
+    """Fold `incoming`'s provenance and display name into `current` (the row as it is stored NOW).
+    Used when a writer may not overwrite a row another writer owns, so its discovery facts are
+    reconciled instead of lost. Only adds: existing entries and every other field stay as stored."""
+    changed = False
+    for source, entry in incoming.provenance.items():
+        if source not in current.provenance:
+            current.provenance[source] = entry
+            changed = True
+        elif isinstance(entry, dict) and isinstance(current.provenance[source], dict):
+            for k, v in entry.items():
+                if k not in current.provenance[source]:
+                    current.provenance[source][k] = v
+                    changed = True
+    if incoming.name and not current.name:
+        current.name, changed = incoming.name, True
+    return changed
+
+
+def cooling_down(rec: BoardRecord, now: datetime | None, cooldown: timedelta | None) -> bool:
+    """A board that already had a monitoring stint and left it (lost a trial, was replaced) is not
+    offered another slot until `cooldown` has passed. Without this a board returned to the waiting
+    list would immediately count as "waiting" again, justify returning the next loser, and be
+    re-admitted next hour: the same few boards would be re-baselined every week."""
+    if now is None or not cooldown or rec.trials <= 0:
+        return False
+    try:
+        since = datetime.strptime(rec.pool_since, STAMP).replace(tzinfo=now.tzinfo)
+    except ValueError:
+        return False
+    return now - since < cooldown
+
+
+def is_waiting_candidate(
+    rec: BoardRecord, blocked: Callable[[str], Any] | None = None, *, now: datetime | None = None, cooldown: timedelta | None = None
+) -> bool:
+    """A validated board with something open for the user's targets that no provider policy blocks
+    and that is not cooling down after a previous stint."""
     return (
         rec.status == STATUS_VALIDATED and rec.validation == V_VALID and open_jobs(rec) > 0
-        and not (blocked and blocked(rec.ats))
+        and not (blocked and blocked(rec.ats)) and not cooling_down(rec, now, cooldown)
     )  # fmt: skip
 
 
-def admission_order(registry: dict[str, BoardRecord], blocked: Callable[[str], Any] | None = None) -> list[BoardRecord]:
+def admission_order(
+    registry: dict[str, BoardRecord], blocked: Callable[[str], Any] | None = None, *, now: datetime | None = None, cooldown: timedelta | None = None
+) -> list[BoardRecord]:
     """Waiting boards in the order they would be promoted: boards never tried before first (the fair
     route in for boards with no observation history), then the most open eligible jobs."""
-    ready = [r for r in registry.values() if is_waiting_candidate(r, blocked)]
+    ready = [r for r in registry.values() if is_waiting_candidate(r, blocked, now=now, cooldown=cooldown)]
     ready.sort(key=lambda r: (r.trials > 0, -open_jobs(r), -r.relevant_jobs, r.last_job_count, r.key))
     return ready
 
@@ -479,6 +568,7 @@ def activate_waiting(
     now: datetime | None = None,
     trial_days: int = 7,
     blocked: Callable[[str], Any] | None = None,
+    cooldown: timedelta | None = None,
 ) -> list[BoardRecord]:
     """Promote validated boards into monitoring without ever exceeding the polling budget.
 
@@ -491,7 +581,7 @@ def activate_waiting(
     room = min(per_run, max(0, max_monitored - sum(1 for r in registry.values() if r.status in MONITORED)))
     if room <= 0:
         return []
-    promoted = admission_order(registry, blocked)[:room]
+    promoted = admission_order(registry, blocked, now=now, cooldown=cooldown)[:room]
     until = now + timedelta(days=trial_days)
     for r in promoted:
         eligible = "unknown" if r.eligible_jobs is None else r.eligible_jobs
@@ -513,6 +603,7 @@ class PollResult:
     gone: bool = False
     error: str = ""
     complete: bool = True  # False when the adapter truncated the listing: counts are not the board's totals
+    skipped: bool = False  # not requested at all: the provider is in backoff after a 429 (not a failure of this board)
 
 
 def poll_boards(
@@ -520,15 +611,28 @@ def poll_boards(
     *,
     fetch: Callable[[BoardId], list[ListedJob]] = fetch_board,
     workers: int = 8,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[PollResult]:
-    """List every board concurrently. One board failing never affects another."""
+    """List every board concurrently. One board failing never affects another. A provider that answers
+    HTTP 429 is left alone for its Retry-After (default 5 minutes, at most 15) for the rest of the run: its
+    remaining boards are `skipped` (not requested, not counted as failures) and retried next run."""
+    backoff: dict[str, float] = {}
+    lock = threading.Lock()
 
     def one(rec: BoardRecord) -> PollResult:
+        with lock:
+            until = backoff.get(rec.ats, 0.0)
+        if until > clock():
+            return PollResult(rec, skipped=True, error=f"provider backoff after HTTP 429 ({rec.ats})")
         try:
             jobs = fetch(rec.board_id)
             return PollResult(rec, jobs, ok=True, complete=getattr(jobs, "complete", True))
         except BoardGone as exc:
             return PollResult(rec, gone=True, error=str(exc))
+        except BoardRateLimited as exc:
+            with lock:
+                backoff[rec.ats] = max(backoff.get(rec.ats, 0.0), clock() + exc.retry_after)
+            return PollResult(rec, error=str(exc))
         except BoardError as exc:
             return PollResult(rec, error=str(exc))
         except Exception as exc:  # defensive: an adapter bug must not stop other boards

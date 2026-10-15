@@ -1,22 +1,26 @@
 """Persistence for internal state: Boards registry, Events ledger, Runs log.
 
 SheetState keeps them in hidden tabs of the user's Google Sheet (no Git, nothing to maintain);
-CsvState is the local fallback. Events and Runs are append-only; Boards is rewritten in a
-single atomic request because rows are updated every poll.
+CsvState is the local fallback. Events and Runs are append-only; Boards rows are upserted in a
+request per chunk because rows are updated every poll (row-level, never a full rewrite).
 """
 
 from __future__ import annotations
 
 import csv
+import fcntl
 import json
 import logging
 import os
 import tempfile
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Iterable
 
-from boards import BoardRecord
+from boards import STAMP, BoardRecord, merge_provenance
 from ledger import EVENT_COLUMNS, Event
 
 log = logging.getLogger("hunter")
@@ -28,8 +32,10 @@ BOARD_COLUMNS = [
     "Region", "Name", "Validation", "Last_Validated_At", "Relevant_Jobs", "Provenance",
     "Eligible_Jobs", "Relevance_At", "Activity_Since", "Complete_Polls", "Last_New_Relevant_At",
     "New_Relevant_7d", "New_Relevant_30d", "Pool", "Pool_Since", "Trial_Until", "Trials", "Weak_Streak",
-    "Pool_Reason",
+    "Pool_Reason", "Outages",
 ]  # fmt: skip
+LOCK_TAB = "Lock"
+LOCK_COLUMNS = ["Holder", "Label", "Acquired_At", "Expires_At"]  # one row: the advisory writer lease
 DISCOVERY_TAB = "Discovery"
 DISCOVERY_COLUMNS = ["Key", "Value", "Updated_At"]  # key -> JSON: rotation cursor, retry queue, last run's queries
 INVENTORY_TAB = "Inventory"
@@ -43,6 +49,7 @@ RUN_COLUMNS = [
     "Eligible_Boards", "Promoted_Boards", "Verified_Fresh_Matches",
     "Pool_Established", "Pool_Exploration", "Waiting_Relevant", "Oldest_Waiting_Hours", "Relevant_Coverage_Pct",
     "Graduated", "Demoted", "Parked_Policy", "Rebalance",
+    "Result_Boards", "Result_Parked", "Result_Invalid", "Result_Awaiting_Validation",
 ]  # fmt: skip
 APPEND_CHUNK = 2000
 
@@ -70,7 +77,7 @@ class RunRecord:
     boards_activated: int = 0  # promoted into monitoring this run
     search_queries: int = 0  # discovery queries started (rotation slots)
     search_pages: int = 0  # result pages fetched
-    search_credits: int = 0  # Serper credits spent (1 per page)
+    search_credits: int = 0  # search credits spent (Tavily: 1 per basic search)
     search_repeated: int = 0  # results already returned earlier in the same run
     new_unique_boards: int = 0  # boards in the results that the registry had never seen
     eligible_boards: int = 0  # result boards that passed admission (validated, monitored)
@@ -85,6 +92,12 @@ class RunRecord:
     demoted: int = 0  # boards returned to the waiting list this run
     parked_policy: int = 0  # monitored boards parked by provider policy this run
     rebalance: str = ""  # "" = not due, "report" = plan recorded only, "applied"
+    # Breakdown of the unique boards the search results named (new to the registry OR already known):
+    # eligible_boards + result_parked + result_invalid + result_awaiting_validation = result_boards.
+    result_boards: int = 0
+    result_parked: int = 0  # provider policy parks them (SmartRecruiters)
+    result_invalid: int = 0  # validation proved the board does not exist
+    result_awaiting_validation: int = 0  # candidates: validation was transient or past this run's inline limit
 
     def to_row(self) -> list[Any]:
         out = []
@@ -108,7 +121,8 @@ class RunRecord:
         return cls(row[0], row[1] == "yes", num(2) or 0, num(3) or 0, num(4) or 0, num(5) or 0, num(6) or 0, num(7) or 0,
                    num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
-                   *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35])  # fmt: skip
+                   *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
+                   *(num(i) or 0 for i in range(36, 40)))  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
@@ -120,7 +134,16 @@ def board_to_row(b: BoardRecord) -> list[Any]:
                 b.eligible_jobs, b.relevance_at, b.activity_since, b.complete_polls, b.last_new_relevant_at,
                 b.new_relevant_7d, b.new_relevant_30d, b.pool, b.pool_since, b.trial_until, b.trials, b.weak_streak,
                 b.pool_reason[:200])),
+            json.dumps(b.outages, separators=(",", ":"))[:20000] if b.outages else "",
             ]  # fmt: skip
+
+
+def _outages(cell: str) -> list[list[str]]:
+    try:
+        data = json.loads(cell) if cell else []
+    except ValueError:
+        return []
+    return [[str(a), str(b)] for a, b in data if isinstance(a, str) and isinstance(b, str)] if isinstance(data, list) and all(isinstance(o, list) and len(o) == 2 for o in data) else []
 
 
 def board_from_row(row: list[str]) -> BoardRecord | None:
@@ -149,13 +172,34 @@ def board_from_row(row: list[str]) -> BoardRecord | None:
         row[1], row[2], row[4], row[5], row[3] or "new", row[6], row[7], row[8], num(row[9]), num(row[10]), row[11],
         row[12], row[13], row[14], row[15], num(row[16]), prov if isinstance(prov, dict) else {},
         maybe(row[18]), row[19], row[20], num(row[21]), row[22], maybe(row[23]), maybe(row[24]),
-        row[25], row[26], row[27], num(row[28]), num(row[29]), row[30],
+        row[25], row[26], row[27], num(row[28]), num(row[29]), row[30], _outages(row[31]),
     )  # fmt: skip
 
 
 def _chunks(rows: list[list[Any]], n: int = APPEND_CHUNK):
     for i in range(0, len(rows), n):
         yield rows[i : i + n]
+
+
+# --------------------------------------------------------------------------- advisory writer lease
+
+
+@dataclass
+class Lease:
+    ok: bool
+    token: str = ""
+    held_by: str = ""  # who blocks us, when ok is False
+
+
+def _lease_expired(expires: str, now: datetime) -> bool:
+    try:
+        return datetime.strptime(expires, STAMP).replace(tzinfo=timezone.utc) <= now
+    except ValueError:
+        return True  # unreadable expiry: never block forever on garbage
+
+
+def _stamp(dt: datetime) -> str:
+    return dt.strftime(STAMP)
 
 
 class SheetState:
@@ -171,7 +215,7 @@ class SheetState:
         tabs = {w.title: w for w in self.sh.worksheets()}
         for title, columns, rows in (
             (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
-            (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20),
+            (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20), (LOCK_TAB, LOCK_COLUMNS, 5),
         ):  # fmt: skip
             if title in tabs:
                 continue
@@ -208,6 +252,40 @@ class SheetState:
                 self._row_of[b.key] = i
         return out
 
+    # -- advisory writer lease: serializes the processes that share this registry (see D-31)
+    def acquire_lease(self, label: str, ttl: timedelta, now: datetime, *, settle: float = 3.0, sleep: Any = time.sleep) -> Lease:
+        """Take the single writer lease, unless a live one is held by someone else. Google Sheets has no
+        atomic compare-and-set, so this is write-then-verify: the holder writes its token, waits `settle`
+        seconds and reads it back. Two processes that start within `settle` seconds of each other can
+        still both believe they won only if their writes interleave exactly; GitHub's shared concurrency
+        group is the real serializer for scheduled and manually dispatched workflows, this lease is what
+        makes a local command respect them (and vice versa)."""
+        ws = self.sh.worksheet(LOCK_TAB)
+        rows = ws.get_all_values()
+        cur = rows[1] if len(rows) > 1 else []
+        if cur and cur[0] and not _lease_expired(cur[3] if len(cur) > 3 else "", now):
+            return Lease(False, held_by=f"{cur[1] if len(cur) > 1 else '?'} until {cur[3] if len(cur) > 3 else '?'}")
+        token = f"{label}:{uuid.uuid4().hex[:12]}"
+        ws.update(values=[[token, label, _stamp(now), _stamp(now + ttl)]], range_name="A2", value_input_option="RAW")
+        sleep(settle)
+        back = ws.get_all_values()
+        if len(back) > 1 and back[1] and back[1][0] == token:
+            return Lease(True, token)
+        return Lease(False, held_by=f"{back[1][1] if len(back) > 1 and len(back[1]) > 1 else '?'} (won the race)")
+
+    def holds_lease(self, token: str, now: datetime) -> bool:
+        """Does this token still own an unexpired lease? (Checked when a run ends: a run that outlived its
+        TTL has lost exclusion and must say so.)"""
+        rows = self.sh.worksheet(LOCK_TAB).get_all_values()
+        cur = rows[1] if len(rows) > 1 else []
+        return bool(cur and cur[0] == token and not _lease_expired(cur[3] if len(cur) > 3 else "", now))
+
+    def release_lease(self, token: str) -> None:
+        ws = self.sh.worksheet(LOCK_TAB)
+        rows = ws.get_all_values()
+        if len(rows) > 1 and rows[1] and rows[1][0] == token:  # never release someone else's lease
+            ws.update(values=[["", "", "", ""]], range_name="A2", value_input_option="RAW")
+
     def _current_statuses(self, ws: Any) -> dict[str, tuple[int, str]]:
         """Board key -> (sheet row, CURRENT status), read fresh from the sheet (two column reads when the
         worksheet supports them, else one full read)."""
@@ -219,14 +297,25 @@ class SheetState:
             statuses = [r[3] if len(r) > 3 else "" for r in values]
         return {k: (i, statuses[i - 1] if i - 1 < len(statuses) else "") for i, k in enumerate(keys, start=1) if i > 1 and k}
 
+    def _reconcile(self, ws: Any, row_no: int, incoming: BoardRecord) -> None:
+        """A row this writer may not overwrite: fold only its provenance/name into the stored row."""
+        try:
+            raw = ws.row_values(row_no) if hasattr(ws, "row_values") else ws.get_all_values()[row_no - 1]
+            cur = board_from_row(list(raw))
+            if cur is not None and merge_provenance(cur, incoming):
+                ws.batch_update([{"range": f"A{row_no}", "values": [board_to_row(cur)]}], value_input_option="RAW")
+        except Exception as exc:  # reconciliation is best effort; the skip itself is already safe
+            log.warning("Could not reconcile provenance for %s: %s", incoming.key, exc)
+
     def save_boards(self, records: Iterable[BoardRecord], *, skip_if_status: frozenset[str] | set[str] = frozenset()) -> list[str]:
         """Upsert ONLY the given records: known rows are updated in place, unknown ones appended.
-        Writers own different rows (the poller owns monitored boards, the importer owns
-        candidates), so a long-running writer can never overwrite another's progress.
 
-        `skip_if_status` is a compare-and-set for the importer: a record whose row CURRENTLY has one
-        of these statuses (another process promoted it since this one loaded it) is not written.
-        Returns the keys that were skipped."""
+        `skip_if_status` is a best-effort guard for the importer, NOT an atomic compare-and-set: the
+        status is read just before the write, and Google Sheets offers no conditional write, so a writer
+        that promotes the row in between is not detected. What actually prevents overlapping writers is
+        serialization (one GitHub concurrency group for every state-writing workflow, plus the advisory
+        writer lease). A row that is skipped is not lost: its provenance and name are merged into the
+        stored row. Returns the keys that were skipped."""
         recs = list(records)
         skipped: list[str] = []
         if not recs:
@@ -242,6 +331,7 @@ class SheetState:
                     self._row_of[r.key] = row[0]
                 if row is not None and row[1] in skip_if_status:
                     skipped.append(r.key)
+                    self._reconcile(ws, row[0], r)
                 else:
                     keep.append(r)
             recs = keep
@@ -352,10 +442,9 @@ class CsvState:
         for r in recs:
             if skip_if_status and (cur := boards.get(r.key)) is not None and cur.status in skip_if_status:
                 skipped.append(r.key)
+                merge_provenance(cur, r)  # reconcile: the discovery facts are kept, the row is otherwise untouched
                 continue
             boards[r.key] = r
-        if len(skipped) == len(recs):
-            return skipped
         p = self._path(BOARDS_TAB)
         fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
@@ -378,6 +467,50 @@ class CsvState:
 
     def load_runs(self) -> list[RunRecord]:
         return [r for r in (RunRecord.from_row(x) for x in self._rows(RUNS_TAB)) if r]
+
+    _lock_fds: dict[str, int] = {}  # token -> the open, flock-ed file descriptor that IS the lease
+
+    def acquire_lease(self, label: str, ttl: timedelta, now: datetime, *, settle: float = 0.0, sleep: Any = time.sleep) -> Lease:
+        """Local files: an exclusive `flock` on `lock.json`, held for as long as the owner lives. The kernel
+        arbitrates (atomic on one machine, released automatically if the process dies), so unlike the Sheet
+        lease this one IS exclusive; it needs no expiry (`ttl` is recorded for information only). An earlier
+        version created the file and then wrote it: a second process could read the empty file and take over."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        path = self.dir / "lock.json"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                cur = json.loads(os.pread(fd, 4096, 0).decode() or "{}")
+            except ValueError:
+                cur = {}
+            os.close(fd)
+            return Lease(False, held_by=f"{cur.get('label', '?')} since {cur.get('acquired', '?')}")
+        token = f"{label}:{uuid.uuid4().hex[:12]}"
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps({"holder": token, "label": label, "acquired": _stamp(now), "expires": _stamp(now + ttl)}).encode(), 0)
+        CsvState._lock_fds[token] = fd
+        return Lease(True, token)
+
+    def holds_lease(self, token: str, now: datetime) -> bool:
+        fd = CsvState._lock_fds.get(token)
+        if fd is None:
+            return False
+        try:
+            return json.loads(os.pread(fd, 4096, 0).decode() or "{}").get("holder") == token
+        except (OSError, ValueError):
+            return False
+
+    def release_lease(self, token: str) -> None:
+        fd = CsvState._lock_fds.pop(token, None)  # a token this process does not own releases nothing
+        if fd is None:
+            return
+        try:
+            os.ftruncate(fd, 0)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def load_discovery_state(self) -> dict[str, str]:
         return {r[0]: r[1] for r in self._rows(DISCOVERY_TAB) if len(r) >= 2 and r[0]}

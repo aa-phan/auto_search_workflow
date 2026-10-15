@@ -1,0 +1,93 @@
+# Deployment and seven-day pilot
+
+Nothing here has been run on GitHub yet: this repository has no remote. Follow the steps in order; each says what proves it worked. Never paste a secret value into a chat, an issue or a commit: the commands below read values from a file or a hidden prompt.
+
+## 0. What is in the repository (checked)
+
+- Git history contains no secrets (scanned for Tavily, Groq, Google, Telegram and GitHub token patterns and private keys: none).
+- `.gitignore` excludes `.env*`, `*service-account*.json`, `*credentials*.json`, `Resume.pdf`, `resume.txt`, `state/`, `.venv/`, `tracked_jobs*.csv`, `legacy/*.csv`.
+- The workflows have `contents: read` and contain no `git push` / `git commit`: nothing the system produces is ever written to the repository. State lives in the Google Sheet.
+- Your resume lives only in the Sheet (`Settings > Resume_Text`), never in the repository.
+- Older commits still contain three CSVs of job-search scores and verdicts (they are no longer tracked). Keep the repository **private**; if you ever make it public, rewrite history first.
+
+## 1. Private repository (needs your approval: see "Approval needed" at the end)
+
+```bash
+gh repo create auto_search_workflow --private --source=. --remote=origin   # creates the repo, adds the remote; pushes nothing
+git push -u origin main                                                    # the push is a separate, explicit step
+```
+
+## 2. Google Sheet and service account (a TEST sheet first)
+
+1. Create an empty Google Sheet. Open **File > Settings** and set its time zone (the tracker's dates use it unless `Settings > Timezone` says otherwise).
+2. In Google Cloud: create a project, enable the **Google Sheets API** and **Google Drive API**, create a **service account**, create a **JSON key** and download it (keep it outside the repository, e.g. `~/secrets/job-hunter-sa.json`).
+3. Share the Sheet with the service account's email address as **Editor**.
+4. The Sheet id is the long string in its URL: `https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit`.
+
+## 3. Telegram
+
+1. In Telegram, message `@BotFather`: `/newbot`, follow the prompts, keep the bot token.
+2. Send any message to your new bot from the account that should receive alerts, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and read `message.chat.id` (a number). That number is the one authorized recipient.
+
+## 4. Repository secrets (exact names)
+
+| Secret | Required | Value |
+|---|---|---|
+| `TAVILY_API_KEY` | yes (without it discovery is skipped; polling still runs) | your Tavily key (`tvly-...`) |
+| `GROQ_API_KEY` | yes | your Groq key |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | yes | the whole contents of the service-account JSON file |
+| `GOOGLE_SHEET_ID` | yes | the Sheet id from step 2.4 |
+| `TELEGRAM_BOT_TOKEN` | yes | the bot token from step 3 |
+| `TELEGRAM_CHAT_ID` | yes | the chat id from step 3 |
+| `ALERT_WEBHOOK_URL` | no | leave unset |
+
+Repository variable (optional): `SEARCH_WINDOW_DAYS` (default 3).
+
+Set them without echoing a value (run each in your own terminal; the first form prompts and hides what you type):
+
+```bash
+gh secret set TAVILY_API_KEY
+gh secret set GROQ_API_KEY
+gh secret set GOOGLE_SHEET_ID
+gh secret set TELEGRAM_BOT_TOKEN
+gh secret set TELEGRAM_CHAT_ID
+gh secret set GOOGLE_SERVICE_ACCOUNT_JSON < ~/secrets/job-hunter-sa.json
+gh secret list                                             # names only
+```
+
+The workflow's **Check configuration** step fails with the missing names (never values) if any required secret is absent.
+
+## 5. First configuration check (before anything is sent)
+
+Run **Actions > Job Hunter > Run workflow** with `pilot_report` ticked. It creates the hidden tabs (`Boards`, `Events`, `Runs`, `Discovery`, `Inventory`, `Lock`) and the `Settings` and `Job Tracker` tabs if they do not exist, then prints the report. Then in the Sheet:
+
+- `Settings`: paste your resume into `Resume_Text`. Check `Fresh_Window_Hours` (default **12**; a value of 4 is the old default and is kept, and flagged in `Runs.Notes`: change it to 12 yourself) and that `Rebalance_Mode` stays `report` (the row is created only if you add it: absent means `report`).
+- `Job Tracker`: the `My_Feedback` column (dropdown: Would apply / Maybe / Irrelevant) is yours; the program never writes it.
+
+## 6. Delivery check
+
+Run **Job Hunter** with `delivery_test` ticked (ticking it authorizes `TELEGRAM_CHAT_ID` as the recipient). It scores one clearly labelled synthetic posting with the real Groq model, appends one tracker row (Source and Freshness say `TEST FIXTURE (not a real job)`) and sends one Telegram message whose first line says so. It writes no ledger event, no board row and no counter: it proves the plumbing only; it says nothing about real jobs. A real job passing through the same three steps is the only real-job validation: look for the first real alert in the pilot.
+
+## 7. Manual runs (twice) and the schedule
+
+1. Run **Job Hunter** manually (no boxes ticked). Inspect: `Runs` (a new row, `Notes` contains `trigger=workflow_dispatch`), `Boards` (monitored boards, pool columns), `Events`, `Job Tracker`.
+2. Run it again. Inspect for: no duplicate tracker rows, no repeated alerts, `New_Jobs` near zero, and that the second run started only after the first finished (the two runs share one concurrency group; their `Run_At` times must not overlap).
+3. **A manual success is not proof of the schedule.** The schedule is proven when `Runs.Notes` shows `trigger=schedule` rows at about hourly intervals: `python hunter.py --pilot-report` (or the `pilot_report` run) counts runs by trigger. GitHub can delay the first scheduled run of a new repository and may skip runs; the report shows both.
+4. Retry behaviour is proven by the offline tests (scoring, alert and hydration retries, restart safety); on GitHub it will show only if a real outage happens, as `error` events and `awaiting ... now` counts in the pilot report.
+
+## 8. Local use after deployment
+
+Local commands that **write** to the Sheet are refused (exit 4) unless `GITHUB_ACTIONS=true` or you set `ALLOW_LOCAL_SHEET_WRITES=1` for a TEST sheet that no workflow writes: the Sheet lease is a read followed by a write, not an atomic lock (see DECISIONS D-37). Read-only commands work locally with the same credentials in `.env`: `--pilot-report`, `--rebalance-report`, `--search-usage`, `--inventory-report`, `--url`, `--dry-run`.
+
+## 9. The seven-day pilot
+
+Start: the first scheduled run after step 7 (note its `Run_At`). Keep unchanged for seven days: `Rebalance_Mode=report`, `Max_Active_Boards`, the title/level/exclusion/location settings, `Min_Alert_Score`, `Discovery_Credit_Budget`, and the code. Allocation and discovery changes wait for the pilot evidence.
+
+- Daily (2 minutes): open `Job Tracker`, set **My_Feedback** on any row you looked at (Would apply / Maybe / Irrelevant). Unlabelled rows are simply not counted.
+- Any day: run **Job Hunter** with `pilot_report` ticked (or `python hunter.py --pilot-report 7` locally). It reports polling gaps and late runs, runs by trigger, relevant fresh jobs by source, publication-to-first-seen and publication-to-alert latency, late/duplicate alerts, pending failures, search credits (local counter) and board coverage, and your feedback.
+- Day 7: the report is the evidence. The pilot is **not** complete before seven full days of scheduled runs have elapsed; "complete" also needs at least one real alert to have gone through scoring, tracker and Telegram.
+- Stop and investigate if: runs by trigger shows no `schedule` runs after 24 hours, a duplicate alert appears, `awaiting alert now` stays above zero for more than a few hours, or search credits per day exceed 20.
+
+## Approval needed
+
+Creating the private repository and pushing (steps 1) are outward-facing actions that have not been authorized yet. They are the first thing to approve; secrets, the Sheet and the Telegram bot are created by you and never shared in chat.

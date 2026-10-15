@@ -24,11 +24,12 @@ import freshness as fr
 import inventory as inv
 import ledger as lg
 import pools
+import search
 from boards import (
-    MONITORED, STATUS_ACTIVE, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
+    MONITORED, STATUS_ACTIVE, STATUS_CANDIDATE, STATUS_DEFERRED, STATUS_INVALID, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
     activate_waiting, fetch_board, poll_boards, registry_counts, apply_poll_result,
 )  # fmt: skip
-from discovery import SerperJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
+from discovery import SearchJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
 from state import RunRecord
 
 log = logging.getLogger("hunter")
@@ -36,7 +37,7 @@ log = logging.getLogger("hunter")
 FLUSH_EVERY = 10
 FLOOD_MIN_JOBS = 30  # a baselined board suddenly showing this many unseen IDs is treated as a re-baseline
 SUSPICIOUS_EMPTY_AFTER = 3  # an empty listing from a board that had more than this many jobs is a glitch
-MAX_SERPER_HYDRATIONS = 20
+MAX_SEARCH_HYDRATIONS = 20
 
 
 class FatalRunError(Exception):
@@ -57,6 +58,8 @@ class DiscoveryContext:
     rotation: dsc.RotationState
     is_new_board: Callable[[BoardId], bool]
     is_unseen_job: Callable[[JobIdentity], bool]
+    budget: search.SearchBudget = field(default_factory=lambda: search.SearchBudget("0000-00"))  # the monthly ledger every search path shares
+    scheduled: bool = True  # False for a manual --discover / --backfill: may also use the reserve
 
 
 @dataclass
@@ -83,20 +86,24 @@ class Deps:
     title_gate: Callable[[str], str | None]
     fetch: Callable[[BoardId], list[ListedJob]] = fetch_board
     discover: Callable[[DiscoveryContext], dsc.DiscoveryResult] | None = None
-    hydrate_listed: Callable[[SerperJob], ListedJob | None] | None = None
+    hydrate_listed: Callable[[SearchJob], ListedJob | None] | None = None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     fresh_window: timedelta = timedelta(hours=fr.DEFAULT_FRESH_WINDOW_HOURS)
     max_age_days: int = fr.DEFAULT_MAX_AGE_DAYS
     max_jobs: int = 30
     discovery_every_hours: int = 12
     force_discovery: bool = False
+    search_monthly_credits: int = search.DEFAULT_MONTHLY_CREDITS
+    search_reserve_credits: int = search.DEFAULT_RESERVE_CREDITS
+    search_sync: Callable[[search.SearchBudget], None] | None = None  # reads the provider's own usage counter into the ledger (free)
     max_monitored_boards: int = 500  # polling budget: validated boards are only promoted up to this many
     max_new_boards_per_run: int = 50  # each promotion baselines a whole board, so surges are capped
     seeds: list[BoardId] = field(default_factory=list)  # manually registered boards (testing / bootstrap)
     allow_smartrecruiters: bool = False  # ALLOW_SMARTRECRUITERS_BULK: provider policy for EVERY source
     max_inline_validations: int = 40  # boards from one discovery validated in the run; the rest wait as candidates
     rotation_slots: list[dsc.Slot] = field(default_factory=list)  # the rotation the discover callable searched from
-    config_notes: list[str] = field(default_factory=list)  # settings problems to surface in the run record
+    config_notes: list[str] = field(default_factory=list)
+    trigger: str = ""  # what started this run: "schedule", "workflow_dispatch" (GitHub) or "local"; recorded in Runs.Notes  # settings problems to surface in the run record
     workers: int = 8
     sleep: Callable[[float], None] = time.sleep  # backoff between validation retries (tests pass a no-op)
     dry_run: bool = False
@@ -150,7 +157,7 @@ def run_cycle(d: Deps) -> RunRecord:
 
     try:
         def admit(found: list[BoardId], source: str) -> inv.AdmissionResult:
-            """The one admission path (inventory import, Serper, manual seeds)."""
+            """The one admission path (inventory import, web search, manual seeds)."""
             adm = inv.admit_boards(
                 boards, found, source=source, now=now, fetch=d.fetch, title_gate=d.title_gate,
                 allow_smartrecruiters=d.allow_smartrecruiters, max_inline_validations=d.max_inline_validations, sleep=d.sleep,
@@ -159,6 +166,8 @@ def run_cycle(d: Deps) -> RunRecord:
             run.boards_added += adm.added
             return adm
 
+        if d.trigger:
+            run.notes += f"trigger={d.trigger}; "
         if d.config_notes:
             run.notes += "".join(f"{n}; " for n in d.config_notes)
         if d.seeds:
@@ -167,24 +176,47 @@ def run_cycle(d: Deps) -> RunRecord:
         # ---------------------------------------------------------------- 1. discovery loop
         # Search is candidate retrieval only. Every result is processed twice, independently:
         # its BOARD goes through admission, its JOB (if unseen) through hydration -> pipeline.
-        serper_jobs: list[SerperJob] = []
+        search_jobs: list[SearchJob] = []
         found: dsc.DiscoveryResult | None = None
         found_keys: list[str] = []
         discovery_state = d.state.load_discovery_state()
         rotation = dsc.RotationState.from_json(discovery_state.get(dsc.ROTATION_KEY))
         pending = dsc.load_pending(discovery_state.get(dsc.PENDING_KEY))
-        if d.discover and (d.force_discovery or discovery_due(runs, now, d.discovery_every_hours)):
+        budget = search.SearchBudget.load(
+            discovery_state.get(search.BUDGET_KEY), now, cap=d.search_monthly_credits, reserve=d.search_reserve_credits
+        )  # fmt: skip
+        scheduled = not d.force_discovery
+        run_discovery = bool(d.discover and (d.force_discovery or discovery_due(runs, now, d.discovery_every_hours)))
+        if run_discovery:
+            if d.search_sync:
+                try:
+                    d.search_sync(budget)
+                except Exception as exc:  # best effort: the local ledger still applies
+                    log.warning("Could not read the search provider's usage counter: %s", exc)
+            if budget.remaining(scheduled=scheduled) <= 0:
+                # Out of credits: skip discovery, keep polling. The run is not marked as a discovery run, so
+                # the next hourly run asks again and discovery resumes by itself when the month rolls over.
+                log.warning("Search discovery skipped, monthly credit budget exhausted: %s", budget.summary())
+                run.notes += f"search discovery skipped (budget exhausted: {budget.effective_used} of {budget.effective_cap} credits used this month); "
+                run_discovery = False
+        if run_discovery:
             run.discovery = True
+            if rotation.migrated_from:
+                log.warning("Search rotation reset: the cursor saved for %s is not valid for %s; restarting at slot 0", rotation.migrated_from, search.PROVIDER)
+                run.notes += f"search rotation reset (state from {rotation.migrated_from} discarded, restarts at slot 0); "
+            if budget.rolled_from:
+                log.info("Search credit ledger restarted for %s (previous month %s)", budget.month, budget.rolled_from)
             try:
                 ctx = DiscoveryContext(
                     now, rotation,
                     is_new_board=lambda b: b.key not in boards,
                     is_unseen_job=lambda i: not (states.get(i.key) and states[i.key].seen),
+                    budget=budget, scheduled=scheduled,
                 )  # fmt: skip
                 found = d.discover(ctx)
-                adm = admit(found.boards, "serper")
+                adm = admit(found.boards, search.PROVIDER)
                 found_keys = adm.keys
-                serper_jobs = found.jobs
+                search_jobs = found.jobs
                 run.search_queries, run.search_pages, run.search_credits = len(found.queries), found.pages, found.credits
                 run.search_repeated, run.new_unique_boards = found.repeated, adm.added
                 run.notes += (
@@ -194,16 +226,28 @@ def run_cycle(d: Deps) -> RunRecord:
                 )  # fmt: skip
                 if found.all_failed:
                     run.notes += "every search request failed (rotation not advanced); "
+                if found.fatal:
+                    run.notes += f"search stopped: {found.fatal}; "
                 for q in found.queries:
                     log.info(
-                        "Query %s [tbs=%s]: %d pages, %d credits, %d results, %d repeated, %d new boards, %d unseen jobs, %d unparsed, stop=%s%s",
-                        q.id, q.tbs or "none", q.pages, q.credits, q.results, q.repeated, q.new_boards, q.unseen_jobs, q.unparsed, q.stop,
+                        "Query %s [window=%s]: %d pages, %d credits, %d results, %d repeated, %d new boards, %d unseen jobs, %d unparsed, stop=%s%s",
+                        q.id, q.window or "none", q.pages, q.credits, q.results, q.repeated, q.new_boards, q.unseen_jobs, q.unparsed, q.stop,
                         f", error={q.error}" if q.error else "",
                     )  # fmt: skip
             except Exception as exc:  # discovery is best-effort; polling must still happen
                 log.warning("Discovery failed: %s", exc)
                 run.notes += f"discovery failed: {exc}; "
                 found = None
+            finally:
+                # Credits are recorded even when discovery or a dry run stops early: the ledger must never
+                # under-count what the provider charged (a dry run that searches still spends credits).
+                discovery_state[search.BUDGET_KEY] = budget.to_json()
+                try:
+                    d.state.save_discovery_state(discovery_state, lg.stamp(now))
+                except Exception as exc:
+                    log.error("Could not record the search credit ledger: %s", exc)
+                    run.notes += f"search ledger not saved: {exc}; "
+            log.info(budget.summary())
 
         # ---------------------------------------------------------------- 2. polling loop
         # Validated inventory boards enter monitoring only within the polling budget; the poll
@@ -228,7 +272,7 @@ def run_cycle(d: Deps) -> RunRecord:
         promoted_keys: set[str] = set()
         for rec in activate_waiting(
             boards, max_monitored=d.max_monitored_boards, per_run=d.max_new_boards_per_run, now=now,
-            trial_days=policy.exploration_days, blocked=blocked,
+            trial_days=policy.exploration_days, blocked=blocked, cooldown=policy.cooldown,
         ):  # fmt: skip
             dirty[rec.key] = rec
             promoted_keys.add(rec.key)
@@ -237,12 +281,16 @@ def run_cycle(d: Deps) -> RunRecord:
         active = [b for b in boards.values() if b.status in MONITORED]
         run.boards_total = len(active)
         max_gap: timedelta | None = None
+        skipped_backoff: dict[str, int] = {}
         for res in poll_boards(active, fetch=d.fetch, workers=d.workers):
             was_baselined = bool(res.board.baselined_at)
             # A board that is `new` but already has a baseline came back after leaving monitoring.
             reentry = was_baselined and res.board.status == STATUS_NEW
             if res.ok and not res.jobs and res.board.last_job_count > SUSPICIOUS_EMPTY_AFTER:
                 res.ok, res.error = False, "suspicious empty listing (previously had jobs)"
+            if res.skipped:  # provider in backoff: this board was not requested, so nothing about it changes
+                skipped_backoff[res.board.ats] = skipped_backoff.get(res.board.ats, 0) + 1
+                continue
             rec, gap = apply_poll_result(res, now=now)
             boards[rec.key] = rec
             dirty[rec.key] = rec
@@ -281,6 +329,10 @@ def run_cycle(d: Deps) -> RunRecord:
                 # Relevance and activity evidence only from a complete listing; a truncated one
                 # still gets its new IDs observed above but never changes the board's counts.
                 pools.refresh_relevance(rec, res.jobs, d.title_gate, now)
+        if skipped_backoff:
+            detail = ", ".join(f"{n} {a}" for a, n in sorted(skipped_backoff.items()))
+            log.warning("Provider backoff (HTTP 429): %s boards were not polled this run and keep their previous state", detail)
+            run.notes += f"provider backoff after HTTP 429: not polled this run: {detail}; "
         run.max_board_gap_min = _minutes(max_gap)
         # New-relevant-posting counts come from the ledger (first observations on ordinary polls
         # only). Every monitored board was polled above, so each row is already being written.
@@ -296,21 +348,21 @@ def run_cycle(d: Deps) -> RunRecord:
         rebalance_values: dict[str, str] = {}
         if pools.rebalance_due(discovery_state.get(pools.REBALANCE_KEY), boards, now, policy):
             plan = pools.plan_rebalance(boards, policy, now, blocked)
-            for line in pools.format_plan(plan, pools.coverage(boards, now, blocked), policy):
+            for line in pools.format_plan(plan, pools.coverage(boards, now, blocked, policy.cooldown), policy):
                 log.info("Rebalance (%s): %s", policy.mode, line)
             if policy.mode == "on":
                 was_pool = {dec.key: boards[dec.key].pool or "-" for dec in plan.decisions if dec.key in boards}
                 moved = pools.apply_plan(boards, plan, now)
                 dirty.update({b.key: b for b in moved})
                 run.graduated = plan.count("graduate") + plan.count("replace")
-                run.demoted = plan.count("replace") + plan.count("return") + plan.count("shed")
+                run.demoted = plan.count("replace") + plan.count("return") + plan.count("rotate") + plan.count("shed")
                 run.rebalance = "applied"
                 for dec in plan.decisions:
                     if dec.action in ("graduate", "replace"):
                         log.info("Pool %s: exploration -> established (%s)", dec.key, dec.reason)
                     if dec.action == "replace":
                         log.info("Pool %s: established -> waiting (replaced by %s)", dec.partner, dec.key)
-                    if dec.action in ("return", "shed"):
+                    if dec.action in ("return", "rotate", "shed"):
                         log.info("Pool %s: %s -> waiting (%s)", dec.key, was_pool.get(dec.key, "-"), dec.reason)
             else:
                 run.rebalance = "report"
@@ -318,10 +370,10 @@ def run_cycle(d: Deps) -> RunRecord:
             rebalance_values[pools.REBALANCE_KEY] = json.dumps(
                 {"at": lg.stamp(now), "mode": policy.mode, "graduate": plan.count("graduate"), "replace": plan.count("replace"),
                  "defer": plan.count("defer"), "return": plan.count("return"), "keep": plan.count("keep"),
-                 "extend": plan.count("extend"), "shed": plan.count("shed")}, separators=(",", ":"),
+                 "extend": plan.count("extend"), "rotate": plan.count("rotate"), "shed": plan.count("shed")}, separators=(",", ":"),
             )  # fmt: skip
             rebalance_values[pools.REBALANCE_REPORT_KEY] = pools.plan_json(plan, now, policy.mode)
-        cov = pools.coverage(boards, now, blocked)
+        cov = pools.coverage(boards, now, blocked, policy.cooldown)
         run.pool_established, run.pool_exploration, run.waiting_relevant = cov["established"], cov["exploration"], cov["waiting"]
         run.oldest_waiting_hours, run.relevant_coverage_pct = cov["oldest_waiting_hours"], cov["coverage_pct"]
         log.info(
@@ -335,11 +387,11 @@ def run_cycle(d: Deps) -> RunRecord:
         # Search-found jobs not on any listing we read: hydrate for an authoritative date first
         # (Google's window says when a page was indexed, never when the job was published).
         # Temporary read failures are queued and retried on later runs without spending credits.
-        candidates: dict[str, SerperJob] = {}
+        candidates: dict[str, SearchJob] = {}
         for key, entry in pending.items():
             if (job := dsc.job_from_pending(entry)) is not None:
                 candidates[key] = job
-        for sj in serper_jobs:
+        for sj in search_jobs:
             candidates.setdefault(sj.ident.key, sj)
         hydrated = 0
         pending_changed = False
@@ -351,7 +403,7 @@ def run_cycle(d: Deps) -> RunRecord:
                     pending.pop(key)
                     pending_changed = True  # already observed (e.g. the board poll listed it): nothing to retry
                 continue
-            if hydrated >= MAX_SERPER_HYDRATIONS:
+            if hydrated >= MAX_SEARCH_HYDRATIONS:
                 continue  # stays queued (if it was) and is tried next run
             if d.title_gate(sj.title) is not None:
                 if pending.pop(key, None) is not None:
@@ -378,7 +430,7 @@ def run_cycle(d: Deps) -> RunRecord:
             if listed is None:
                 continue  # closed posting: nothing to observe
             board = boards.get(sj.ident.board_id.key)
-            obs = lg.Observation(now, None, bool(board and board.baselined_at), False, "serper", d.fresh_window, d.max_age_days)
+            obs = lg.Observation(now, None, bool(board and board.baselined_at), False, "search", d.fresh_window, d.max_age_days)
             ev = lg.observe_new(listed, obs, d.title_gate)
             pending_events.append(ev)
             states[ev.key] = lg.replay([ev])[ev.key]
@@ -390,15 +442,23 @@ def run_cycle(d: Deps) -> RunRecord:
         if found is not None:
             # Reporting for this discovery: boards that cleared admission, boards promoted into
             # monitoring now, and unique result jobs proven fresh that match the user's titles.
-            run.eligible_boards = sum(1 for k in found_keys if boards[k].status in {STATUS_VALIDATED, *MONITORED})
+            status_of = [boards[k].status for k in found_keys]
+            run.result_boards = len(found_keys)
+            run.eligible_boards = sum(1 for st_ in status_of if st_ in {STATUS_VALIDATED, *MONITORED})
+            run.result_parked = sum(1 for st_ in status_of if st_ == STATUS_DEFERRED)
+            run.result_invalid = sum(1 for st_ in status_of if st_ == STATUS_INVALID)
+            run.result_awaiting_validation = sum(1 for st_ in status_of if st_ == STATUS_CANDIDATE)
             run.promoted_boards = sum(1 for k in found_keys if k in promoted_keys)
             run.verified_fresh_matches = sum(
                 1 for k in found.job_keys if (st := states.get(k)) and st.freshness == fr.VERIFIED_FRESH and st.disposition == lg.PENDING
             )  # fmt: skip
             log.info(
-                "Discovery: %d queries, %d pages, %d credits, %d repeated | boards: %d new unique, %d eligible, %d promoted | %d unique verified-fresh matches",
-                len(found.queries), found.pages, found.credits, found.repeated, run.new_unique_boards, run.eligible_boards,
-                run.promoted_boards, run.verified_fresh_matches,
+                "Discovery: %d queries, %d pages, %d credits, %d repeated results | the results named %d unique boards: %d new to the registry + %d already known; "
+                "of those %d eligible (validated or monitored, new or known), %d parked by provider policy, %d invalid, %d awaiting validation; "
+                "%d of them promoted into monitoring this run | %d unique verified-fresh matches",
+                len(found.queries), found.pages, found.credits, found.repeated, run.result_boards, run.new_unique_boards,
+                run.result_boards - run.new_unique_boards, run.eligible_boards, run.result_parked, run.result_invalid,
+                run.result_awaiting_validation, run.promoted_boards, run.verified_fresh_matches,
             )  # fmt: skip
 
         # Rule 1: observations are durable BEFORE the registry says "baselined".
@@ -413,6 +473,8 @@ def run_cycle(d: Deps) -> RunRecord:
                 slots_ran = found.slots_used
                 if found.kind == dsc.KIND_ROTATION and d.rotation_slots:
                     save_values[dsc.ROTATION_KEY] = dsc.advance(rotation, d.rotation_slots, slots_ran, now).to_json()
+                elif found.kind == dsc.KIND_BACKFILL and d.rotation_slots:
+                    save_values[dsc.ROTATION_KEY] = dsc.advance_backfill(rotation, d.rotation_slots, slots_ran).to_json()
                 save_values[dsc.LAST_RUN_KEY] = json.dumps({"at": lg.stamp(now), "kind": found.kind, "queries": found.summary()}, separators=(",", ":"))
             if pending_changed or pending:
                 save_values[dsc.PENDING_KEY] = dsc.dump_pending(pending)

@@ -38,7 +38,7 @@ def stamp(dt: Any) -> str:
 
 class BoardColumnsTests(unittest.TestCase):
     def full(self, **kw: Any) -> bd.BoardRecord:
-        return bd.BoardRecord("greenhouse", "acme", "2026-10-01T00:00:00Z", "serper", **kw)
+        return bd.BoardRecord("greenhouse", "acme", "2026-10-01T00:00:00Z", "search", **kw)
 
     def test_old_18_column_rows_load_with_unknown_evidence(self) -> None:
         row = st_mod.board_to_row(self.full(status=bd.STATUS_ACTIVE, relevant_jobs=4))[:18]
@@ -48,12 +48,12 @@ class BoardColumnsTests(unittest.TestCase):
         self.assertEqual((rec.pool, rec.eligible_jobs, rec.new_relevant_7d, rec.new_relevant_30d), ("", None, None, None))
         self.assertEqual((rec.complete_polls, rec.trials, rec.weak_streak, rec.activity_since), (0, 0, 0, ""))
 
-    def test_there_are_31_columns_and_rows_match(self) -> None:
-        self.assertEqual(len(st_mod.BOARD_COLUMNS), 31)
-        self.assertEqual(len(st_mod.board_to_row(self.full())), 31)
+    def test_there_are_32_columns_and_rows_match(self) -> None:
+        self.assertEqual(len(st_mod.BOARD_COLUMNS), 32)
+        self.assertEqual(len(st_mod.board_to_row(self.full())), 32)
         self.assertEqual(st_mod.BOARD_COLUMNS[18:], [
             "Eligible_Jobs", "Relevance_At", "Activity_Since", "Complete_Polls", "Last_New_Relevant_At",
-            "New_Relevant_7d", "New_Relevant_30d", "Pool", "Pool_Since", "Trial_Until", "Trials", "Weak_Streak", "Pool_Reason",
+            "New_Relevant_7d", "New_Relevant_30d", "Pool", "Pool_Since", "Trial_Until", "Trials", "Weak_Streak", "Pool_Reason", "Outages",
         ])  # fmt: skip
 
     def test_unknown_and_zero_round_trip_differently(self) -> None:
@@ -82,7 +82,7 @@ class BoardColumnsTests(unittest.TestCase):
         assert rec is not None
         self.assertEqual((rec.eligible_jobs, rec.new_relevant_7d, rec.new_relevant_30d, rec.complete_polls, rec.trials), (None, None, None, 0, 0))
 
-    def test_sheet_header_of_18_names_widens_to_31(self) -> None:
+    def test_sheet_header_of_18_names_widens_to_32(self) -> None:
         sh = FakeSh()
         state = st_mod.SheetState(sh)
         state.ensure()
@@ -189,6 +189,11 @@ class ActivityTests(HarnessCase):
     def index(self) -> pools.ActivityIndex:
         return pools.ActivityIndex.from_states(self.w.states())
 
+    def advance(self, hours: int) -> None:
+        """Poll every 6 hours (the longest gap still counted as observed) until `hours` have passed."""
+        for _ in range(hours // 6):
+            self.w.run(minutes_later=360)
+
     def test_first_baseline_pass_starts_a_stint_and_is_not_activity(self) -> None:
         self.baseline(job("acme", "1", published=ago(days=30)), job("acme", "2", published=ago(minutes=30)))
         rec = self.row()
@@ -213,22 +218,22 @@ class ActivityTests(HarnessCase):
         seen_at = stamp(self.w.now)
         rec = self.row()
         self.assertEqual((rec.new_relevant_7d, rec.new_relevant_30d, rec.last_new_relevant_at), (None, None, seen_at))  # unknown, not zero
-        self.w.run(minutes_later=60 * 24 * 3)
+        self.advance(24 * 3)
         self.assertIsNone(self.row().new_relevant_7d)  # still a short stint
-        self.w.run(minutes_later=60 * 24 * 5)  # 8 days after the baseline, 8 days after the observation
+        self.advance(24 * 5)  # 8 days after the baseline, 8 days after the observation
         rec = self.row()
         self.assertEqual((rec.new_relevant_7d, rec.new_relevant_30d), (0, 1))
         self.assertEqual(rec.last_new_relevant_at, seen_at)
 
     def test_recent_activity_is_counted_in_the_seven_day_window(self) -> None:
         self.baseline(job("acme", "1", published=ago(days=30)))
-        self.w.run(minutes_later=60 * 24 * 8)  # stint is now 8 days old
+        self.advance(24 * 8)  # stint is now 8 days old
         self.w.listings[self.board.key].append(job("acme", "9", published=""))
         self.w.run(minutes_later=60)
         rec = self.row()
         self.assertEqual((rec.new_relevant_7d, rec.new_relevant_30d), (1, 1))
 
-    def test_filtered_stale_and_search_found_jobs_never_count(self) -> None:
+    def test_filtered_and_stale_jobs_never_count_but_a_search_found_job_with_a_source_time_does(self) -> None:
         self.baseline(job("acme", "1", published=ago(days=30)))
         later = T0 + timedelta(minutes=60)
         found = job("acme", "s1", published=ago(minutes=30, base=later))
@@ -237,13 +242,16 @@ class ActivityTests(HarnessCase):
             job("acme", "stale", published=ago(days=40, base=later)),
         ]
         self.w.run(
-            minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[pl.SerperJob(found.ident, found.title, found.url)]),
+            minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(jobs=[pl.SearchJob(found.ident, found.title, found.url)]),
             hydrate_listed=lambda s: found, force_discovery=True,
         )  # fmt: skip
-        self.assertEqual(self.w.states()[self.key("s1")].seen_detail["source"], "serper")
-        self.w.run(minutes_later=60 * 24 * 8)
+        self.assertEqual(self.w.states()[self.key("s1")].seen_detail["source"], "search")
+        self.advance(24 * 8)
         rec = self.row()
-        self.assertEqual((rec.new_relevant_7d, rec.new_relevant_30d, rec.last_new_relevant_at), (0, 0, ""))
+        # gated and stale never count; the search-found job counts ONCE (one posting identity), because its own
+        # source timestamp proves it fresh, and its provenance stays "search" in the ledger.
+        self.assertEqual((rec.new_relevant_7d, rec.new_relevant_30d), (0, 1))
+        self.assertEqual(len(self.index().times(self.board.key)), 1)
 
     def test_legacy_board_starts_its_history_at_its_baseline(self) -> None:
         self.baseline(job("acme", "1", published=ago(days=30)))
@@ -403,7 +411,7 @@ class PolicyAndScoreTests(unittest.TestCase):
     def test_evidence_problems(self) -> None:
         p = policy()
         self.assertIsNone(pools.evidence_problem(mk("ok", EST), T0, p))
-        self.assertIn("stint shorter", pools.evidence_problem(mk("a", EST, n30=None), T0, p) or "")
+        self.assertIn("observed days", pools.evidence_problem(mk("a", EST, n30=None), T0, p) or "")
         self.assertIn("10 complete polls, need 84", pools.evidence_problem(mk("a", EST, polls=10), T0, p) or "")
         self.assertIn("last poll failed", pools.evidence_problem(mk("a", EST, fail=1), T0, p) or "")
         self.assertIn("older than 24 h", pools.evidence_problem(mk("a", EST, rel_hours=30), T0, p) or "")
@@ -417,8 +425,8 @@ class PolicyParkingTests(HarnessCase):
 
     def seed_monitored_sr(self) -> bd.BoardRecord:
         rec = bd.BoardRecord(
-            bd.SMARTRECRUITERS, "SrCo", ago(days=30), "serper", bd.STATUS_ACTIVE, baselined_at=ago(days=20), last_success_at=ago(hours=1),
-            validation=bd.V_VALID, last_validated_at=ago(hours=1), relevant_jobs=2, provenance={"serper": {"first": ago(days=30)}},
+            bd.SMARTRECRUITERS, "SrCo", ago(days=30), "search", bd.STATUS_ACTIVE, baselined_at=ago(days=20), last_success_at=ago(hours=1),
+            validation=bd.V_VALID, last_validated_at=ago(hours=1), relevant_jobs=2, provenance={"search": {"first": ago(days=30)}},
             pool=EXP, trials=1,
         )  # fmt: skip
         self.w.state.save_boards([rec])
@@ -692,7 +700,7 @@ class RebalancePipelineTests(HarnessCase):
         events = []
         for i in range(20):  # real poll observations of new relevant jobs on the strong board over the last month
             k = bd.JobIdentity(bd.GREENHOUSE, "strong", f"a{i}").key
-            events.append(lg.Event(ago(days=1 + i), k, lg.SEEN, fr.RECENT, lg.PENDING, "", {"source": "poll", "board": "strong", "title": "Marketing Intern"}))
+            events.append(lg.Event(ago(days=1 + i), k, lg.SEEN, fr.VERIFIED_FRESH, lg.PENDING, "", {"source": "poll", "board": "strong", "title": "Marketing Intern"}))
             events.append(lg.Event(ago(days=1 + i), k, lg.EVALUATED, fr.RECENT, "", "", {"status": "Filtered Out", "alert": False, "visible": False}))
         self.w.state.append_events(events)
 
@@ -727,7 +735,7 @@ class RebalancePipelineTests(HarnessCase):
         text = "\n".join(logs.output)
         self.assertIn("Pool greenhouse|strong: exploration -> established", text)
         self.assertIn("Pool greenhouse|weak: established -> waiting", text)
-        self.assertEqual((run.pool_established, run.pool_exploration, run.waiting_relevant), (1, 0, 1))
+        self.assertEqual((run.pool_established, run.pool_exploration, run.waiting_relevant), (1, 0, 0))  # the replaced board is cooling down, not waiting
 
     def test_first_weak_cycle_only_advances_the_streak(self) -> None:
         self.mature(weak_streak=0)
@@ -783,7 +791,7 @@ class RebalancePipelineTests(HarnessCase):
         back.eligible_jobs = 3
         self.w.state.save_boards([back])
         self.w.listings[self.weak.key] += [job("weak", "gap-undated", published="")]
-        self.w.run(minutes_later=60 * 14, **self.kw)  # more than the 12 h window since its last successful poll
+        self.w.run(minutes_later=60 * 24 * 15, **self.kw)  # past the 14-day cool-down and the 12 h window since its last successful poll
         again = self.board(self.weak)
         self.assertEqual((again.trials, again.status, again.pool, again.baselined_at, again.activity_since), (2, bd.STATUS_ACTIVE, EXP, stamp(self.w.now), stamp(self.w.now)))
         self.assertIn("re-entry, trial 2", again.pool_reason)
@@ -800,11 +808,11 @@ class RebalancePipelineTests(HarnessCase):
             (run.pool_established, run.pool_exploration, run.waiting_relevant, 1, 1, "applied"),
         )  # fmt: skip
         self.assertEqual(stored.relevant_coverage_pct, run.relevant_coverage_pct)
-        self.assertIsNotNone(stored.oldest_waiting_hours)
+        self.assertEqual((stored.waiting_relevant, stored.oldest_waiting_hours), (0, None))  # the demoted board is cooling down, so nothing is waiting
 
     def test_runs_columns_and_rows_line_up(self) -> None:
         self.assertEqual(len(st_mod.RunRecord("t").to_row()), len(st_mod.RUN_COLUMNS))
-        self.assertEqual(st_mod.RUN_COLUMNS[-9:], [
+        self.assertEqual(st_mod.RUN_COLUMNS[-13:-4], [
             "Pool_Established", "Pool_Exploration", "Waiting_Relevant", "Oldest_Waiting_Hours", "Relevant_Coverage_Pct",
             "Graduated", "Demoted", "Parked_Policy", "Rebalance",
         ])  # fmt: skip

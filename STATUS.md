@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated 2026-10-14 (board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-14 (search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## State
 
@@ -9,6 +9,56 @@ Board polling -> new-ID detection -> freshness classification -> filters/scoring
 Latest change (D-23..D-30, quick task 261014-olj): board slot allocation. A complete hourly poll now refreshes each monitored board's relevant / eligible counts and new-posting activity from the listing it already fetched; `Max_Active_Boards` is split into an established pool (400) and an exploration pool (100) with 7-day trials; a weekly bounded rebalance compares ended trials with the weakest established boards (**report mode by default**; `python hunter.py --rebalance-report` previews it); demoted boards keep their ledger, baseline, provenance and pending retries and re-enter with a re-established baseline; monitored SmartRecruiters boards are parked every run (history kept); validation runs two independently budgeted queues so re-checks no longer starve behind the candidate backlog; the title gate accepts "Internship", "Jr.", "Entry-Level" and "New Grad" variants. **Everything for this change is verified only with offline mocks: no live Sheet, Groq, Telegram, Serper or GitHub Actions run, and no real ATS call, was made** (tests: 275 offline).
 
 Previous change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
+
+## Deployment preparation and pilot (D-37)
+
+**Prepared, not yet deployed.** What exists: `DEPLOY.md` (private-repository setup, the exact secret names, Sheet/service-account/Telegram setup without sharing values, manual-run and schedule checks, the seven-day pilot protocol); read-only `--pilot-report` and a labelled `--delivery-test`; the user-owned `My_Feedback` column; 429 provider backoff; completeness by documented pagination behaviour; a flock-based local lease and the refusal of local production writes; workflows reduced to `contents: read` with no commit steps and a configuration check that names (never prints) missing secrets. **375 offline tests** pass.
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Rotation duration from requests actually consumed (`--search-usage`) | 42 slots, 1.00 request per slot (Tavily cannot paginate), 1.00 credit per request, 10 slots per run -> **2.1 days per full pass, 600 credits a month** at 2 runs a day (inside the 800 scheduled allowance); the figure is recomputed from the ledger and the last discovery's per-query page counts, so pagination or a higher cost would lengthen it | measured from the 10-request live run |
+| Lease: simultaneous acquisition | file lease: 12 threads and 2 processes -> exactly one holder (an earlier create-then-write version let 5 in; fixed with flock). **Sheet lease: not atomic** (a test shows two writers both verifying), so it is not relied on | mocked (real kernel locks for the file lease) |
+| Lease: expiry during a long run, owner-only release | Sheet lease expires after its TTL (30 / 45 min, above the 25 / 40 min workflow timeouts, asserted); a run that outlives it logs an error; only the token holder releases | mocked |
+| Local production writes | refused (exit 4) unless in GitHub Actions or `ALLOW_LOCAL_SHEET_WRITES=1` for a test Sheet | mocked |
+| Provider backoff (429), completeness per endpoint | Workable 429 stops that provider for the run, skipped boards keep their state; Lever continued with `skip` at page-size lengths, Workable flagged possibly truncated, Greenhouse/Ashby documented unpaginated | mocked (Workable's 429 itself was seen live earlier) |
+| Delivery fixture scoring | the fixture was scored by the real Groq model (90) | live (Groq only; the Sheet and Telegram steps are not configured) |
+| Sheet migration, effective settings, 12 h window check in a real Sheet; Telegram delivery; Actions runs (manual twice, scheduled) | **blocked** | no Sheet, service account, Telegram credentials or GitHub repository yet |
+
+**Counter correction.** "Eligible boards" counts validated or monitored boards among *all* boards the search results named, new or already known; the `Result_*` columns now make that explicit (see SPEC "Board counters").
+
+## Search provider migrated to Tavily (D-36)
+
+Serper is gone from the code, the workflow and the settings; discovery calls Tavily (`search.py`), every search path shares a persistent monthly credit ledger (default 1,000, 800 for scheduled runs), exhaustion skips discovery while polling continues, and the Serper-era rotation cursor is discarded (restart at slot 0, noted once in `Runs.Notes`). Registry, ledger, history and delivery code are unchanged. **333 offline tests** pass (30 new in `tests/test_search.py`; mutation spot-checks on every new behaviour fail the suite).
+
+| Step | Result | Live or mocked |
+|---|---|---|
+| Request mapping (`include_domains`, `start_date`, `basic`, no answer/raw content), response normalisation, credit accounting, 401/429/432/433 handling | pass | **mocked** (fake HTTP) |
+| Monthly ledger: shared paths, reserve, month rollover, account-counter merge, exhaustion skip, persistence on failure and dry run, cursor migration | pass | **mocked** |
+| Tavily `/search` parameters: window, domain, credit cost per mode | checked against the current API reference and **live** (response `usage.credits` = 1 for basic and fast) | live |
+| Window quality (Greenhouse, 7 roles, ATS publication times): no window 19% of dated jobs within 72 h; `start_date` -3 d 95%; `time_range=week` 66%; `fast`+window 0% | measured | live |
+| Real pipeline run on the rehearsal registry (manual `--discover`, 10 slots) | 10 credits charged to the ledger. The results named **126 unique boards**: **41 new** to the registry and **85 already known** (from the public lists). "51 eligible" = validated or monitored boards among all 126: 10 of the new ones + 41 of the known ones (6+4 new, 36+5 known). The other 75 were 17 parked (SmartRecruiters), 14 new + 44 known awaiting validation (inline validation is capped at 40 per run). 9 promoted, 1 verified-fresh match, 3 jobs scored by real Groq (reconstructed from the registry's provenance; the `Result_*` columns now record this directly); the Serper-era cursor was reset; SmartRecruiters boards found were parked | live (rehearsal registry in a scratch directory; nothing in the repo or any Sheet was touched) |
+| Tavily vs Serper, same 10 slots, 10 credits each | Tavily 181 URLs / 156 boards / 27 title-gate jobs (16 US-eligible); Serper 73 / 65 / 15 (8); board overlap 54, Tavily-only 102, Serper-only 11; 69% vs 68% of dated jobs published within 72 h, 10% vs 9% within 12 h | live, one day, one sample |
+| Account credit counter (`GET /usage`) | still **0** after about 55 credits (the 54 measured by response `usage.credits`: 6 + 28 probe requests, 10 pipeline, 10 comparison); local ledger recorded the pipeline's 10 | live; the account counter cannot be used to verify cost yet |
+| GitHub secret `TAVILY_API_KEY`, scheduled run | **not verified:** no GitHub remote exists for this repository | blocked |
+
+**Other account usage the local counter cannot observe:** anything not made through this application (other keys or projects, the probes and comparison runs above: about 44 credits of the 54 were spent by hand scripts, not by the pipeline), and the day Tavily's billing cycle starts (undocumented in the API reference; the local count resets at the UTC month). `python hunter.py --search-usage` prints both counters. **Migration steps for you:** add `TAVILY_API_KEY` to `.env` and to the GitHub secrets (the old Serper key is no longer read), nothing else is required; the Settings rows `Search_Monthly_Credits` and `Search_Reserve_Credits` are optional.
+
+## Correctness pass and live verification (D-31..D-35)
+
+**Changed:** shared concurrency group + advisory writer lease + provenance reconciliation (D-31); cool-down, bounded trial rotation and slack fix in the allocation (D-32); observed-time rates, gap-discovery rule, Serper-found activity, Greenhouse completeness (D-33); discovery slot query reduced to site + role (D-35). 303 offline tests (28 new targeted ones in `tests/test_allocation_correctness.py`); mutation spot-checks on each fix fail the suite.
+
+**Live, with the credentials that exist on this machine** (at that time `GROQ_API_KEY` and a Serper key under `SEARCH_API_KEY` were configured; `TAVILY_API_KEY` has since been added; no Sheet, no service account, no Telegram, no GitHub remote for this repo):
+
+| Step | Result |
+|---|---|
+| Public inventory download + 760 real ATS validations (Greenhouse/Ashby/Lever) | 723 valid, 26 empty, 11 invalid, 0 transient; two validation queues reported separately |
+| Hourly poll on a local rehearsal registry (CSV in a scratch directory, nothing in the repo touched) | 28 real boards promoted (3.7% of the first 749 validated boards had a job matching the default title gate; those boards were validated in priority order, not sampled at random, so this is not an estimate of the whole inventory), 3,579 existing jobs baselined, 39 time-verified fresh on the baseline pass, 0 evaluated before search added 1 |
+| Real Groq scoring through the real gates (`--url`, a real 14-day-old Coinbase posting, age limit raised for the test only) | scored 45 -> "Filtered Out": the path ATS -> eligibility -> Groq works; `openai/gpt-oss-120b` answered |
+| Real Serper rotation (the previous provider), 3 runs x 10 queries, cursor persisted between runs | cursor 10 -> 20 -> 30 of 42 in the state store; first two runs returned 0 results for all 20 queries (location/level/exclusion terms), after the fix 5 results from 10 queries, 2 new boards admitted, 1 promoted, 1 search-found job read and filtered |
+| Real rebalance report | printed from the rehearsal registry: nothing due (all 29 boards are inside their first trial) |
+| Sheet migration, effective settings in a real Sheet | **blocked:** no `GOOGLE_SHEET_ID` / `GOOGLE_SERVICE_ACCOUNT_JSON` |
+| Telegram test message | **blocked:** no `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`, and no recipient was named as authorized |
+| GitHub workflow run, scheduled run | **blocked:** this repository has no remote and no GitHub repository exists for it; nothing can run on Actions, so scheduled behaviour is **not** verified |
 
 ## Inventory: live numbers (2026-10-14, real downloads)
 
@@ -21,7 +71,7 @@ Overlap 10,366; **unique union 21,880** (Greenhouse 7,709, Workable 4,752, Ashby
 
 ## Validation: live sampling (not the full list)
 
-Random sample, 25 boards per provider and source-group (250 total, SmartRecruiters excluded): 145 valid, 69 valid-empty, 36 invalid, 0 transient. Hit rate (valid with jobs): boards **both sources list 85%**, open-ats-feed only 60%, ats-scrapers only 36% (Ashby boards only ats-scrapers lists: 0 of 25 had jobs, 15 were invalid). Only 6 of 250 had a job matching the default title gate today (~2.4%): expect on the order of 500 relevant boards among ~21,900 at any moment. A balanced 600-board run (150 per provider, 174 s, Lever at its 1 req/s): 488 valid, 103 empty (Workable 85 of 150), 9 invalid. About 18,500 boards remain unvalidated; the daily workflow drains them.
+Random sample, 25 boards per provider and source-group (250 total, SmartRecruiters excluded): 145 valid, 69 valid-empty, 36 invalid, 0 transient. Hit rate (valid with jobs): boards **both sources list 85%**, open-ats-feed only 60%, ats-scrapers only 36% (Ashby boards only ats-scrapers lists: 0 of 25 had jobs, 15 were invalid). Only 6 of 250 had a job matching the default title gate that day (2.4%; a 95% interval of roughly 1%-5%). **That sample does not establish how many relevant boards exist:** extrapolated to ~21,900 boards it spans a few hundred to over a thousand, and 6 hits is far too few to say whether 500 slots can be filled. Filling `Max_Active_Boards` is not a launch prerequisite: the pilot starts with whatever boards are validated and relevant. A balanced 600-board run (150 per provider, 174 s, Lever at its 1 req/s): 488 valid, 103 empty (Workable 85 of 150), 9 invalid. About 18,500 boards remain unvalidated; the daily workflow drains them.
 
 Registry after a real CLI run (450 validated, then the hourly run): 21 boards promoted and polled (the ones with relevant jobs), 1,809 existing jobs recorded as baseline, 5 verified-fresh jobs all rejected by the title gate, 0 alerts; the next poll found 0 new IDs.
 
@@ -36,7 +86,7 @@ Registry after a real CLI run (450 validated, then the hourly run): 21 boards pr
 | Board evidence (relevant / eligible counts, 7/30-day activity, unknown vs zero, baseline and re-entry exclusion, partial / failed / suspicious-empty polls change nothing), re-entry baseline, title-gate variants | pass | **Mocked** (`tests/test_pools.py`, `tests/test_core.py`) |
 | Pools (labels, admission order, caps), weekly rebalance (score, margin, two weak cycles, replacement bound, trial protection, thin-evidence protection, capacity cut, determinism, report mode, crash safety), state preservation across demotion and re-entry, provider parking of monitored boards, Runs columns | pass | **Mocked** (`tests/test_pools.py`) |
 | Two validation queues, importer write guard (Sheet and CSV stores), Settings, dry-run `--rebalance-report` leaves state files byte-identical | pass | **Mocked** (`tests/test_inventory.py`, `tests/test_hunter.py`); the Sheet store runs against a fake gspread worksheet only |
-| Real Serper requests (query syntax per slot, `tbs`, credit use, result shape), real hit rate of rotating queries | not verified | needs `SERPER_API_KEY` |
+| Real Tavily requests: slot request shape, credit use, hit rate of the rotation | see "Search provider migrated to Tavily" above | live (rehearsal) |
 | Downloading both inventories, parsing, merging, re-import, CLI (`--import-inventory`, `--validate`, `--offline`) | pass | **Live** (public GitHub + ATS endpoints) |
 | Validation against real ATS endpoints, per-provider limits | pass | **Live**, sampled (above) |
 | Transient-failure retry against a real outage | not observed | **Mocked** only (no outage occurred in live runs) |
@@ -57,14 +107,14 @@ Registry after a real CLI run (450 validated, then the hourly run): 21 boards pr
 ## Known gaps / risks
 
 - **Initial operating choices are unproven** (D-30): 80/20, 7-day trials, 20 replacements, the score weights, margin 1.0, two weak cycles and 84 complete polls. Pools only act once trials end, and the first real weekly report is the first evidence about them.
-- Jobs first seen through Serper are not counted as board activity; partial listings are only detected for SmartRecruiters past 5,000 postings; a board's `Last_Job_Count` is still overwritten by a partial listing.
+- Jobs first seen through web search count as board activity only when their own source time proves them fresh; partial listings are only detected for SmartRecruiters past 5,000 postings; a board's `Last_Job_Count` is still overwritten by a partial listing.
 - Residual write window: the importer re-reads a row's status immediately before writing it, so a promotion landing in those milliseconds can still be overwritten (job state is unaffected: it lives in `Events`). Provenance updates of boards that are monitored at import time are skipped until they leave monitoring.
-- Rebalancing never ran on real boards: report-mode output on a real registry has not been seen.
+- Rebalancing never ran on the production registry (none exists yet: no Sheet credentials here). A real report exists only for a rehearsal registry built from the live inventory (below).
 
-- **Search cannot promise full coverage of the 12-hour window.** Google indexing delay, a rotation that covers at most ~20 of 336 slots per day (default Settings), the per-query page cap, the credit budget and late or skipped GitHub runs all cause misses. Only jobs on polled boards have the hourly-poll guarantee.
-- A full rotation takes about 17 days at best (10 credits x 2 runs/day) (see D-18); slot count depends on Settings.
+- **Search cannot promise full coverage of the 12-hour window.** Google indexing delay, a rotation that covers at most ~20 of 42 slots per day (default Settings), most of which return nothing in the window, the per-query page cap, the credit budget and late or skipped GitHub runs all cause misses. Only jobs on polled boards have the hourly-poll guarantee.
+- A full rotation is 42 site x role slots (default roles) = about 2 days at 10 credits x 2 runs/day (see D-18, D-35); live, most slots return 0 results in the 3-day window, so search adds only a trickle of boards and jobs.
 - Existing registries: SmartRecruiters boards activated by Serper are now parked on the first run (see Migration above); a Sheet still holding `Fresh_Window_Hours = 4` keeps 4 and is flagged each run. Sheets without `Discovery_Credit_Budget` use the default; the hidden `Discovery` tab and the new `Runs` columns are created / widened on the next run.
-- Serper credits are counted as one per page request; actual billing was not checked.
+- Search credits come from each response's reported cost (1 per basic search); the provider's account counter lagged (still 0) so it cannot yet confirm them. Tavily has no pagination, so a slot yields at most 20 results.
 
 - Validation is still draining: ~18,500 candidates unvalidated; the daily workflow works through them (Lever alone needs ~44 min per full pass at 1 req/s).
 - Which boards are monitored depends on a snapshot of title relevance; a waiting board that posts a relevant job tomorrow is only re-checked weekly. Coverage = monitored boards, not all 21,900.

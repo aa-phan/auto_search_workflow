@@ -260,11 +260,11 @@ class MergeTests(unittest.TestCase):
 
     def test_serper_discoveries_survive_and_gain_inventory_provenance_without_a_status_change(self) -> None:
         reg: dict[str, bd.BoardRecord] = {}
-        bd.upsert_boards(reg, [bd.BoardId("greenhouse", "alpha")], now=NOW, source="serper")
+        bd.upsert_boards(reg, [bd.BoardId("greenhouse", "alpha")], now=NOW, source="search")
         self.assertEqual(reg["greenhouse|alpha"].status, bd.STATUS_NEW)  # live-URL discoveries start monitoring as before
         bd.merge_candidates(reg, [cand("greenhouse", "alpha", inv.OPEN_ATS_FEED)], now=NOW + timedelta(days=1), new_status=bd.STATUS_CANDIDATE)
         rec = reg["greenhouse|alpha"]
-        self.assertEqual((rec.status, rec.source, set(rec.provenance)), (bd.STATUS_NEW, "serper", {"serper", inv.OPEN_ATS_FEED}))
+        self.assertEqual((rec.status, rec.source, set(rec.provenance)), (bd.STATUS_NEW, "search", {"search", inv.OPEN_ATS_FEED}))
 
 
 class ImportEndToEndTests(unittest.TestCase):
@@ -279,7 +279,7 @@ class ImportEndToEndTests(unittest.TestCase):
 
     def test_report_numbers_overlap_and_contributions(self) -> None:
         reg: dict[str, bd.BoardRecord] = {}
-        bd.upsert_boards(reg, [bd.BoardId("greenhouse", "gamma")], now=NOW, source="serper")  # already known from search
+        bd.upsert_boards(reg, [bd.BoardId("greenhouse", "gamma")], now=NOW, source="search")  # already known from search
         meta: dict[str, dict[str, str]] = {}
         res = self.do_import(reg, standard_net(), meta)
         ov = res.overlap
@@ -785,7 +785,7 @@ class SheetBoardsTests(unittest.TestCase):
         self.ws = self.sh.tabs[stm.BOARDS_TAB]
 
     def rec(self, ats: str, board: str, **kw: Any) -> bd.BoardRecord:
-        return bd.BoardRecord(ats, board, "2026-10-01T00:00:00Z", "serper", **kw)
+        return bd.BoardRecord(ats, board, "2026-10-01T00:00:00Z", "search", **kw)
 
     def test_round_trip_with_provenance_and_validation_fields(self) -> None:
         r = self.rec("lever", "Foo", status=bd.STATUS_VALIDATED, region="", name="Foo Inc", validation=bd.V_VALID, last_validated_at="2026-10-02T00:00:00Z", relevant_jobs=3,
@@ -817,7 +817,7 @@ class SheetBoardsTests(unittest.TestCase):
 
     def test_old_registry_rows_and_header_still_load_and_are_widened(self) -> None:
         old_header = stm.BOARD_COLUMNS[:12]
-        self.ws.values = [old_header, ["greenhouse|old", "greenhouse", "old", "active", "2026-09-01T00:00:00Z", "serper", "2026-09-01T01:00:00Z", "", "2026-10-14T00:00:00Z", 0, 9, ""]]
+        self.ws.values = [old_header, ["greenhouse|old", "greenhouse", "old", "active", "2026-09-01T00:00:00Z", "search", "2026-09-01T01:00:00Z", "", "2026-10-14T00:00:00Z", 0, 9, ""]]
         self.state.ensure()
         self.assertEqual(self.ws.values[0], stm.BOARD_COLUMNS)
         rec = self.state.load_boards()["greenhouse|old"]

@@ -142,7 +142,7 @@ class Observation:
     board_gap: timedelta | None
     board_baselined: bool
     baseline_pass: bool
-    source: str  # "poll" | "serper"
+    source: str  # "poll" | "search" ("serper" in rows written before the Tavily migration)
     fresh_window: timedelta = timedelta(hours=fr.DEFAULT_FRESH_WINDOW_HOURS)
     max_age_days: int = fr.DEFAULT_MAX_AGE_DAYS
     pass_kind: str = ""  # "baseline" | "reentry" | "" (an ordinary poll); recorded so activity counts can exclude it

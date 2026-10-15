@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import requests
@@ -24,6 +25,7 @@ import discovery as dsc  # noqa: E402
 import hunter as h  # noqa: E402
 import ledger as lg  # noqa: E402
 import pipeline as pl  # noqa: E402
+import search  # noqa: E402
 
 
 def settings(**kw: object) -> h.Settings:
@@ -87,79 +89,94 @@ class SettingsTests(unittest.TestCase):
 
 
 class QueryTests(unittest.TestCase):
-    def test_default_queries_fit_google_limit_and_cover_every_ats(self) -> None:
-        queries = h.build_queries(settings())
-        self.assertEqual(len(queries), 4)  # eight default level words (D-25 added Entry Level, New Grad) no longer fit in two queries
-        for q in queries:
-            self.assertLessEqual(h.count_words(q), h.GOOGLE_QUERY_WORD_LIMIT, q)
-            for site in h.ATS_SITES:
-                self.assertIn(f"site:{site}", q)
-
     def test_empty_roles_raises(self) -> None:
         with self.assertRaises(RuntimeError):
-            h.build_queries(settings(roles=[]))
+            h.rotation_slots(settings(roles=[]))
 
-    def post_bodies(self, query: "dsc.Query", **cfg_kw: object) -> list[dict]:
-        cfg = h.replace(h.Config.from_env(), search_api_key="k", **cfg_kw)
-        resp = mock.Mock()
-        resp.json.return_value = {"organic": []}
-        with mock.patch.object(h.requests, "post", return_value=resp) as post:
-            h.search_page(cfg, query, 1)
-        return [c.kwargs["json"] for c in post.call_args_list]
-
-    def test_search_page_sends_the_query_window_and_never_num(self) -> None:
-        body = self.post_bodies(dsc.Query("q", "site:x", "qdr:d3"))[0]
-        self.assertEqual((body["q"], body["tbs"], body["page"]), ("site:x", "qdr:d3", 1))
-        self.assertNotIn("num", body)  # free tier rejects num > 10
-        self.assertNotIn("tbs", self.post_bodies(dsc.Query("q", "site:x", ""))[0])  # only the manual backfill is unfiltered
-
-    def test_scheduled_discovery_can_never_become_unfiltered(self) -> None:
-        with mock.patch.dict(os.environ):
-            os.environ.pop("SEARCH_TBS", None)
-            self.assertEqual(h.Config.from_env().search_tbs, "qdr:d3")
-        base = h.Config.from_env()
-        for off in ("none", "off", "", "  "):
-            self.assertEqual(h.scheduled_tbs(h.replace(base, search_tbs=off)), "qdr:d3")
-        self.assertEqual(h.scheduled_tbs(h.replace(base, search_tbs="qdr:d")), "qdr:d")  # an explicit narrower window is honoured
-        with mock.patch.dict(os.environ, {"SEARCH_TBS": ""}):  # blank repository variable = default
-            self.assertEqual(h.Config.from_env().search_tbs, "qdr:d3")
-
-    def test_rotation_slots_cover_every_site_role_and_location(self) -> None:
+    def test_rotation_slots_cover_every_site_and_role_and_keep_locations_out_of_the_query(self) -> None:
         s = settings(roles=["Marketing", "Social Media"], locations=["Austin", "US Remote", "Remote"])
         slots = h.rotation_slots(s)
-        self.assertEqual(len(slots), len(h.ATS_SITES) * 2 * 2)  # both "remote" spellings collapse to one location
+        self.assertEqual(len(slots), len(h.ATS_SITES) * 2)  # site x role
         self.assertEqual(len({sl.id for sl in slots}), len(slots))
         self.assertEqual({sl.site for sl in slots[: len(h.ATS_SITES)]}, set(h.ATS_SITES))  # consecutive slots span providers
-        self.assertEqual({sl.location for sl in slots}, {"Austin", "Remote"})
+        self.assertEqual({sl.location for sl in slots}, {""})
+        for sl in slots:
+            self.assertNotIn("Austin", h.slot_query(sl, s))
 
-    def test_slot_query_is_one_site_one_role_one_location_within_the_word_limit(self) -> None:
-        sl = dsc.Slot("jobs.lever.co", "Social Media", "Austin")
-        q = h.slot_query(sl, settings())
-        self.assertIn("site:jobs.lever.co", q)
-        self.assertIn('intitle:"Social Media"', q)
-        self.assertIn("Austin", q)
-        self.assertNotIn("greenhouse", q)
-        self.assertLessEqual(h.count_words(q), h.GOOGLE_QUERY_WORD_LIMIT)
+    def test_slot_query_is_the_role_as_a_job_search_and_the_site_is_a_domain_restriction_not_syntax(self) -> None:
+        q = h.slot_query(dsc.Slot("jobs.lever.co", "Social Media", ""), settings())
+        self.assertEqual(q, "Social Media job")  # no site:, intitle:, OR groups, level or exclusion words
+        self.assertEqual(h.slot_query(dsc.Slot("jobs.lever.co", "Marketing", "Austin"), settings()), "Marketing job Austin")
 
-    def test_scheduled_discovery_is_windowed_and_budgeted_and_backfill_is_the_only_unfiltered_path(self) -> None:
-        cfg = h.replace(h.Config.from_env(), search_api_key="k", search_tbs="qdr:d3")
-        seen: list[tuple[str, str]] = []
+    def test_config_reads_the_tavily_key_and_window_and_nothing_serper(self) -> None:
+        with mock.patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-x", "SERPER_API_KEY": "old", "SEARCH_API_KEY": "old", "SEARCH_TBS": "none"}):
+            os.environ.pop("SEARCH_WINDOW_DAYS", None)
+            cfg = h.Config.from_env()
+        self.assertEqual((cfg.tavily_api_key, cfg.search_window_days), ("tvly-x", 3))
+        self.assertFalse(any("serper" in f.lower() or "tbs" in f.lower() for f in h.Config.__dataclass_fields__))
+        with mock.patch.dict(os.environ, {"SEARCH_WINDOW_DAYS": "0", "TAVILY_API_KEY": ""}):
+            self.assertEqual(h.Config.from_env().search_window_days, 1)  # a window can never be switched off for scheduled runs
 
-        def fake_page(c: h.Config, q: "dsc.Query", page: int) -> list[h.SearchHit]:
-            seen.append((q.id, q.tbs))
-            return []
+    def fake_world(self, calls: list[dict[str, Any]], *, pages: dict[str, list[dict[str, Any]]] | None = None):
+        def post(url: str, headers: dict, json: dict, timeout: float) -> mock.Mock:
+            calls.append(json)
+            resp = mock.Mock(status_code=200, headers={})
+            resp.json.return_value = {"results": (pages or {}).get(json["query"], []), "usage": {"credits": 1}}
+            return resp
 
-        ctx = pl.DiscoveryContext(datetime(2026, 10, 14, 12, tzinfo=timezone.utc), dsc.RotationState(), lambda b: True, lambda i: True)
-        s = settings(roles=["Marketing"], locations=["Austin"])
-        with mock.patch.object(h, "search_page", side_effect=fake_page):
-            scheduled = h.make_discovery(cfg, h.replace(s, discovery_credit_budget=4))(ctx)
-            self.assertEqual({tbs for _, tbs in seen}, {"qdr:d3"})
-            self.assertEqual((scheduled.kind, scheduled.credits, scheduled.slots_used), ("rotation", 4, 4))  # one empty page per query, budget-bounded
-            seen.clear()
-            manual = h.make_discovery(cfg, s, backfill=True)(ctx)
-        self.assertEqual(manual.kind, "backfill")
-        self.assertEqual({tbs for _, tbs in seen}, {""})
-        self.assertTrue(all(q_id.startswith("backfill:") for q_id, _ in seen))
+        return mock.patch.object(search.requests, "post", side_effect=post)
+
+    def ctx(self, **kw: Any) -> pl.DiscoveryContext:
+        base = dict(
+            now=datetime(2026, 10, 14, 12, tzinfo=timezone.utc), rotation=dsc.RotationState(), is_new_board=lambda b: True,
+            is_unseen_job=lambda i: True, budget=search.SearchBudget("2026-10"),
+        )  # fmt: skip
+        return pl.DiscoveryContext(**{**base, **kw})
+
+    def test_scheduled_discovery_is_windowed_budgeted_charged_and_backfill_is_the_only_unwindowed_path(self) -> None:
+        cfg = h.replace(h.Config.from_env(), tavily_api_key="tvly-k", search_window_days=3)
+        s = h.replace(settings(roles=["Marketing"]), discovery_credit_budget=4)
+        calls: list[dict[str, Any]] = []
+        ctx = self.ctx()
+        with self.fake_world(calls):
+            scheduled = h.make_discovery(cfg, s)(ctx)
+        self.assertEqual((scheduled.kind, scheduled.credits, scheduled.slots_used), ("rotation", 4, 4))
+        self.assertTrue(all("start_date" in c and c["include_domains"] and c["search_depth"] == "basic" for c in calls))
+        self.assertTrue(all(not c["include_answer"] and not c["include_raw_content"] for c in calls))
+        self.assertEqual((ctx.budget.used, ctx.budget.calls, ctx.budget.by_path), (4, 4, {"rotation": 4}))  # every request charged under its path
+        calls.clear()
+        manual_ctx = self.ctx(scheduled=False)
+        with self.fake_world(calls):
+            manual = h.make_discovery(cfg, s, backfill=True, backfill_credits=2)(manual_ctx)
+        self.assertEqual((manual.kind, manual.credits), ("backfill", 2))
+        self.assertTrue(all("start_date" not in c for c in calls))
+        self.assertTrue(all(q.id.startswith("backfill:") for q in manual.queries))
+        self.assertEqual(manual_ctx.budget.by_path, {"backfill": 2})
+
+    def test_the_run_is_capped_by_what_is_left_in_the_monthly_ledger(self) -> None:
+        cfg = h.replace(h.Config.from_env(), tavily_api_key="tvly-k")
+        s = h.replace(settings(roles=["Marketing"]), discovery_credit_budget=10)
+        budget = search.SearchBudget("2026-10", used=795, cap=1000, reserve=200)  # scheduled limit is 800
+        calls: list[dict[str, Any]] = []
+        with self.fake_world(calls):
+            res = h.make_discovery(cfg, s)(self.ctx(budget=budget))
+        self.assertEqual((res.credits, len(calls), budget.used), (5, 5, 800))  # stopped at the scheduled ceiling, not at the per-run budget
+        calls.clear()
+        with self.fake_world(calls):
+            manual = h.make_discovery(cfg, s)(self.ctx(budget=budget, scheduled=False))
+        self.assertEqual(manual.credits, 6)  # a manual run is not held at the scheduled ceiling (all 6 slots of the one role)
+        self.assertEqual(budget.used, 806)
+
+    def test_hit_limit_stops_the_run_and_blocks_further_spending(self) -> None:
+        cfg = h.replace(h.Config.from_env(), tavily_api_key="tvly-k")
+        s = h.replace(settings(roles=["Marketing"]), discovery_credit_budget=10)
+        resp = mock.Mock(status_code=432, headers={})
+        ctx = self.ctx()
+        with mock.patch.object(search.requests, "post", return_value=resp) as post:
+            res = h.make_discovery(cfg, s)(ctx)
+        self.assertEqual((post.call_count, ctx.budget.limit_hit, ctx.budget.used), (1, True, 0))  # the first 432 ends the run; failures are not charged
+        self.assertIn("432", res.fatal)
+        self.assertEqual(ctx.budget.remaining(scheduled=False), 0)
 
 
 # --------------------------------------------------------------------------- hydration
@@ -305,17 +322,17 @@ class EvaluatorTests(unittest.TestCase):
             self.evaluate(posting(), groq)
 
     def test_search_found_jobs_only_trust_creation_dates(self) -> None:
-        sj = pl.SerperJob(self.ident, "Marketing Intern", "https://jobs.lever.co/acme/x")
-        hyd = h.make_serper_hydrator(hydrate=lambda r: posting(posted="2026-10-14T11:00:00Z", posted_source="createdAt"))
+        sj = pl.SearchJob(self.ident, "Marketing Intern", "https://jobs.lever.co/acme/x")
+        hyd = h.make_search_hydrator(hydrate=lambda r: posting(posted="2026-10-14T11:00:00Z", posted_source="createdAt"))
         self.assertEqual(hyd(sj).published_field, "createdAt")  # type: ignore[union-attr]
-        hyd = h.make_serper_hydrator(hydrate=lambda r: posting(posted="2026-10-14", posted_source="updated_at"))
+        hyd = h.make_search_hydrator(hydrate=lambda r: posting(posted="2026-10-14", posted_source="updated_at"))
         listed = hyd(sj)
         assert listed is not None
         self.assertEqual((listed.published, listed.updated), ("", "2026-10-14"))  # last-modified is never publication
-        hyd = h.make_serper_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.TransientError("t")))
+        hyd = h.make_search_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.TransientError("t")))
         with self.assertRaises(pl.RetryableHydration):  # temporary: queued for a retry, not dropped
             hyd(sj)
-        hyd = h.make_serper_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.ClosedPosting("gone")))
+        hyd = h.make_search_hydrator(hydrate=lambda r: (_ for _ in ()).throw(h.ClosedPosting("gone")))
         self.assertIsNone(hyd(sj))  # closed: nothing to retry
 
 
@@ -429,8 +446,14 @@ class FakeWorksheet:
         self.appended.append((rows, kw))
         self.values.extend(rows)
 
+    def row_values(self, n: int) -> list[str]:
+        return list(self.values[n - 1]) if len(self.values) >= n else []
+
     def update(self, values: list, range_name: str, **kw: object) -> None:
         if self.title == h.TRACKER_TAB:
+            if range_name == "M1":  # the one allowed edit: the My_Feedback header cell of an older tracker
+                self.values[0] = list(self.values[0]) + [str(values[0][0])]
+                return
             raise AssertionError("the user-facing tracker must be append-only, but update() was called")
         self.values = self.values[:1] + [list(map(str, r)) for r in values]
 
@@ -485,14 +508,14 @@ class SheetTests(unittest.TestCase):
     def test_bootstrap_creates_user_tabs_and_hidden_state_tabs(self) -> None:
         sh = FakeSpreadsheet([FakeWorksheet("Sheet1", [])])
         sheet_store(sh).bootstrap("MY RESUME")
-        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory", "Discovery"})
+        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory", "Discovery", "Lock"})
         self.assertEqual(sh.deleted, ["Sheet1"])
         by_key = {r[0]: r[1] for r in sh.tabs["Settings"].values[1:]}
         self.assertEqual((by_key["Resume_Text"], by_key["Min_Alert_Score"], by_key["Fresh_Window_Hours"], by_key["Discovery_Every_Hours"]), ("MY RESUME", "70", "12", "12"))
         self.assertEqual(sh.tabs["Job Tracker"].values[0], h.TRACKER_COLUMNS)
         self.assertEqual(h.TRACKER_COLUMNS[8], "Apply_URL")  # column I
-        self.assertEqual(h.TRACKER_COLUMNS[-2:], ["Freshness", "Source"])
-        for hidden in ("Boards", "Events", "Runs", "Inventory", "Discovery"):
+        self.assertEqual(h.TRACKER_COLUMNS[-3:], ["Freshness", "Source", "My_Feedback"])
+        for hidden in ("Boards", "Events", "Runs", "Inventory", "Discovery", "Lock"):
             self.assertTrue(sh.tabs[hidden].hidden, hidden)
         self.assertFalse(sh.tabs["Job Tracker"].hidden or sh.tabs["Settings"].hidden)
 

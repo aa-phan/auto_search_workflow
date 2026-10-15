@@ -50,7 +50,8 @@ ATS_SCRAPERS_RAW = "https://raw.githubusercontent.com/kalil0321/ats-scrapers/mai
 SUPPORTED_ATS = set(bd.ATS_LIST)
 
 # Rows only the hourly poller may write (D-28). The importer's writes skip a row whose CURRENT
-# status is one of these, so it can never overwrite a promotion or demotion made meanwhile.
+# status is one of these (best effort, D-31: not an atomic compare-and-set; the writer lease and the
+# shared concurrency group do the real serialization) and merge their provenance instead.
 POLLER_OWNED = frozenset({bd.STATUS_NEW, bd.STATUS_ACTIVE, bd.STATUS_DISABLED})
 
 HTTP_TIMEOUT = 40
@@ -358,6 +359,11 @@ class HostLimiter:
         self._next: dict[str, float] = {}
         self._lock = threading.Lock()
 
+    def penalize(self, ats: str, seconds: float) -> None:
+        """After HTTP 429: no request to this provider for `seconds` (at most 2 minutes inside a validation run)."""
+        with self._lock:
+            self._next[ats] = max(self._next.get(ats, 0.0), self.clock() + min(seconds, 120.0))
+
     def wait(self, ats: str) -> None:
         with self._lock:
             now = self.clock()
@@ -390,6 +396,13 @@ def validate_board(
             jobs = fetch(board)
         except BoardGone as exc:
             return ValidationResult(V_INVALID, error=str(exc))
+        except bd.BoardRateLimited as exc:  # 429: slow that provider down for everyone, and never read it as "closed"
+            error = str(exc)
+            if limiter:
+                limiter.penalize(board.ats, exc.retry_after)
+            if attempt < retries - 1:
+                sleep(1.5 * 2**attempt)
+            continue
         except BoardError as exc:
             error = str(exc)
             if attempt < retries - 1:
@@ -673,7 +686,7 @@ def admit_boards(
     limiter: HostLimiter | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> AdmissionResult:
-    """The ONE admission path for boards from any source (inventory import, Serper, manual seed).
+    """The ONE admission path for boards from any source (inventory import, web search, manual seed).
 
     Every submitted board gets the same treatment: (1) identifier sanity, (2) registered as an
     unvalidated `candidate` with provenance (an existing board only gains provenance; its status

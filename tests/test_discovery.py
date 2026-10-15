@@ -41,7 +41,7 @@ def gh(board: str, jid: str) -> str:
     return f"https://boards.greenhouse.io/{board}/jobs/{jid}"
 
 
-def padded(urls: list[Any], title: str = "Marketing Intern", n: int = 10) -> list[SimpleNamespace]:
+def padded(urls: list[Any], title: str = "Marketing Intern", n: int = 20) -> list[SimpleNamespace]:
     """A full results page: the given URLs (or (url, title) pairs) plus non-ATS filler (a short page would end paging)."""
     hits = [hit(*u) if isinstance(u, tuple) else hit(u, title) for u in urls]
     return hits + [hit(f"https://example.com/filler/{i}") for i in range(n - len(hits))]
@@ -61,10 +61,10 @@ def engine(pages: dict[str, list[list[Any]]], *, known_boards: set[str] | None =
             raise out
         return out
 
-    queries = [dsc.Query(qid, f"query {qid}", "qdr:d3") for qid in pages]
+    queries = [dsc.Query(qid, f"query {qid}", "boards.greenhouse.io", 3) for qid in pages]
     res = dsc.run_queries(
         queries, search, is_new_board=lambda b: b.key not in (known_boards or set()),
-        is_unseen_job=lambda i: i.key not in (seen_jobs or set()), **{"budget": 10, **kw},
+        is_unseen_job=lambda i: i.key not in (seen_jobs or set()), **{"budget": 10, "max_pages": 3, **kw},
     )  # fmt: skip
     res.calls = calls  # type: ignore[attr-defined]
     return res
@@ -121,7 +121,7 @@ class PersistentRotationTests(HarnessCase):
     def discover(self, searched: list[str], per_run: int = 3):
         def run(ctx: pl.DiscoveryContext) -> dsc.DiscoveryResult:
             chosen = dsc.plan_slots(ctx.rotation, self.slots, per_run)
-            queries = [dsc.Query(s.id, s.id, "qdr:d3") for s in chosen]
+            queries = [dsc.Query(s.id, s.id, "boards.greenhouse.io", 3) for s in chosen]
 
             def search(q: dsc.Query, page: int) -> list[Any]:
                 searched.append(q.id)
@@ -158,7 +158,7 @@ class PersistentRotationTests(HarnessCase):
             def search(q: dsc.Query, page: int) -> list[Any]:
                 raise ConnectionError("serper down")
 
-            return dsc.run_queries([dsc.Query(s.id, s.id, "qdr:d3") for s in chosen], search, budget=4, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job)
+            return dsc.run_queries([dsc.Query(s.id, s.id, "boards.greenhouse.io", 3) for s in chosen], search, budget=4, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job)
 
         run = self.w.run(discover=broken, rotation_slots=self.slots, force_discovery=True)
         self.assertIn("every search request failed", run.notes)
@@ -225,7 +225,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((r.queries[0].repeated, r.queries[1].repeated, r.repeated), (0, 1, 1))
         self.assertEqual({b.key for b in r.boards}, {"greenhouse|a", "lever|solo"})
         self.assertEqual(r.job_keys, {"greenhouse|a|1", "greenhouse|a|2"})
-        self.assertEqual(sum(q.unparsed for q in r.queries), 16)
+        self.assertEqual(sum(q.unparsed for q in r.queries), 36)
 
     def test_backfill_mode_takes_boards_but_no_jobs(self) -> None:
         r = engine({"q": [padded([gh("a", "1")])]}, take_jobs=False, kind=dsc.KIND_BACKFILL)
@@ -250,7 +250,7 @@ class IndependentProcessingTests(HarnessCase):
     def search(self, *urls_titles: tuple[str, str]):
         def discover(ctx: pl.DiscoveryContext) -> dsc.DiscoveryResult:
             return dsc.run_queries(
-                [dsc.Query("q", "q", "qdr:d3")], lambda q, p: padded(list(urls_titles)) if p == 1 else [],
+                [dsc.Query("q", "q", "boards.greenhouse.io", 3)], lambda q, p: padded(list(urls_titles)) if p == 1 else [],
                 budget=10, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
             )  # fmt: skip
 
@@ -265,7 +265,7 @@ class IndependentProcessingTests(HarnessCase):
         titles = {seen_url: "Marketing Intern", stale_url: "Marketing Intern", excluded_url: "Senior Marketing Manager", fresh_url: "Marketing Intern"}
         hydrated: list[str] = []
 
-        def hydrate(sj: dsc.SerperJob) -> bd.ListedJob | None:
+        def hydrate(sj: dsc.SearchJob) -> bd.ListedJob | None:
             hydrated.append(sj.ident.key)
             age = {"5": ago(days=40, base=T0 + timedelta(minutes=60)), "7": ago(minutes=30, base=T0 + timedelta(minutes=60))}[sj.ident.job_id]
             return job(sj.ident.board, sj.ident.job_id, published=age)
@@ -277,13 +277,13 @@ class IndependentProcessingTests(HarnessCase):
         registry = self.w.state.load_boards()
         for b in ("staleco", "exclco", "freshco"):
             rec = registry[f"greenhouse|{b}"]
-            self.assertIn("serper", rec.provenance, b)  # every result's board reached admission
+            self.assertIn("tavily", rec.provenance, b)  # every result's board reached admission
             self.assertIn(rec.status, {"new", "active"}, b)
         self.assertEqual(len(registry), 4)
         self.assertEqual(sorted(hydrated), ["greenhouse|freshco|7", "greenhouse|staleco|5"])  # seen job skipped, excluded title not fetched
         self.assertEqual(self.w.states()[bd.JobIdentity(bd.GREENHOUSE, "freshco", "7").key].freshness, fr.VERIFIED_FRESH)
         self.assertEqual(self.w.states()[bd.JobIdentity(bd.GREENHOUSE, "staleco", "5").key].freshness, fr.STALE)
-        self.assertEqual((run.new_unique_boards, run.search_credits, run.search_pages), (3, 2, 2))
+        self.assertEqual((run.new_unique_boards, run.search_credits, run.search_pages), (3, 1, 1))
 
     def test_unseen_job_goes_through_the_normal_pipeline_without_its_board_being_polled(self) -> None:
         board = bd.BoardId(bd.GREENHOUSE, "smallco")
@@ -294,7 +294,7 @@ class IndependentProcessingTests(HarnessCase):
         self.assertEqual(self.w.state.load_boards()[board.key].status, "validated")  # admitted + validated, waiting for a slot
         self.assertEqual(self.w.states()[listed.ident.key].freshness, fr.VERIFIED_FRESH)  # the job path did not need the board path
         self.assertEqual((len(self.w.alerts), run.verified_fresh_matches, run.eligible_boards, run.promoted_boards), (1, 1, 1, 0))
-        self.assertEqual(self.w.states()[listed.ident.key].seen_detail["source"], "serper")
+        self.assertEqual(self.w.states()[listed.ident.key].seen_detail["source"], "search")
 
     def test_excluded_title_is_not_hydrated_but_its_board_is_still_admitted(self) -> None:
         board = bd.BoardId(bd.GREENHOUSE, "exclco")
@@ -337,7 +337,7 @@ class AdmissionTests(HarnessCase):
         rec = self.w.state.load_boards()[sr.key]
         self.assertEqual((rec.status, rec.validation), ("deferred", "deferred"))
         self.assertEqual((fetched, run.boards_total, run.boards_added), ([], 0, 1))  # never listed, never polled
-        self.assertIn("serper", rec.provenance)  # but the discovery is recorded
+        self.assertIn("tavily", rec.provenance)  # but the discovery is recorded
         self.assertIn("1 boards parked", run.notes)
 
     def test_manual_seeds_follow_the_same_smartrecruiters_policy(self) -> None:
@@ -353,7 +353,7 @@ class AdmissionTests(HarnessCase):
         self.assertEqual(self.w.state.load_boards()[sr.key].status, "active")
 
     def test_search_found_smartrecruiters_job_is_not_read_while_the_provider_is_parked(self) -> None:
-        sj = dsc.SerperJob(bd.JobIdentity(bd.SMARTRECRUITERS, "SrCo", "743999002"), "Marketing Intern", "https://jobs.smartrecruiters.com/SrCo/743999002")
+        sj = dsc.SearchJob(bd.JobIdentity(bd.SMARTRECRUITERS, "SrCo", "743999002"), "Marketing Intern", "https://jobs.smartrecruiters.com/SrCo/743999002")
         called: list[Any] = []
         run = self.w.run(discover=lambda ctx: dsc.DiscoveryResult(jobs=[sj]), hydrate_listed=lambda s: called.append(s), force_discovery=True)
         self.assertEqual(called, [])
@@ -390,7 +390,7 @@ class AdmissionTests(HarnessCase):
         boards = self.w.state.load_boards()
         self.assertEqual(len(boards), 1)
         rec = boards[b.key]
-        self.assertEqual(set(rec.provenance), {"ats-scrapers", "seed", "serper"})
+        self.assertEqual(set(rec.provenance), {"ats-scrapers", "seed", "tavily"})
         self.assertEqual((rec.source, rec.discovered_at), ("ats-scrapers", "2026-10-01T00:00:00Z"))  # first discoverer and time survive
         self.assertEqual(run.boards_total, 1)
         self.assertEqual(polls.count(b.key), 2)  # one validation (admission) + one poll; the later sources hit the cached validation
@@ -405,7 +405,7 @@ class AdmissionTests(HarnessCase):
 
     def test_unsupported_or_malformed_identifiers_are_rejected_not_registered(self) -> None:
         reg: dict[str, bd.BoardRecord] = {}
-        res = inv.admit_boards(reg, [bd.BoardId(bd.LEVER, "has space"), bd.BoardId("workday", "x"), bd.BoardId(bd.LEVER, "ok-co")], source="serper", now=T0, fetch=lambda b: [])
+        res = inv.admit_boards(reg, [bd.BoardId(bd.LEVER, "has space"), bd.BoardId("workday", "x"), bd.BoardId(bd.LEVER, "ok-co")], source="search", now=T0, fetch=lambda b: [])
         self.assertEqual((res.rejected, res.submitted, list(reg)), (2, 1, ["lever|ok-co"]))
 
     def test_transient_validation_leaves_a_retryable_candidate_not_a_verdict(self) -> None:
@@ -551,9 +551,9 @@ class SheetStateTests(unittest.TestCase):
 
 
 class HydrationRetryTests(HarnessCase):
-    def sj(self) -> dsc.SerperJob:
+    def sj(self) -> dsc.SearchJob:
         ident = bd.JobIdentity(bd.GREENHOUSE, "retryco", "55")
-        return dsc.SerperJob(ident, "Marketing Intern", ident.url)
+        return dsc.SearchJob(ident, "Marketing Intern", ident.url)
 
     def test_temporary_read_failure_is_queued_and_retried_without_a_search(self) -> None:
         board = bd.BoardId(bd.GREENHOUSE, "retryco")
@@ -561,7 +561,7 @@ class HydrationRetryTests(HarnessCase):
         listed = job("retryco", "55", published=ago(minutes=10, base=T0 + timedelta(minutes=180)))
         attempts: list[int] = []
 
-        def hydrate(sj: dsc.SerperJob) -> bd.ListedJob | None:
+        def hydrate(sj: dsc.SearchJob) -> bd.ListedJob | None:
             attempts.append(1)
             if len(attempts) < 3:
                 raise pl.RetryableHydration("503")
@@ -579,7 +579,7 @@ class HydrationRetryTests(HarnessCase):
         board = bd.BoardId(bd.GREENHOUSE, "retryco")
         self.w.listings[board.key] = []
 
-        def always(sj: dsc.SerperJob) -> bd.ListedJob | None:
+        def always(sj: dsc.SearchJob) -> bd.ListedJob | None:
             raise pl.RetryableHydration("503")
 
         self.w.run(discover=lambda ctx: dsc.DiscoveryResult(boards=[board], jobs=[self.sj()]), hydrate_listed=always, force_discovery=True)
@@ -614,23 +614,39 @@ class RunRecordTests(HarnessCase):
 
         def discover(ctx: pl.DiscoveryContext) -> dsc.DiscoveryResult:
             return dsc.run_queries(
-                [dsc.Query("lever|marketing|austin", "q", "qdr:d3")], lambda q, p: pages[0] if p == 1 else padded([]),
+                [dsc.Query("lever|marketing|austin", "q", "boards.greenhouse.io", 3)], lambda q, p: pages[0] if p == 1 else padded([]),
                 budget=10, is_new_board=ctx.is_new_board, is_unseen_job=ctx.is_unseen_job,
             )  # fmt: skip
 
         run = self.w.run(discover=discover, hydrate_listed=lambda sj: fresh if sj.ident.board == "goodco" else None, force_discovery=True)
         row = self.w.state.load_runs()[-1]
-        self.assertEqual((run.search_queries, run.search_pages, run.search_credits), (1, 3, 3))  # page 1 + two empty pages -> stalled
+        self.assertEqual((run.search_queries, run.search_pages, run.search_credits), (1, 1, 1))  # Tavily cannot paginate: one request per query
         self.assertEqual((run.search_repeated, run.new_unique_boards), (1, 3))  # the duplicate goodco hit; goodco + dullco + SrCo
         self.assertEqual((run.eligible_boards, run.promoted_boards), (2, 1))  # SrCo is parked; dullco is valid but empty so it waits
         self.assertEqual(run.verified_fresh_matches, 1)
         self.assertEqual(
             (row.search_queries, row.search_credits, row.new_unique_boards, row.eligible_boards, row.promoted_boards, row.verified_fresh_matches),
-            (1, 3, 3, 2, 1, 1),
+            (1, 1, 3, 2, 1, 1),
         )  # fmt: skip
+        # the breakdown that makes "eligible" readable: it counts boards in the results, NEW OR ALREADY KNOWN
+        self.assertEqual((run.result_boards, run.new_unique_boards, run.eligible_boards, run.result_parked, run.result_invalid, run.result_awaiting_validation), (3, 3, 2, 1, 0, 0))
+        self.assertEqual((row.result_boards, row.result_parked, row.result_invalid, row.result_awaiting_validation), (3, 1, 0, 0))
         last = self.w.state.load_discovery_state()[dsc.LAST_RUN_KEY]
         self.assertIn("lever|marketing|austin", last)  # query identity is persisted with its stats
         self.assertIn(sr.key, self.w.state.load_boards())
+
+    def test_eligible_counts_known_boards_too_so_it_can_exceed_the_new_boards(self) -> None:
+        known = bd.BoardId(bd.GREENHOUSE, "oldco")
+        fresh = bd.BoardId(bd.GREENHOUSE, "newco")
+        for b in (known, fresh):
+            self.w.listings[b.key] = [job(b.board, "1", published=ago(days=30))]
+        self.w.run(seeds=[known])  # oldco is already in the registry and monitored
+        bad = bd.BoardId(bd.GREENHOUSE, "gone")
+        self.w.listings[bad.key] = bd.BoardGone("HTTP 404")
+        run = self.w.run(minutes_later=60, discover=lambda ctx: dsc.DiscoveryResult(boards=[known, fresh, bad]), force_discovery=True)
+        self.assertEqual((run.result_boards, run.new_unique_boards), (3, 2))  # 1 already known, 2 new
+        self.assertEqual((run.eligible_boards, run.result_invalid, run.result_parked, run.result_awaiting_validation), (2, 1, 0, 0))  # eligible = oldco (known) + newco (new)
+        self.assertEqual(run.eligible_boards + run.result_parked + run.result_invalid + run.result_awaiting_validation, run.result_boards)
 
     def test_runs_tab_header_and_row_stay_in_step(self) -> None:
         self.assertEqual(len(st_mod.RUN_COLUMNS), len(st_mod.RunRecord(run_at="x").to_row()))
