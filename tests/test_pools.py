@@ -812,7 +812,7 @@ class RebalancePipelineTests(HarnessCase):
 
     def test_runs_columns_and_rows_line_up(self) -> None:
         self.assertEqual(len(st_mod.RunRecord("t").to_row()), len(st_mod.RUN_COLUMNS))
-        self.assertEqual(st_mod.RUN_COLUMNS[-13:-4], [
+        self.assertEqual(st_mod.RUN_COLUMNS[st_mod.RUN_COLUMNS.index("Pool_Established"):st_mod.RUN_COLUMNS.index("Rebalance") + 1], [
             "Pool_Established", "Pool_Exploration", "Waiting_Relevant", "Oldest_Waiting_Hours", "Relevant_Coverage_Pct",
             "Graduated", "Demoted", "Parked_Policy", "Rebalance",
         ])  # fmt: skip

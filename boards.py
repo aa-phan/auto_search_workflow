@@ -18,6 +18,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
+from meter import METER
+
 GREENHOUSE, LEVER, ASHBY, WORKABLE, SMARTRECRUITERS = "greenhouse", "lever", "ashby", "workable", "smartrecruiters"
 ATS_LIST = (GREENHOUSE, LEVER, ASHBY, WORKABLE, SMARTRECRUITERS)
 
@@ -197,10 +199,17 @@ def _retry_after(resp: Any) -> float:
 
 
 def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
+    started = time.monotonic()
     try:
         resp = requests.get(url, params=params, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=HTTP_TIMEOUT)
     except requests.RequestException as exc:
+        METER.add("ats_requests")
+        METER.add("ats_seconds", time.monotonic() - started)
         raise BoardError(str(exc)) from exc
+    METER.add("ats_requests")
+    METER.add("ats_seconds", time.monotonic() - started)
+    if resp.status_code == 429:
+        METER.add("ats_429")
     if resp.status_code in {404, 410}:
         raise BoardGone(f"HTTP {resp.status_code}")
     if resp.status_code == 429:

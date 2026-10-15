@@ -41,6 +41,7 @@ import ledger as lg
 import pipeline as pl
 import search
 import pilot
+from meter import METER
 import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
 from freshness import parse_posted
@@ -900,9 +901,13 @@ class GroqClient:
                     timeout=60,
                 )
             except requests.RequestException as exc:
+                METER.add("groq_calls")
                 log.warning("Groq request error (%s): %s", model, exc)
                 time.sleep(min(30, 3 * 2**attempt))
                 continue
+            METER.add("groq_calls")
+            if resp.status_code == 429:
+                METER.add("groq_429")
             code = resp.status_code
             if code == 429:
                 if model == self.cfg.groq_model:
@@ -1104,12 +1109,15 @@ def quota_retrying(request: Callable[..., Any], *, sleep: Callable[[float], None
     import gspread
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        method = str(args[0] if args else kwargs.get("method", "")).upper()
         for wait in (*waits, None):
+            METER.add("sheets_reads" if method == "GET" else "sheets_writes")
             try:
                 return request(*args, **kwargs)
             except gspread.exceptions.APIError as exc:
                 if getattr(exc.response, "status_code", 0) != 429 or wait is None:
                     raise
+                METER.add("sheets_429")
                 log.warning("Google Sheets quota exceeded (HTTP 429); retrying in %.0f s", wait)
                 sleep(wait)
 
@@ -1626,7 +1634,7 @@ def run_pilot_report(store: Any, settings: Settings, days: int) -> int:
     rep = pilot.build_report(
         now=now, days=days, runs=state.load_runs(), events=state.load_events(), boards=state.load_boards(),
         discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
-        search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits,
+        search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits, max_active=settings.max_active_boards,
     )  # fmt: skip
     print(pilot.format_report(rep))
     return 0

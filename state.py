@@ -50,6 +50,8 @@ RUN_COLUMNS = [
     "Pool_Established", "Pool_Exploration", "Waiting_Relevant", "Oldest_Waiting_Hours", "Relevant_Coverage_Pct",
     "Graduated", "Demoted", "Parked_Policy", "Rebalance",
     "Result_Boards", "Result_Parked", "Result_Invalid", "Result_Awaiting_Validation",
+    "Duration_S", "Load_S", "Discovery_S", "Poll_S", "Evaluate_S", "Events_Rows", "Boards_Rows",
+    "Sheets_Reads", "Sheets_Writes", "Sheets_429", "ATS_Requests", "ATS_429", "ATS_Seconds", "Groq_Calls", "Groq_429",
 ]  # fmt: skip
 APPEND_CHUNK = 2000
 
@@ -98,6 +100,22 @@ class RunRecord:
     result_parked: int = 0  # provider policy parks them (SmartRecruiters)
     result_invalid: int = 0  # validation proved the board does not exist
     result_awaiting_validation: int = 0  # candidates: validation was transient or past this run's inline limit
+    # Diagnostics for auditing the deployment's limits (measured, per run; whole seconds):
+    duration_s: int = 0  # whole run, start to the moment its record is written
+    load_s: int = 0  # loading the registry, ledger and Runs from the Sheet
+    discovery_s: int = 0
+    poll_s: int = 0  # listing every monitored board plus classifying their jobs
+    evaluate_s: int = 0  # hydration, scoring, tracker writes and alerts
+    events_rows: int = 0  # Events rows loaded at the start (grows with every job ever seen)
+    boards_rows: int = 0  # registry rows loaded at the start
+    sheets_reads: int = 0  # Google Sheets API read requests (quota: about 60 per minute per user)
+    sheets_writes: int = 0
+    sheets_429: int = 0  # quota rejections that were retried
+    ats_requests: int = 0  # requests to the ATS list/posting APIs
+    ats_429: int = 0
+    ats_seconds: int = 0  # summed request time (requests run 8 at a time)
+    groq_calls: int = 0
+    groq_429: int = 0
 
     def to_row(self) -> list[Any]:
         out = []
@@ -122,7 +140,7 @@ class RunRecord:
                    num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
                    *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
-                   *(num(i) or 0 for i in range(36, 40)))  # fmt: skip
+                   *(num(i) or 0 for i in range(36, 55)))  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:

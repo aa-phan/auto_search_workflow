@@ -25,6 +25,7 @@ import inventory as inv
 import ledger as lg
 import pools
 import search
+from meter import METER
 from boards import (
     MONITORED, STATUS_ACTIVE, STATUS_CANDIDATE, STATUS_DEFERRED, STATUS_INVALID, STATUS_NEW, STATUS_VALIDATED, BoardId, BoardRecord, JobIdentity, ListedJob,
     activate_waiting, fetch_board, poll_boards, registry_counts, apply_poll_result,
@@ -131,11 +132,16 @@ def _minutes(td: timedelta | None) -> int | None:
 
 def run_cycle(d: Deps) -> RunRecord:
     now = d.now()
+    t_start = time.monotonic()
+    meter0 = METER.snapshot()
     d.state.ensure()
     boards = d.state.load_boards()
-    states = lg.replay(d.state.load_events())
+    events_loaded = d.state.load_events()
+    states = lg.replay(events_loaded)
     runs = d.state.load_runs()
     run = RunRecord(lg.stamp(now))
+    run.load_s, run.events_rows, run.boards_rows = round(time.monotonic() - t_start), len(events_loaded), len(boards)
+    t_eval: float | None = None
     if runs and (prev := _parse_stamp(runs[-1].run_at, now.tzinfo)):
         run.gap_since_prev_run_min = _minutes(now - prev)
     pending_events: list[lg.Event] = []
@@ -173,6 +179,7 @@ def run_cycle(d: Deps) -> RunRecord:
         if d.seeds:
             admit(d.seeds, "seed")
 
+        t_disc = time.monotonic()
         # ---------------------------------------------------------------- 1. discovery loop
         # Search is candidate retrieval only. Every result is processed twice, independently:
         # its BOARD goes through admission, its JOB (if unseen) through hydration -> pipeline.
@@ -249,6 +256,8 @@ def run_cycle(d: Deps) -> RunRecord:
                     run.notes += f"search ledger not saved: {exc}; "
             log.info(budget.summary())
 
+        run.discovery_s = round(time.monotonic() - t_disc)
+        t_poll = time.monotonic()
         # ---------------------------------------------------------------- 2. polling loop
         # Validated inventory boards enter monitoring only within the polling budget; the poll
         # below then baselines them (their existing jobs never look "just posted").
@@ -384,6 +393,7 @@ def run_cycle(d: Deps) -> RunRecord:
         counts = registry_counts(boards)
         run.boards_discovered, run.boards_validated, run.boards_monitored = counts["discovered"], counts["validated"], counts["monitored"]
 
+        run.poll_s = round(time.monotonic() - t_poll)
         # Search-found jobs not on any listing we read: hydrate for an authoritative date first
         # (Google's window says when a page was indexed, never when the job was published).
         # Temporary read failures are queued and retried on later runs without spending credits.
@@ -484,6 +494,7 @@ def run_cycle(d: Deps) -> RunRecord:
         else:
             pending_events = []
 
+        t_eval = time.monotonic()
         # ---------------------------------------------------------------- 3. evaluate
         todo = sorted((s for s in states.values() if lg.needs_evaluation(s)), key=lg.priority)
         if len(todo) > d.max_jobs:
@@ -547,6 +558,13 @@ def run_cycle(d: Deps) -> RunRecord:
         except Exception as exc:
             log.error("Final state write failed: %s", exc)
             run.notes += f"final write failed: {exc}; "
+        if t_eval is not None:
+            run.evaluate_s = round(time.monotonic() - t_eval)
+        used = METER.since(meter0)
+        run.duration_s = round(time.monotonic() - t_start)
+        run.sheets_reads, run.sheets_writes, run.sheets_429 = (int(used.get(k, 0)) for k in ("sheets_reads", "sheets_writes", "sheets_429"))
+        run.ats_requests, run.ats_429, run.ats_seconds = int(used.get("ats_requests", 0)), int(used.get("ats_429", 0)), round(used.get("ats_seconds", 0))
+        run.groq_calls, run.groq_429 = int(used.get("groq_calls", 0)), int(used.get("groq_429", 0))
         if not d.dry_run:
             try:
                 d.state.append_run(run)

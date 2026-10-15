@@ -10,6 +10,12 @@ Latest change (D-23..D-30, quick task 261014-olj): board slot allocation. A comp
 
 Previous change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
 
+## Deployment and pilot status (running log)
+
+- **Deployed:** private-then-public repo, secrets set, Sheet connected, Telegram group delivery verified (labelled fixture), two manual polling runs (second added 0 jobs: no duplicates), a quota failure under back-to-back runs found and fixed (retry on HTTP 429), SmartRecruiters unparked by decision (D-38), Board Inventory enabled with its schedule.
+- **Diagnostics for the limits audit** (this change): per-run duration and phase times, Google Sheets request counts and quota rejections, ATS and Groq request counts and 429s, and Events/Boards row counts are recorded in `Runs` and summarized in the pilot report (`LIMITS AUDIT`). Measured values only exist from this change onward.
+- **Not yet true:** the schedule is unverified until `Runs.Notes` shows `trigger=schedule`; no real alert has been delivered; the pilot has not started.
+
 ## Deployment preparation and pilot (D-37)
 
 **Prepared, not yet deployed.** What exists: `DEPLOY.md` (private-repository setup, the exact secret names, Sheet/service-account/Telegram setup without sharing values, manual-run and schedule checks, the seven-day pilot protocol); read-only `--pilot-report` and a labelled `--delivery-test`; the user-owned `My_Feedback` column; 429 provider backoff; completeness by documented pagination behaviour; a flock-based local lease and the refusal of local production writes; workflows reduced to `contents: read` with no commit steps and a configuration check that names (never prints) missing secrets. **375 offline tests** pass.

@@ -85,6 +85,7 @@ Start: the first scheduled run after step 7 (note its `Run_At`). Keep unchanged 
 
 - Daily (2 minutes): open `Job Tracker`, set **My_Feedback** on any row you looked at (Would apply / Maybe / Irrelevant). Unlabelled rows are simply not counted.
 - Any day: run **Job Hunter** with `pilot_report` ticked (or `python hunter.py --pilot-report 7` locally). It reports polling gaps and late runs, runs by trigger, relevant fresh jobs by source, publication-to-first-seen and publication-to-alert latency, late/duplicate alerts, pending failures, search credits (local counter) and board coverage, and your feedback.
+- The report's **LIMITS AUDIT** section is the evidence for the limits (timeout, Google Sheets quota, provider rate limits, Events growth). Runs recorded before the diagnostics existed have no durations and are left out.
 - Day 7: the report is the evidence. The pilot is **not** complete before seven full days of scheduled runs have elapsed; "complete" also needs at least one real alert to have gone through scoring, tracker and Telegram.
 - Stop and investigate if: runs by trigger shows no `schedule` runs after 24 hours, a duplicate alert appears, `awaiting alert now` stays above zero for more than a few hours, or search credits per day exceed 20.
 

@@ -217,3 +217,107 @@ class TriggerRecordingTests(unittest.TestCase):
         runs = [st_mod.RunRecord(ts(hours=i), notes=f"trigger={t}; ") for i, t in ((3, "schedule"), (2, "schedule"), (1, "workflow_dispatch"))] + [st_mod.RunRecord(ts(hours=4), notes="")]
         rep = pilot.build_report(now=NOW, days=1, runs=runs, events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200)
         self.assertEqual(rep["polling"]["runs_by_trigger"], {"schedule": 2, "unrecorded": 1, "workflow_dispatch": 1})
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_meter_counts_and_reports_only_what_happened_since_a_snapshot(self) -> None:
+        from meter import Meter
+
+        m = Meter()
+        m.add("a")
+        before = m.snapshot()
+        m.add("a", 2)
+        m.add("b", 0.5)
+        self.assertEqual(m.since(before), {"a": 2, "b": 0.5})
+        self.assertEqual(m.since(m.snapshot()), {})
+
+    def test_quota_wrapper_counts_reads_writes_and_rejections(self) -> None:
+        from unittest import mock
+
+        import gspread
+
+        from meter import METER
+
+        before = METER.snapshot()
+        resp = mock.Mock(status_code=429, text="x")
+        resp.json.return_value = {"error": {"code": 429, "message": "q", "status": "RESOURCE_EXHAUSTED"}}
+        calls = mock.Mock(side_effect=[gspread.exceptions.APIError(resp), "ok", "ok"])
+        wrapped = h.quota_retrying(calls, sleep=lambda s: None)
+        wrapped("GET", "u")
+        wrapped("POST", "u")
+        used = METER.since(before)
+        self.assertEqual((used["sheets_reads"], used["sheets_writes"], used["sheets_429"]), (2, 1, 1))  # the retried read counts as a request
+
+    def test_ats_requests_are_counted_with_their_seconds_and_429s(self) -> None:
+        from unittest import mock
+
+        from meter import METER
+
+        before = METER.snapshot()
+        with mock.patch.object(bd.requests, "get", return_value=mock.Mock(status_code=429, headers={})):
+            with self.assertRaises(bd.BoardRateLimited):
+                bd._get_json("https://x")
+        used = METER.since(before)
+        self.assertEqual((used["ats_requests"], used["ats_429"]), (1, 1))
+
+    def test_a_run_records_its_duration_phases_sizes_and_request_counts(self) -> None:
+        import tempfile as tf
+
+        from meter import METER
+        from test_core import HarnessCase, ago, job
+
+        class Case(HarnessCase):
+            def runTest(self) -> None:  # pragma: no cover
+                pass
+
+        case = Case()
+        case.setUp()
+        try:
+            def counting_fetch(b: bd.BoardId) -> list:
+                METER.add("ats_requests")
+                METER.add("ats_seconds", 2.4)
+                return case.w.listings[b.key]
+
+            case.w.fetch = counting_fetch  # type: ignore[method-assign]
+            case.w.listings[case.board.key] = [job("acme", "1", published=ago(days=30))]
+            case.w.run(seeds=[case.board])
+            run = case.w.run(minutes_later=60)
+            stored = case.w.state.load_runs()[-1]
+            self.assertEqual((stored.boards_rows, stored.events_rows), (1, 1))  # sizes loaded at the start of the second run
+            self.assertEqual((stored.ats_requests, stored.ats_seconds), (1, 2))
+            for name in ("duration_s", "load_s", "discovery_s", "poll_s", "evaluate_s"):
+                self.assertGreaterEqual(getattr(stored, name), 0)
+            self.assertEqual(stored, run)
+        finally:
+            case.tearDown() if hasattr(case, "tearDown") else None
+
+    def test_the_run_row_round_trips_the_diagnostic_columns_and_old_rows_read_as_zero(self) -> None:
+        rec = st_mod.RunRecord("2026-10-14T12:00:00Z", duration_s=95, poll_s=40, events_rows=900, sheets_reads=33, sheets_429=1, groq_calls=12, ats_seconds=70)
+        again = st_mod.RunRecord.from_row([str(c) for c in rec.to_row()])
+        self.assertEqual(again, rec)
+        self.assertEqual(len(st_mod.RUN_COLUMNS), len(rec.to_row()))
+        old = st_mod.RunRecord.from_row(["2026-10-14T12:00:00Z", "no", "3"])
+        self.assertEqual((old.duration_s, old.sheets_reads, old.groq_calls), (0, 0, 0))
+
+    def test_the_report_audits_limits_from_measured_runs_only(self) -> None:
+        runs = [
+            st_mod.RunRecord(ts(hours=h_), boards_total=10 + h_, duration_s=100 + 10 * h_, load_s=8, discovery_s=0, poll_s=20 + h_, evaluate_s=60, events_rows=1000 + 300 * (24 - h_), boards_rows=50,
+                             sheets_reads=30 + h_, sheets_writes=12, sheets_429=1 if h_ == 5 else 0, ats_requests=10, ats_seconds=15, groq_calls=20, groq_429=1 if h_ == 3 else 0)
+            for h_ in range(24, 0, -1)
+        ] + [st_mod.RunRecord(ts(hours=30), duration_s=0)]  # a run from before the diagnostics: left out
+        rep = pilot.build_report(now=NOW, days=2, runs=runs, events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200, max_active=500)
+        m = rep["limits"]
+        self.assertEqual(m["timed_runs"], 24)
+        self.assertEqual(m["duration_s"]["max"], 340.0)
+        self.assertEqual(m["longest_run_pct_of_timeout"], round(100 * 340 / 1500, 1))
+        self.assertEqual((m["sheets_quota_rejections_retried"], m["groq_429"], m["ats_429"]), (1, 1, 0))
+        self.assertEqual(m["events_rows"], {"first": 1000 + 300 * 0, "last": 1000 + 300 * 23})
+        self.assertGreater(m["events_rows_per_day"], 0)
+        self.assertIsNotNone(m["projected_poll_s_at_max_active_boards"])
+        text = pilot.format_report(rep)
+        for needle in ("LIMITS AUDIT", "of the 1500 s timeout", "median seconds by phase", "Google Sheets requests per run", "quota about 60 per minute", "state size: Events rows", "not a measurement at that size"):
+            self.assertIn(needle, text)
+
+    def test_without_timed_runs_the_report_says_so(self) -> None:
+        text = pilot.format_report(pilot.build_report(now=NOW, days=1, runs=[], events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200))
+        self.assertIn("no timed runs yet", text)
