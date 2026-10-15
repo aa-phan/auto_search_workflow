@@ -1092,6 +1092,30 @@ def tracker_keys_from_urls(urls: Any) -> set[str]:
     return {i.key for i in (parse_job_url(u) for u in urls) if i}
 
 
+QUOTA_RETRY_WAITS = (20.0, 40.0, 65.0)  # Google's per-minute read/write quotas refill within a minute
+
+
+def quota_retrying(request: Callable[..., Any], *, sleep: Callable[[float], None] = time.sleep, waits: tuple[float, ...] = QUOTA_RETRY_WAITS) -> Callable[..., Any]:
+    """Wrap a gspread HTTP request so that HTTP 429 (quota exceeded) is retried after the quota window.
+
+    Only 429 is retried: Google rejected the request without executing it, so repeating it cannot duplicate
+    an append. Other errors (including 5xx, which may or may not have been applied) propagate unchanged.
+    Found live: two back-to-back runs exhausted the per-minute read quota and the second one crashed."""
+    import gspread
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for wait in (*waits, None):
+            try:
+                return request(*args, **kwargs)
+            except gspread.exceptions.APIError as exc:
+                if getattr(exc.response, "status_code", 0) != 429 or wait is None:
+                    raise
+                log.warning("Google Sheets quota exceeded (HTTP 429); retrying in %.0f s", wait)
+                sleep(wait)
+
+    return wrapper
+
+
 class SheetStore:
     """Google Sheet: Settings (user-edited), Job Tracker (append-only, user-facing), plus hidden
     state tabs (Boards, Events, Runs) managed by `SheetState`."""
@@ -1102,7 +1126,9 @@ class SheetStore:
         import gspread
 
         self.sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        self.sh = gspread.service_account_from_dict(load_service_account(credentials)).open_by_key(sheet_id)
+        client = gspread.service_account_from_dict(load_service_account(credentials))
+        client.http_client.request = quota_retrying(client.http_client.request)  # type: ignore[method-assign]
+        self.sh = client.open_by_key(sheet_id)
         self.state = SheetState(self.sh)
 
     def sheet_timezone(self) -> str | None:

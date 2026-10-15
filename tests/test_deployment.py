@@ -369,5 +369,46 @@ class CompletenessByDocumentedBehaviourTests(unittest.TestCase):
         self.assertTrue(getattr(out2, "complete", True))
 
 
+class SheetsQuotaTests(unittest.TestCase):
+    def api_error(self, code: int):
+        from unittest import mock
+
+        import gspread
+
+        resp = mock.Mock(status_code=code, text="x")
+        resp.json.return_value = {"error": {"code": code, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+        return gspread.exceptions.APIError(resp)
+
+    def test_429_is_retried_after_the_quota_window_and_then_succeeds(self) -> None:
+        from unittest import mock
+
+        calls = mock.Mock(side_effect=[self.api_error(429), self.api_error(429), "ok"])
+        slept: list[float] = []
+        self.assertEqual(h.quota_retrying(calls, sleep=slept.append)("GET", "x"), "ok")
+        self.assertEqual((slept, calls.call_count), ([20.0, 40.0], 3))
+
+    def test_it_gives_up_after_the_last_wait_and_never_retries_other_errors(self) -> None:
+        from unittest import mock
+
+        import gspread
+
+        always = mock.Mock(side_effect=lambda *a, **k: (_ for _ in ()).throw(self.api_error(429)))
+        with self.assertRaises(gspread.exceptions.APIError):
+            h.quota_retrying(always, sleep=NOSLEEP)("GET", "x")
+        self.assertEqual(always.call_count, 4)  # the first try plus three retries
+        for code in (400, 403, 500, 503):  # 5xx may have been applied: a retry could duplicate an append
+            once = mock.Mock(side_effect=self.api_error(code))
+            with self.assertRaises(gspread.exceptions.APIError):
+                h.quota_retrying(once, sleep=NOSLEEP)("POST", "x")
+            self.assertEqual(once.call_count, 1, code)
+
+    def test_arguments_and_results_pass_through_untouched(self) -> None:
+        from unittest import mock
+
+        inner = mock.Mock(return_value=42)
+        self.assertEqual(h.quota_retrying(inner, sleep=NOSLEEP)("GET", "/u", params={"a": 1}), 42)
+        inner.assert_called_once_with("GET", "/u", params={"a": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

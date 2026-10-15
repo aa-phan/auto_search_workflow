@@ -52,6 +52,9 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      # A run that crashed holding the state lease leaves it until its 30-minute TTL; the next run waits for it
+      # (up to 10 minutes) instead of failing.
+      STATE_LEASE_WAIT_SECONDS: "600"
       SEARCH_WINDOW_DAYS: ${{ vars.SEARCH_WINDOW_DAYS }} # optional; default 3 days. Scheduled discovery is always windowed (minimum 1).
     steps:
       - uses: actions/checkout@v4
