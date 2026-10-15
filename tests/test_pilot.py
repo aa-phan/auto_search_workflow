@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -321,3 +322,106 @@ class DiagnosticsTests(unittest.TestCase):
     def test_without_timed_runs_the_report_says_so(self) -> None:
         text = pilot.format_report(pilot.build_report(now=NOW, days=1, runs=[], events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200))
         self.assertIn("no timed runs yet", text)
+
+
+class RevalidationFlipTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 22, 6, 0, tzinfo=timezone.utc)
+
+    def board(self, name: str, *, open_: int, days_ago: float, status: str = bd.STATUS_VALIDATED, ats: str = bd.GREENHOUSE) -> bd.BoardRecord:
+        prev = (self.NOW - timedelta(days=days_ago)).strftime(bd.STAMP)
+        return bd.BoardRecord(ats, name, prev, "s", status, validation=bd.V_VALID, last_validated_at=prev, relevant_jobs=open_, eligible_jobs=open_, last_attempt_at=prev)
+
+    def validate(self, registry: dict, listings: dict):
+        import inventory as inv
+
+        def fetch(b: bd.BoardId) -> list:
+            v = listings[b.board]
+            if isinstance(v, Exception):
+                raise v
+            return v
+
+        gate = lambda t: None if "Marketing" in t else "no role"  # noqa: E731
+        return inv.run_validation(registry, save=lambda recs: None, now=self.NOW, fetch=fetch, title_gate=gate, limiter=inv.HostLimiter(intervals={}, sleep=lambda s: None, clock=lambda: 0.0), sleep=lambda s: None)
+
+    def jobs(self, board: str, *titles: str) -> list:
+        return [bd.ListedJob(bd.JobIdentity(bd.GREENHOUSE, board, str(i)), t, "u", "Remote") for i, t in enumerate(titles)]
+
+    def test_gains_and_losses_are_recorded_with_the_days_each_board_went_unchecked(self) -> None:
+        reg = {b.key: b for b in (
+            self.board("gained", open_=0, days_ago=8), self.board("lost", open_=2, days_ago=7.5),
+            self.board("steady_zero", open_=0, days_ago=9), self.board("steady_some", open_=1, days_ago=9),
+            self.board("flaky", open_=0, days_ago=9), self.board("gone", open_=0, days_ago=9),
+        )}  # fmt: skip
+        listings = {
+            "gained": self.jobs("gained", "Marketing Intern"), "lost": self.jobs("lost", "Engineer"), "steady_zero": self.jobs("steady_zero", "Engineer"),
+            "steady_some": self.jobs("steady_some", "Marketing Associate"), "flaky": bd.BoardError("HTTP 503"), "gone": bd.BoardGone("HTTP 404"),
+        }  # fmt: skip
+        summary = self.validate(reg, listings)
+        flips = {f["k"]: f for f in summary.flips}
+        self.assertEqual(set(flips), {"greenhouse|gained", "greenhouse|lost"})  # steady boards, a transient failure and a 404 are not events
+        self.assertEqual((flips["greenhouse|gained"]["d"], flips["greenhouse|gained"]["days"], flips["greenhouse|gained"]["was"], flips["greenhouse|gained"]["now"]), ("up", 8.0, 0, 1))
+        self.assertEqual((flips["greenhouse|lost"]["d"], flips["greenhouse|lost"]["days"]), ("down", 7.5))
+        self.assertEqual(summary.rechecked_validated, 4)  # gained, lost and the two steady boards: definite answers only
+
+    def test_a_first_validation_is_never_a_flip(self) -> None:
+        cand = bd.BoardRecord(bd.GREENHOUSE, "new", "t", "s", bd.STATUS_CANDIDATE)
+        summary = self.validate({cand.key: cand}, {"new": self.jobs("new", "Marketing Intern")})
+        self.assertEqual((summary.flips, summary.rechecked_validated), ([], 0))  # there is no previous check to compare with
+
+    def test_statistics_accumulate_across_runs_and_are_capped(self) -> None:
+        import inventory as inv
+
+        s1 = inv.ValidationSummary(rechecked_validated=10, flips=[{"k": "a", "d": "up", "days": 8.0, "was": 0, "now": 1, "at": "t"}, {"k": "b", "d": "down", "days": 7.0, "was": 1, "now": 0, "at": "t"}])
+        first = inv.merge_flip_stats(None, s1, self.NOW)
+        s2 = inv.ValidationSummary(rechecked_validated=5, flips=[{"k": "c", "d": "up", "days": 9.5, "was": 0, "now": 2, "at": "t"}])
+        data = json.loads(inv.merge_flip_stats(first, s2, self.NOW + timedelta(days=1)))
+        self.assertEqual((data["rechecks"], data["up"], data["down"], data["days_up"], data["days_down"]), (15, 2, 1, [8.0, 9.5], [7.0]))
+        big = inv.ValidationSummary(rechecked_validated=1, flips=[{"k": f"x{i}", "d": "up", "days": 7.0, "was": 0, "now": 1, "at": "t"} for i in range(500)])
+        capped = json.loads(inv.merge_flip_stats(None, big, self.NOW))
+        self.assertEqual((capped["up"], len(capped["events"]), len(capped["days_up"])), (500, inv.MAX_FLIP_SAMPLES, inv.MAX_FLIP_SAMPLES))  # the count stays exact, the samples are bounded
+        self.assertEqual(json.loads(inv.merge_flip_stats("not json", inv.ValidationSummary(), self.NOW))["rechecks"], 0)
+
+    def test_the_pilot_report_shows_the_flip_section(self) -> None:
+        import inventory as inv
+
+        stats = inv.merge_flip_stats(None, inv.ValidationSummary(rechecked_validated=200, flips=[
+            {"k": "greenhouse|a", "d": "up", "days": 8.0, "was": 0, "now": 1, "at": "t"}, {"k": "greenhouse|b", "d": "up", "days": 6.0, "was": 0, "now": 1, "at": "t"},
+            {"k": "greenhouse|c", "d": "down", "days": 7.0, "was": 1, "now": 0, "at": "t"}]), NOW)  # fmt: skip
+        boards = {"greenhouse|a": bd.BoardRecord("greenhouse", "a", "t", "s", bd.STATUS_ACTIVE), "greenhouse|b": bd.BoardRecord("greenhouse", "b", "t", "s", bd.STATUS_VALIDATED)}
+        rep = pilot.build_report(now=NOW, days=7, runs=[], events=[], boards=boards, discovery={"revalidation_stats": stats}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200)
+        r = rep["revalidation"]
+        self.assertEqual((r["rechecks"], r["gained"], r["lost"], r["gained_pct"]), (200, 2, 1, 1.0))
+        self.assertEqual((r["recent_gains_now_monitored"], r["recent_gains_waiting"]), (1, 1))
+        self.assertEqual(r["days_unchecked_when_gained"]["max"], 8.0)
+        text = pilot.format_report(rep)
+        self.assertIn("RE-CHECK FLIPS", text)
+        self.assertIn("200 re-checks", text)
+        empty = pilot.format_report(pilot.build_report(now=NOW, days=7, runs=[], events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200))
+        self.assertIn("no re-checks of validated boards recorded yet", empty)
+
+    def test_the_validation_command_records_the_statistics_without_ever_failing_the_run(self) -> None:
+        import argparse
+        from unittest import mock
+
+        import inventory as inv
+
+        state = mock.Mock()
+        state.load_boards.return_value = {}
+        state.load_discovery_state.return_value = {}
+        store = mock.Mock(state=state)
+        args = argparse.Namespace(dry_run=False, import_inventory=False, validate=True, allow_smartrecruiters=False, max_validations=1, max_seconds=1.0, max_revalidations=1,
+                                  source="all", inventory_cache=None, offline=False, inventory_report=False)  # fmt: skip
+        summary = inv.ValidationSummary(rechecked_validated=3, flips=[{"k": "k", "d": "up", "days": 8.0, "was": 0, "now": 1, "at": "t"}])
+        settings = h.Settings.from_values({"Resume_Text": "r" * 300})
+        with mock.patch.object(h.inventory, "run_validation", return_value=summary):
+            self.assertEqual(h.run_inventory(args, store, settings, None), 0)
+        saved = state.save_discovery_state.call_args.args[0]
+        self.assertEqual(json.loads(saved["revalidation_stats"])["up"], 1)
+        state.save_discovery_state.side_effect = RuntimeError("sheet down")
+        with mock.patch.object(h.inventory, "run_validation", return_value=summary):
+            self.assertEqual(h.run_inventory(args, store, settings, None), 0)  # a statistics failure is logged, not raised
+        state.save_discovery_state.reset_mock()
+        args.dry_run = True
+        with mock.patch.object(h.inventory, "run_validation", return_value=summary):
+            h.run_inventory(args, store, settings, None)
+        state.save_discovery_state.assert_not_called()  # a dry run writes nothing

@@ -1574,6 +1574,13 @@ def run_inventory(args: argparse.Namespace, store: Any, settings: Settings, excl
             max_boards=args.max_validations, max_seconds=args.max_seconds, allow_smartrecruiters=allow_sr,
             max_revalidations=args.max_revalidations,
         )  # fmt: skip
+    if summary is not None and not dry:
+        try:  # the re-check flip statistics for the pilot report (cumulative, in the Discovery tab)
+            values = state.load_discovery_state()
+            values[inventory.REVALIDATION_STATS_KEY] = inventory.merge_flip_stats(values.get(inventory.REVALIDATION_STATS_KEY), summary, now)
+            state.save_discovery_state(values, lg.stamp(now))
+        except Exception as exc:  # a statistics failure must never fail the validation run
+            log.warning("Could not record the re-check statistics: %s", exc)
     print(inventory.format_report(res, summary, boards_mod.registry_counts(registry)))
     if res and all(r.status == "failed" for r in res.overlap.per_source.values()):
         return 1

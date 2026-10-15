@@ -515,6 +515,59 @@ def revalidation_order(rec: BoardRecord) -> tuple[int, str, str]:
     return (1 if parsed else 0, basis if parsed else "", rec.key)
 
 
+def flip_event(key: str, before: tuple[str, str, int], rec: BoardRecord, res: "ValidationResult", now: datetime) -> dict[str, Any] | None:
+    """A board that was already validated and is checked again: did its number of relevant OPEN jobs cross zero?
+
+    `up` = it had none at the previous check and has some now: until this re-check it could not enter monitoring, so
+    `days_unchecked` is the longest that opportunity could have been missed (the previous check to this one).
+    `down` = it had some and has none. Anything else is not an event. Only a definite answer counts: a transient
+    failure or a missing previous check says nothing about the board."""
+    status, prev_at, prev_open = before
+    if status != STATUS_VALIDATED or not prev_at or res.outcome not in (V_VALID, V_EMPTY):
+        return None
+    now_open = bd.open_jobs(rec)
+    if (prev_open > 0) == (now_open > 0):
+        return None
+    prev = _age(prev_at, now)
+    return {
+        "k": key, "d": "up" if now_open > 0 else "down", "days": None if prev is None else round(prev.total_seconds() / 86400, 2),
+        "was": prev_open, "now": now_open, "at": now.strftime(STAMP),
+    }  # fmt: skip
+
+
+REVALIDATION_STATS_KEY = "revalidation_stats"  # Discovery-tab key: cumulative re-check flip statistics
+MAX_FLIP_SAMPLES = 400  # days-unchecked samples and recent events kept per direction
+
+
+def merge_flip_stats(raw: str | None, summary: "ValidationSummary", now: datetime) -> str:
+    """Fold one validation run's flips into the cumulative statistics (compact JSON for the Discovery tab).
+
+    Cumulative since `since`: re-checks of previously validated boards, boards that gained / lost relevant open
+    jobs, the days each had gone unchecked, and the most recent events. Answers: how many boards would a shorter
+    re-check interval have brought in sooner, and by how much?"""
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    stats: dict[str, Any] = {"since": data.get("since") or now.strftime(STAMP), "rechecks": 0, "up": 0, "down": 0, "days_up": [], "days_down": [], "events": []}
+    for k in ("rechecks", "up", "down"):
+        stats[k] = int(data.get(k) or 0)
+    for k in ("days_up", "days_down", "events"):
+        stats[k] = list(data.get(k) or [])
+    stats["rechecks"] += summary.rechecked_validated
+    for f in summary.flips:
+        stats[f["d"]] += 1
+        if f["days"] is not None:
+            stats["days_" + f["d"]].append(f["days"])
+        stats["events"].append(f)
+    for k in ("days_up", "days_down", "events"):
+        stats[k] = stats[k][-MAX_FLIP_SAMPLES:]
+    stats["last_run_at"] = now.strftime(STAMP)
+    return json.dumps(stats, separators=(",", ":"))
+
+
 def is_revalidation(rec: BoardRecord) -> bool:
     return rec.status in (STATUS_VALIDATED, STATUS_INVALID)
 
@@ -557,6 +610,10 @@ class ValidationSummary:
     attempted_revalidations: int = 0
     oldest_candidate_hours: int | None = None
     oldest_overdue_hours: int | None = None
+    # Re-check outcomes for boards that were `validated` before (see `flip_event`): how many gained or lost their
+    # relevant open jobs between two checks, and how long each had gone unchecked.
+    flips: list[dict[str, Any]] = field(default_factory=list)
+    rechecked_validated: int = 0
 
 
 def run_validation(
@@ -641,8 +698,13 @@ def run_validation(
                 summary.by_outcome[res.outcome] = summary.by_outcome.get(res.outcome, 0) + 1
                 summary.by_ats.setdefault(rec.ats, {}).setdefault(res.outcome, 0)
                 summary.by_ats[rec.ats][res.outcome] += 1
+                before = (rec.status, rec.last_validated_at, bd.open_jobs(rec))
                 if apply_validation(rec, res, now):
                     changed.append(rec)
+                    if flip := flip_event(rec.key, before, rec, res, now):
+                        summary.flips.append(flip)
+                    if before[0] == STATUS_VALIDATED and before[1] and res.outcome in (V_VALID, V_EMPTY):
+                        summary.rechecked_validated += 1
             if changed:
                 save(changed)  # batch persistence: progress survives a timeout
                 for r in changed:
@@ -784,8 +846,12 @@ def import_inventories(
 
 def format_report(res: ImportResult | None, summary: ValidationSummary | None, counts: dict[str, int]) -> str:
     lines: list[str] = []
+    flip_line = ""
+    if summary is not None:
+        up, down = sum(1 for f in summary.flips if f["d"] == "up"), sum(1 for f in summary.flips if f["d"] == "down")
+        flip_line = f"re-checks of already validated boards: {summary.rechecked_validated}; gained relevant open jobs {up}, lost them {down}"
     if res is None:
-        return _registry_lines(summary, counts)
+        return _registry_lines(summary, counts) + (("\n" + flip_line) if flip_line else "")
     ov = res.overlap
     lines += ["INVENTORY IMPORT", ""]
     lines.append(f"{'source':<14}{'status':<8}{'rows(all)':>10}{'rows(ours)':>11}{'rejected':>9}{'unique':>8}{'only here':>10}{'new to registry':>16}")
@@ -801,6 +867,8 @@ def format_report(res: ImportResult | None, summary: ValidationSummary | None, c
         if rep.note:
             lines.append(f"note [{s}]: {rep.note.strip()}")
     lines += _registry_lines(summary, counts).split("\n")
+    if flip_line:
+        lines.append(flip_line)
     return "\n".join(lines)
 
 

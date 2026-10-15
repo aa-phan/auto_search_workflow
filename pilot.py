@@ -14,7 +14,7 @@ from typing import Any
 
 import freshness as fr
 import ledger as lg
-from boards import MONITORED, BoardRecord
+from boards import MONITORED, STATUS_VALIDATED, BoardRecord
 from search import BUDGET_KEY, SearchBudget
 from state import RunRecord
 
@@ -210,7 +210,22 @@ def build_report(
         "events_rows_per_day": round((last_state.events_rows - first_state.events_rows) / span_days) if span_days else None,
         "sheet_cell_budget_note": "Google Sheets allows 10,000,000 cells per spreadsheet; Events has 7 columns and Boards 32",
     }  # fmt: skip
+    # ---- re-check flips: boards that gained their first relevant open job between two validations
+    stats = _json_dict(discovery.get("revalidation_stats"))
+    up_events = [e for e in stats.get("events", []) if isinstance(e, dict) and e.get("d") == "up"]
+    rechecks = int(stats.get("rechecks") or 0)
+    days_up = [float(d) for d in stats.get("days_up", []) if isinstance(d, (int, float))]
+    days_down = [float(d) for d in stats.get("days_down", []) if isinstance(d, (int, float))]
+    revalidation = {
+        "since": stats.get("since"), "rechecks": rechecks, "gained": int(stats.get("up") or 0), "lost": int(stats.get("down") or 0),
+        "gained_pct": round(100 * int(stats.get("up") or 0) / rechecks, 1) if rechecks else None,
+        "days_unchecked_when_gained": _stats(days_up), "days_unchecked_when_lost": _stats(days_down),
+        "recent_gains_now_monitored": sum(1 for e in up_events if (b := boards.get(e.get("k", ""))) and b.status in MONITORED),
+        "recent_gains_waiting": sum(1 for e in up_events if (b := boards.get(e.get("k", ""))) and b.status == STATUS_VALIDATED),
+        "recent_gains_listed": len(up_events),
+    }  # fmt: skip
     return {
+        "revalidation": revalidation,
         "limits": limits,
         "window": {"days": days, "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "fresh_window_hours": window_minutes / 60},
         "polling": polling, "relevant_fresh_jobs_by_source": by_source, "delivery": delivery, "failures": failures,
@@ -226,6 +241,17 @@ def _json_dict(raw: str | None) -> dict[str, Any]:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _revalidation_lines(r: dict[str, Any]) -> list[str]:
+    if not r["rechecks"]:
+        return ["  no re-checks of validated boards recorded yet (the first re-check of a board happens 7 days after its first validation)"]
+    return [
+        f"  since {r['since']}: {r['rechecks']} re-checks of boards that were already validated; {r['gained']} gained relevant open jobs ({r['gained_pct']}%), {r['lost']} lost them",
+        f"  days since the previous check, boards that gained: {_fmt_stats(r['days_unchecked_when_gained'], 'd')} (the longest a first relevant job could have gone unseen; the weekly cycle caps it at about 7)",
+        f"  of the {r['recent_gains_listed']} most recent gains: {r['recent_gains_now_monitored']} are monitored now, {r['recent_gains_waiting']} still wait for a slot",
+        "  reading: a high gained share means a shorter interval would bring boards in sooner; a near-zero share means weekly is enough. A gain is only a missed FRESH job if the job was published within the window before the check.",
+    ]
 
 
 def _limits_lines(m: dict[str, Any]) -> list[str]:
@@ -300,6 +326,9 @@ def format_report(rep: dict[str, Any]) -> str:
         lr = c["last_run"]
         lines.append(f"  last run {lr['at']}: established {lr['established']}, exploration {lr['exploration']}, relevant boards waiting {lr['relevant_waiting']}, relevant-board coverage {lr['relevant_board_coverage_pct']}%")
     lines += [
+        "",
+        "RE-CHECK FLIPS (does a 7-day re-check interval miss boards?)",
+    ] + _revalidation_lines(rep["revalidation"]) + [
         "",
         "LIMITS AUDIT (measured per run; not a verdict)",
     ] + _limits_lines(rep["limits"]) + [
