@@ -425,3 +425,54 @@ class RevalidationFlipTests(unittest.TestCase):
         with mock.patch.object(h.inventory, "run_validation", return_value=summary):
             h.run_inventory(args, store, settings, None)
         state.save_discovery_state.assert_not_called()  # a dry run writes nothing
+
+
+class StatusColorsTests(unittest.TestCase):
+    def requests_of(self, sh: FakeSpreadsheet) -> list[dict]:
+        return [r for body in getattr(sh, "batches", []) for r in body["requests"]]
+
+    def rules(self, sh: FakeSpreadsheet) -> dict[str, dict]:
+        return {r["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"][0]["userEnteredValue"]: r["addConditionalFormatRule"]["rule"]
+                for r in self.requests_of(sh) if "addConditionalFormatRule" in r}  # fmt: skip
+
+    def test_a_rejected_status_exists_and_only_user_set_statuses_get_a_colour(self) -> None:
+        self.assertEqual(h.STATUS_CHOICES, ["To Apply", "Stretch / Review", "Applied", "Interviewing", "Offer", "Pass", "Rejected"])
+        self.assertEqual(set(h.STATUS_ROW_COLORS), {"Applied", "Interviewing", "Offer", "Pass", "Rejected"})  # the two the app writes keep the default look
+        self.assertEqual(len(set(h.STATUS_ROW_COLORS.values())), 5)  # five distinguishable colours
+
+    def test_a_new_tracker_gets_the_dropdown_and_one_row_rule_per_status(self) -> None:
+        sh = FakeSpreadsheet([FakeWorksheet("Sheet1", [])])
+        sheet_store(sh).bootstrap("R")
+        rules = self.rules(sh)
+        self.assertEqual(set(rules), {f'=$C2="{s}"' for s in h.STATUS_ROW_COLORS})
+        for formula, rule in rules.items():
+            rng = rule["ranges"][0]
+            self.assertEqual((rng["startRowIndex"], rng["startColumnIndex"], rng["endColumnIndex"]), (1, 0, len(h.TRACKER_COLUMNS)))  # the whole row, header excluded
+            self.assertEqual(rule["booleanRule"]["condition"]["type"], "CUSTOM_FORMULA")
+        self.assertEqual(rules['=$C2="Rejected"']["booleanRule"]["format"]["backgroundColor"], {"red": 0.98, "green": 0.8, "blue": 0.8})
+        status_dropdowns = [r["setDataValidation"] for r in self.requests_of(sh) if "setDataValidation" in r and r["setDataValidation"]["range"]["startColumnIndex"] == 2]
+        values = [v["userEnteredValue"] for v in status_dropdowns[0]["rule"]["condition"]["values"]]
+        self.assertIn("Rejected", values)
+
+    def test_an_existing_tracker_gets_the_new_status_and_only_the_missing_rules_without_touching_a_cell(self) -> None:
+        rows = [list(h.TRACKER_COLUMNS), ["d", "p", "Applied", 80, "Acme", "NYC", "v", "g", "https://boards.greenhouse.io/acme/jobs/1", "note", "Verified fresh", "Board poll", "Maybe"]]
+        tracker = FakeWorksheet("Job Tracker", [list(r) for r in rows])
+        sh = FakeSpreadsheet([FakeWorksheet("Settings", [["Setting", "Value", "Instructions"]]), tracker])
+        sh.metadata = {"sheets": [{"properties": {"sheetId": tracker.id}, "conditionalFormats": [
+            {"booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": '=$C2="Applied"'}]}}},
+            {"booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": '=$C2="Offer"'}]}}}]}]}  # fmt: skip
+        sheet_store(sh).bootstrap("R")
+        self.assertEqual(set(self.rules(sh)), {'=$C2="Interviewing"', '=$C2="Pass"', '=$C2="Rejected"'})  # Applied and Offer already had theirs
+        self.assertEqual((tracker.values, tracker.appended), (rows, []))  # no cell was written: the user's status, notes and feedback are intact
+        full = FakeSpreadsheet([FakeWorksheet("Settings", [["Setting", "Value", "Instructions"]]), tracker])
+        full.metadata = {"sheets": [{"properties": {"sheetId": tracker.id}, "conditionalFormats": [
+            {"booleanRule": {"condition": {"values": [{"userEnteredValue": f'=$C2="{s}"'}]}}} for s in h.STATUS_ROW_COLORS]}]}  # fmt: skip
+        sheet_store(full).bootstrap("R")
+        self.assertEqual(self.rules(full), {})  # idempotent: nothing is added twice
+
+    def test_a_formatting_failure_never_breaks_startup(self) -> None:
+        class Boom(FakeSpreadsheet):
+            def batch_update(self, body: dict) -> None:
+                raise RuntimeError("quota")
+
+        sheet_store(Boom([FakeWorksheet("Sheet1", [])])).bootstrap("R")  # cosmetic: logged and skipped

@@ -137,7 +137,7 @@ Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defa
 | Column | Meaning |
 |---|---|
 | `Date_Found` / `Date_Posted` | When we found it / when the company published it (blank if the company gives none) |
-| `My_Status` | Starts as **To Apply** (score at or above `Min_Alert_Score`) or **Stretch / Review**. **Yours to change**: `Applied` → `Interviewing` → `Offer` / `Pass` |
+| `My_Status` | Starts as **To Apply** (score at or above `Min_Alert_Score`) or **Stretch / Review**. **Yours to change**: `Applied` → `Interviewing` → `Offer`, or `Pass` (you decided against it) or `Rejected` (the employer turned you down). The row changes colour when you set one of these (blue Applied, yellow Interviewing, green Offer, grey Pass, red Rejected); `To Apply` and `Stretch / Review` keep the default look, so a coloured row always means you've acted on it |
 | `AI_Score`, `AI_Verdict`, `Missing_Gaps` | 0–100 fit, a one-sentence reason, and what you're missing |
 | `Company_and_Title`, `Location` | The job |
 | `Apply_URL` | Click to apply |

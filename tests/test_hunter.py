@@ -489,7 +489,10 @@ class FakeSpreadsheet:
         del self.tabs[ws.title]
 
     def batch_update(self, body: dict) -> None:
-        pass
+        self.batches = getattr(self, "batches", []) + [body]
+
+    def fetch_sheet_metadata(self) -> dict:
+        return getattr(self, "metadata", {"sheets": []})
 
 
 def sheet_store(sh: FakeSpreadsheet) -> h.SheetStore:

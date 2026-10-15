@@ -92,7 +92,18 @@ STATUS_STRETCH = "Stretch / Review"
 STATUS_FILTERED = "Filtered Out"
 STATUS_CLOSED = "Closed (404)"  # dead link: recorded so it's never re-fetched
 STATUS_ERROR = "Unjudged / Error"
-STATUS_CHOICES = [STATUS_APPLY, STATUS_STRETCH, "Applied", "Interviewing", "Offer", "Pass"]
+STATUS_REJECTED = "Rejected"  # the user's: an employer turned the application down
+STATUS_CHOICES = [STATUS_APPLY, STATUS_STRETCH, "Applied", "Interviewing", "Offer", "Pass", STATUS_REJECTED]
+# Row colours for the statuses the user sets by hand (RGB 0-1). "To Apply" and "Stretch / Review" are what the app
+# writes, so they keep the default look: a coloured row therefore always means "the user has acted on this".
+STATUS_ROW_COLORS: dict[str, tuple[float, float, float]] = {
+    "Applied": (0.80, 0.88, 0.99),  # blue
+    "Interviewing": (1.00, 0.95, 0.70),  # yellow
+    "Offer": (0.78, 0.93, 0.78),  # green
+    "Pass": (0.88, 0.88, 0.88),  # grey
+    STATUS_REJECTED: (0.98, 0.80, 0.80),  # red
+}
+STATUS_COLUMN_LETTER = "C"  # My_Status
 
 ATS_SITES = [
     "boards.greenhouse.io",
@@ -1170,11 +1181,14 @@ class SheetStore:
             self._style(ws, header="A1:M1", widths=widths)
             self._status_dropdown(ws)
             self._feedback_dropdown(ws)
+            self._status_row_colors(ws)
             tabs[TRACKER_TAB] = ws
             created = True
             log.info("Created the %s tab", TRACKER_TAB)
         else:
             self._ensure_feedback_column(tabs[TRACKER_TAB])
+            self._status_dropdown(tabs[TRACKER_TAB])  # idempotent: adds "Rejected" to an older tracker's list (values are never touched)
+            self._status_row_colors(tabs[TRACKER_TAB])
         self.state.ensure()
         if created:  # tidy: drop the blank default tab Google creates with a new spreadsheet
             for name in ("Sheet1", "Sheet 1"):
@@ -1201,6 +1215,33 @@ class SheetStore:
 
     def _status_dropdown(self, ws: Any) -> None:
         self._dropdown(ws, 2, STATUS_CHOICES, "Status")
+
+    def _status_row_colors(self, ws: Any) -> None:
+        """Colour a tracker row by the status the user set (conditional formatting on column C; nothing is written
+        to any cell). Idempotent: a rule that already exists, matched by its formula, is not added again."""
+        try:
+            existing: set[str] = set()
+            meta = self.sh.fetch_sheet_metadata() if hasattr(self.sh, "fetch_sheet_metadata") else {}
+            for sheet in (meta or {}).get("sheets", []):
+                if (sheet.get("properties") or {}).get("sheetId") == ws.id:
+                    for rule in sheet.get("conditionalFormats", []) or []:
+                        for v in ((rule.get("booleanRule") or {}).get("condition") or {}).get("values", []) or []:
+                            existing.add(str(v.get("userEnteredValue", "")))
+            requests_: list[dict[str, Any]] = []
+            for status, (r, g, b) in STATUS_ROW_COLORS.items():
+                formula = f'=${STATUS_COLUMN_LETTER}2="{status}"'
+                if formula in existing:
+                    continue
+                requests_.append({"addConditionalFormatRule": {"index": 0, "rule": {
+                    "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2000, "startColumnIndex": 0, "endColumnIndex": len(TRACKER_COLUMNS)}],
+                    "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                                    "format": {"backgroundColor": {"red": r, "green": g, "blue": b}}},
+                }}})  # fmt: skip
+            if requests_:
+                self.sh.batch_update({"requests": requests_})
+                log.info("Added %d status row colours to the Job Tracker", len(requests_))
+        except Exception as exc:  # cosmetic
+            log.warning("Status row colours skipped: %s", exc)
 
     def _feedback_dropdown(self, ws: Any) -> None:
         self._dropdown(ws, FEEDBACK_COLUMN, FEEDBACK_CHOICES, "Feedback")
