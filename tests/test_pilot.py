@@ -49,6 +49,21 @@ class FeedbackColumnTests(unittest.TestCase):
         sheet_store(FakeSpreadsheet([FakeWorksheet("Settings", [["Setting", "Value", "Instructions"]]), again])).bootstrap("R")
         self.assertEqual(again.values[1][-1], "Would apply")  # a complete header is never rewritten; the user's label stays
 
+    def test_the_tracker_creation_message_appears_only_when_the_tab_is_really_created(self) -> None:
+        existing = FakeWorksheet("Job Tracker", [list(h.TRACKER_COLUMNS)])
+        with self.assertNoLogs("hunter", level="INFO") as _:
+            pass
+        import logging
+
+        with self.assertLogs("hunter", level="INFO") as made:
+            sheet_store(FakeSpreadsheet([FakeWorksheet("Settings", [["Setting", "Value", "Instructions"]])])).bootstrap("R")
+            logging.getLogger("hunter").info("sentinel")
+        self.assertTrue(any("Created the Job Tracker tab" in m for m in made.output))
+        with self.assertLogs("hunter", level="INFO") as kept:
+            sheet_store(FakeSpreadsheet([FakeWorksheet("Settings", [["Setting", "Value", "Instructions"]]), existing])).bootstrap("R")
+            logging.getLogger("hunter").info("sentinel")
+        self.assertFalse(any("Created the Job Tracker tab" in m for m in kept.output))
+
     def test_csv_tracker_migration_keeps_existing_values_and_adds_the_column(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "t.csv"

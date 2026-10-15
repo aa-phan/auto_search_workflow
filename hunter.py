@@ -1138,9 +1138,9 @@ class SheetStore:
             self._feedback_dropdown(ws)
             tabs[TRACKER_TAB] = ws
             created = True
+            log.info("Created the %s tab", TRACKER_TAB)
         else:
             self._ensure_feedback_column(tabs[TRACKER_TAB])
-            log.info("Created the %s tab", TRACKER_TAB)
         self.state.ensure()
         if created:  # tidy: drop the blank default tab Google creates with a new spreadsheet
             for name in ("Sheet1", "Sheet 1"):
