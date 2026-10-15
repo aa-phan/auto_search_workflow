@@ -218,7 +218,7 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_workflows_cannot_commit_runtime_state_or_write_the_repository(self) -> None:
         for f in (ROOT / ".github" / "workflows").glob("*.yml"):
             text = f.read_text()
-            self.assertIn("contents: read", text, f.name)
+            self.assertTrue("contents: read" in text or "permissions: {}" in text, f.name)  # read-only, or no permissions at all (the probe)
             for forbidden in ("git push", "git commit", "git add", "contents: write"):
                 self.assertNotIn(forbidden, text, f"{f.name}: {forbidden}")
 
@@ -242,6 +242,17 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIsNone(inv.policy_blocks("smartrecruiters", allow_smartrecruiters=True))
         self.assertIsNotNone(inv.policy_blocks("smartrecruiters", allow_smartrecruiters=False))  # the default is still parked
         self.assertIn("ALLOW_SMARTRECRUITERS_BULK", (ROOT / "hunter.py").read_text().split("config_notes.append(\"SmartRecruiters is polled")[0][-200:])
+
+    def test_external_dispatches_are_recorded_separately_from_manual_and_scheduled_runs(self) -> None:
+        self.assertEqual(h.run_trigger("workflow_dispatch", "external-hourly"), "workflow_dispatch:external")
+        self.assertEqual(h.run_trigger("workflow_dispatch", ""), "workflow_dispatch")
+        self.assertEqual(h.run_trigger("workflow_dispatch", None), "workflow_dispatch")
+        self.assertEqual(h.run_trigger("schedule", "external-hourly"), "schedule")  # a schedule run can never be relabelled
+        self.assertEqual(h.run_trigger(None, None), "local")
+        self.assertEqual(h.run_trigger("workflow_dispatch", "  ;rm -rf /  "), "workflow_dispatch:external")  # odd input is reduced to safe characters
+        text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
+        self.assertIn("trigger_source:", text)
+        self.assertIn("TRIGGER_SOURCE: ${{ inputs.trigger_source }}", text)
 
     def test_workflows_never_print_secrets_and_use_only_the_documented_ones(self) -> None:
         used: set[str] = set()

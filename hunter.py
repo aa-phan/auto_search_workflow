@@ -1480,6 +1480,15 @@ def load_resume_file(path: Path = RESUME_PATH) -> str:
 LEASE_TTL = {"poller": timedelta(minutes=30), "inventory": timedelta(minutes=45)}  # a little over each workflow's run limit
 
 
+def run_trigger(event: str | None, source: str | None) -> str:
+    """What started the run, recorded in Runs.Notes. A dispatch from an external hourly trigger is
+    `workflow_dispatch:external`: it keeps manual dispatches and GitHub's own `schedule` runs distinguishable,
+    because only `schedule` shows that GitHub's scheduler fires."""
+    event = (event or "").strip() or "local"
+    clean = "".join(c for c in (source or "").strip().lower() if c.isalnum() or c in "-_")[:20]
+    return f"{event}:external" if event == "workflow_dispatch" and clean else event
+
+
 def local_write_refusal(*, uses_sheet: bool, in_actions: bool, allow_local: bool) -> str | None:
     """Production writes happen only in the serialized GitHub workflows (D-37). A Sheet lease is a read
     followed by a write: two writers can both believe they hold it (tests/test_deployment.py shows the
@@ -1792,7 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
         rotation_slots=rotation_slots(settings) if settings.roles else [],
         allow_smartrecruiters=(os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1",
         config_notes=config_notes,
-        trigger=(os.getenv("GITHUB_EVENT_NAME") or "local").strip() or "local",
+        trigger=run_trigger(os.getenv("GITHUB_EVENT_NAME"), os.getenv("TRIGGER_SOURCE")),
         hydrate_listed=make_search_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),
         max_age_days=settings.max_age_days,

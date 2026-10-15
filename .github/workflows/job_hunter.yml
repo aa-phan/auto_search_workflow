@@ -24,6 +24,11 @@ on:
         description: "Print the pilot measurements for the last 7 days (polling gaps, fresh jobs by source, latency, failures, search usage, coverage, your feedback); changes nothing"
         type: boolean
         default: false
+      trigger_source:
+        description: "Set by an external hourly trigger (for example cron-job.org) so the run is recorded as external, not as a manual one. Leave empty when dispatching by hand."
+        type: string
+        default: ""
+        required: false
       delivery_test:
         description: "Send ONE clearly labelled synthetic job through scoring -> tracker -> Telegram to your TELEGRAM_CHAT_ID (you are authorizing that recipient by ticking this)"
         type: boolean
@@ -54,6 +59,7 @@ jobs:
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
       # A run that crashed holding the state lease leaves it until its 30-minute TTL; the next run waits for it
       # (up to 10 minutes) instead of failing.
+      TRIGGER_SOURCE: ${{ inputs.trigger_source }}
       STATE_LEASE_WAIT_SECONDS: "600"
       # Explicit user decision for the pilot (DECISIONS D-38): poll SmartRecruiters although its robots.txt asks
       # generic crawlers to stay out. Remove this line to park SmartRecruiters again (history is kept).
