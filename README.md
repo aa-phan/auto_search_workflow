@@ -4,7 +4,7 @@ Watches company job boards around the clock, spots **newly published** jobs, has
 
 **After the one-time setup below, you never touch code.** You change your search by editing the Google Sheet, and you track applications in the same sheet.
 
-> **Read this first: what it can and cannot promise.** It only sees jobs on company boards it has *discovered* (Greenhouse, Lever, Ashby, Workable and SmartRecruiters). Jobs on other systems, on company websites, or only on LinkedIn/Indeed are invisible to it, and it does **not** promise to beat those sites. What it does promise: for every board it watches, a new posting is noticed within about an hour (GitHub's scheduler can run late), and an alert is only labelled "fresh" when the company's own data proves the job was published in the last few hours.
+> **Read this first: what it can and cannot promise.** It only sees jobs on company boards it has *discovered* (Greenhouse, Lever, Ashby, Workable and SmartRecruiters; SmartRecruiters is read only because the pilot's owner chose to override its `robots.txt` request, see `DECISIONS.md` D-38). Jobs on other systems, on company websites, or only on LinkedIn/Indeed are invisible to it, and it does **not** promise to beat those sites. What it does promise: for every board it watches, a new posting is noticed within about an hour (GitHub's scheduler can run late), and an alert is only labelled "fresh" when the company's own data proves the job was published in the last few hours.
 
 ```
 Web search (Tavily) ──► finds company job boards ──► board list (grows over time)

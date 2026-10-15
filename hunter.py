@@ -1712,6 +1712,8 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Tracker dates shown in %s (from %s)", store.display_tz, tz_source)
     if tz_warning:
         config_notes.append(tz_warning)
+    if (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1":
+        config_notes.append("SmartRecruiters is polled by explicit decision although its robots.txt disallows generic crawlers (ALLOW_SMARTRECRUITERS_BULK=1)")
     for note in config_notes:
         log.warning("Settings: %s", note)
     if args.search_usage:

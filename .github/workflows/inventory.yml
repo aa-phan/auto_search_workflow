@@ -72,6 +72,7 @@ jobs:
       - name: Refresh inventories and validate new boards
         env:
           STATE_LEASE_WAIT_SECONDS: "900" # wait for a crashed run's lease (30 min TTL) instead of failing
+          ALLOW_SMARTRECRUITERS_BULK: "1" # explicit user decision for the pilot (DECISIONS D-38); remove to park SmartRecruiters again
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
         run: |

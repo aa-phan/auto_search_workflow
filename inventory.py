@@ -338,7 +338,7 @@ def overlap_report(by_source: dict[str, list[Candidate]], reports: dict[str, Sou
 # --------------------------------------------------------------------------- validation policy
 
 # Per-provider spacing between requests (seconds). Lever publishes `Crawl-delay: 1`.
-MIN_INTERVAL = {LEVER: 1.0, GREENHOUSE: 0.1, ASHBY: 0.1, WORKABLE: 0.25, SMARTRECRUITERS: 0.5}
+MIN_INTERVAL = {LEVER: 1.0, GREENHOUSE: 0.1, ASHBY: 0.1, WORKABLE: 0.25, SMARTRECRUITERS: 1.0}  # SmartRecruiters is slowed to Lever's pace because its robots.txt asks crawlers to stay out (D-38)
 SR_POLICY = (
     "api.smartrecruiters.com/robots.txt disallows generic crawlers on every path; bulk validation "
     "is off unless ALLOW_SMARTRECRUITERS_BULK=1"

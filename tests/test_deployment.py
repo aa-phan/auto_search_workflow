@@ -233,6 +233,16 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("(inputs.pilot_report || inputs.rebalance_report) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
         self.assertIn('required="$required TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"', text)
 
+    def test_smartrecruiters_override_is_explicit_in_both_workflows_slowed_and_announced(self) -> None:
+        import inventory as inv
+
+        for name in ("job_hunter.yml", "inventory.yml"):
+            self.assertIn('ALLOW_SMARTRECRUITERS_BULK: "1"', (ROOT / ".github" / "workflows" / name).read_text())
+        self.assertGreaterEqual(inv.MIN_INTERVAL["smartrecruiters"], 1.0)
+        self.assertIsNone(inv.policy_blocks("smartrecruiters", allow_smartrecruiters=True))
+        self.assertIsNotNone(inv.policy_blocks("smartrecruiters", allow_smartrecruiters=False))  # the default is still parked
+        self.assertIn("ALLOW_SMARTRECRUITERS_BULK", (ROOT / "hunter.py").read_text().split("config_notes.append(\"SmartRecruiters is polled")[0][-200:])
+
     def test_workflows_never_print_secrets_and_use_only_the_documented_ones(self) -> None:
         used: set[str] = set()
         for f in (ROOT / ".github" / "workflows").glob("*.yml"):
