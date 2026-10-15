@@ -228,6 +228,11 @@ class RepositoryHygieneTests(unittest.TestCase):
             self.assertIn(needle, text)
         self.assertIn("GITHUB_EVENT_NAME", (ROOT / "hunter.py").read_text())
 
+    def test_telegram_is_required_for_every_run_that_can_deliver_but_not_for_the_read_only_reports(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
+        self.assertIn("(inputs.pilot_report || inputs.rebalance_report) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
+        self.assertIn('required="$required TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"', text)
+
     def test_workflows_never_print_secrets_and_use_only_the_documented_ones(self) -> None:
         used: set[str] = set()
         for f in (ROOT / ".github" / "workflows").glob("*.yml"):
