@@ -453,7 +453,7 @@ def chart_request(ch: Chart, idx: int, sheet_id: int) -> dict[str, Any]:
     if ch.kind != "donut":
         r0 -= 1  # include the header row: it names each series in the legend (headerCount 1)
     domain = {"domain": {"sourceRange": {"sources": [_range(sheet_id, col, r0, r1)]}}}
-    series = [{"series": {"sourceRange": {"sources": [_range(sheet_id, c, r0, r1)]}}, "targetAxis": "LEFT_AXIS", "color": _rgb(colr)} for c, colr in ch.series]
+    series = [{"series": {"sourceRange": {"sources": [_range(sheet_id, c, r0, r1)]}}, "targetAxis": "BOTTOM_AXIS" if ch.kind == "bar" else "LEFT_AXIS", "color": _rgb(colr)} for c, colr in ch.series]  # the live API: bar-chart series may only target the bottom axis
     if ch.kind == "donut":
         spec: dict[str, Any] = {"pieChart": {"legendPosition": "RIGHT_LEGEND", "domain": domain["domain"], "series": series[0]["series"], "pieHole": 0.55}}
     else:

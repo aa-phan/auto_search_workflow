@@ -29,6 +29,10 @@ on:
         type: string
         default: ""
         required: false
+      dashboard:
+        description: "Only rebuild the Dashboard tab from the existing state (no polling, scoring, discovery or alerts); writes only that tab"
+        type: boolean
+        default: false
       delivery_test:
         description: "Send ONE clearly labelled synthetic job through scoring -> tracker -> Telegram to your TELEGRAM_CHAT_ID (you are authorizing that recipient by ticking this)"
         type: boolean
@@ -83,7 +87,7 @@ jobs:
       # rebalance) do not deliver, so they may run before Telegram is configured.
       - name: Check configuration
         env:
-          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report) && 'no' || 'yes' }}
+          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report || inputs.dashboard) && 'no' || 'yes' }}
         run: |
           missing=""
           required="GROQ_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON GOOGLE_SHEET_ID"
@@ -100,7 +104,7 @@ jobs:
       # every search path). When the month's credits are used up, discovery is skipped and polling continues.
       # Unfiltered search only runs when 'backfill' is ticked by hand.
       - name: Poll boards, detect new jobs, score, deliver
-        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test }}
+        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test && !inputs.dashboard }}
         run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
 
       # Read-only reports (tick by hand): they read the registry, ledger, Runs and tracker and write nothing.
@@ -116,3 +120,8 @@ jobs:
       - name: Delivery test (labelled synthetic job)
         if: ${{ inputs.delivery_test }}
         run: python hunter.py --delivery-test --to "$TELEGRAM_CHAT_ID"
+
+      # Rebuilds the generated Dashboard tab only (nothing else is read for decisions or written).
+      - name: Dashboard refresh only
+        if: ${{ inputs.dashboard }}
+        run: python hunter.py --dashboard

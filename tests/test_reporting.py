@@ -623,6 +623,13 @@ class DashboardTabTests(unittest.TestCase):
         self.assertEqual([i for i, r in enumerate(second) if "deleteEmbeddedObject" in r], list(range(6)))  # deleted before anything is re-added
         self.assertEqual(second[6:], first)
 
+    def test_bar_chart_series_target_the_bottom_axis_as_the_live_api_requires(self) -> None:
+        grid = db.render(self.sample())
+        specs = {ch.kind: db.chart_request(ch, i, 9)["addChart"]["chart"]["spec"] for i, ch in enumerate(grid.charts)}
+        self.assertEqual({s["targetAxis"] for s in specs["bar"]["basicChart"]["series"]}, {"BOTTOM_AXIS"})
+        self.assertEqual([a["position"] for a in specs["bar"]["basicChart"]["axis"]], ["LEFT_AXIS", "BOTTOM_AXIS"])
+        self.assertEqual({s["targetAxis"] for s in specs["column"]["basicChart"]["series"]}, {"LEFT_AXIS"})
+
     def test_chart_data_block_is_chronological_blank_for_unknown_and_matches_the_summary(self) -> None:
         sm = self.sample()
         grid = db.render(sm)

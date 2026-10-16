@@ -230,7 +230,7 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_telegram_is_required_for_every_run_that_can_deliver_but_not_for_the_read_only_reports(self) -> None:
         text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
-        self.assertIn("(inputs.pilot_report || inputs.rebalance_report) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
+        self.assertIn("(inputs.pilot_report || inputs.rebalance_report || inputs.dashboard) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
         self.assertIn('required="$required TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"', text)
 
     def test_smartrecruiters_override_is_explicit_in_both_workflows_slowed_and_announced(self) -> None:
