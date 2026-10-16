@@ -20,7 +20,8 @@ Previous change (D-17..D-21): scheduled discovery is a persistent rotation of da
 | Run-start record visible during a run; one record per run; failed / degraded outcomes; gap ignores interrupted runs | pass | **mocked** |
 | Dashboard tab written in one batch, only that tab, tracker feedback untouched, rerun identical, failure contained | pass | **mocked** (fake spreadsheet: request shapes are NOT validated by the real Sheets API) |
 | Charts, sparklines and the compact layout (D-41): every request validated against Google's Sheets v4 discovery schema (0 problems); chart data block, fixed ids and delete-then-add checked | pass | **mocked** + schema (not rendered) |
-| Rendered tab inspected in a real Sheet; first refresh; `Runs` header widening to 65 columns; Actions run | **not verified** | no Sheet credentials / GitHub repository here |
+| Dashboard rendered in the real Sheet and inspected through the user's signed-in Chrome (fonts, hidden data block, four charts, cards, tables render; the Sheets API accepted the batch) | pass | **live** (one Sheet, one browser size) |
+| Rendered tab inspected in a real Sheet (earlier note, superseded above); first refresh; `Runs` header widening to 65 columns; Actions run | **not verified** | no Sheet credentials / GitHub repository here |
 
 **Remaining setup:** none required (the tab and the new `Runs` columns are created on the first run). Rows written before this change show `n/a` for the new fields. Open items: view the first real render (column widths, merged cells, colours) and adjust; the daily Telegram digest and the independent missed-run watchdog are documented in SPEC and not built.
 
