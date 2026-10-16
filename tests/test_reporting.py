@@ -635,9 +635,10 @@ class DashboardTabTests(unittest.TestCase):
         grid = db.render(sm)
         col = lambda j: [grid.rows[r][db.DATA_COL + j].value for r in range(2, 2 + db.CHART_DAYS)]  # noqa: E731
         dates = col(0)
-        label = lambda iso: f"{int(iso[5:7])}/{int(iso[8:10])}"  # noqa: E731
-        self.assertEqual(dates, [label(d["date"]) for d in reversed(sm["trend"][: db.CHART_DAYS])])  # oldest first, short labels
-        self.assertEqual(dates[-1], label(sm["trend"][0]["date"]))
+        days = [d["date"] for d in reversed(sm["trend"][: db.CHART_DAYS])]
+        expected = [f"{int(iso[5:7])}/{int(iso[8:10])}" if i == 0 or int(iso[8:10]) == 1 else str(int(iso[8:10])) for i, iso in enumerate(days)]
+        self.assertEqual(dates, expected)  # oldest first; day numbers (month shown on the first label and on the 1st) keep the axis horizontal
+        self.assertEqual(days, sorted(days))
         newest = sm["trend"][0]
         self.assertEqual((col(1)[-1], col(4)[-1], col(6)[-1]), (newest["new_postings"], newest["alerts_delivered"], newest["runs_ok"]))
         self.assertEqual(col(1)[0], "")  # a day before anything was recorded is blank (unknown), not 0

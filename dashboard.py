@@ -22,10 +22,10 @@ import reporting as rp
 log = logging.getLogger("hunter")
 
 DASHBOARD_TAB = "Dashboard"
-COLUMNS = 10  # the visible page, columns A..J
-DATA_COL = 11  # chart data block starts at column L
+COLUMNS = 9  # the visible page, columns A..I
+DATA_COL = 10  # chart data block starts at column K (column J is a hidden gap)
 TOTAL_COLUMNS = 21  # A..U
-WIDTHS = [270] + [92] * 9 + [20] + [74] * 10  # pixels: page columns A..J, a gap, then the hidden data block
+WIDTHS = [190] + [100] * 8 + [20] + [74] * 11  # pixels: page columns A..J, a gap, then the hidden data block
 UNKNOWN = "n/a"  # unknown / not recorded: never shown as 0
 CHART_DAYS = 14
 FONT = "Inter"  # one family throughout; Google Sheets falls back to its default if a font is unavailable
@@ -116,7 +116,7 @@ def _med(s: dict[str, Any]) -> str:
 
 
 def _share(num: int, den: int) -> str:
-    return f"{num} of {den} ({round(100 * num / den)}%)" if den else UNKNOWN
+    return f"{round(100 * num / den)}% of {den}" if den else UNKNOWN
 
 
 def render(sm: dict[str, Any]) -> Grid:
@@ -158,12 +158,13 @@ def render(sm: dict[str, Any]) -> Grid:
         put(r0, DATA_COL + j, Cell(name, "data_head"))
     for i, d in enumerate(trend):
         mm, dd = d["date"][5:].split("-")
-        put(r0 + 1 + i, DATA_COL, Cell(f"{int(mm)}/{int(dd)}", "data"))
+        put(r0 + 1 + i, DATA_COL, Cell(f"{int(mm)}/{int(dd)}" if i == 0 or int(dd) == 1 else str(int(dd)), "data"))  # day numbers keep the axis horizontal
         for j, key in enumerate(keys[1:], start=1):
             put(r0 + 1 + i, DATA_COL + j, Cell("" if d[key] is None else d[key], "data"))
     d0, d1 = r0 + 1, r0 + 1 + len(trend)
     rej_head = r0 + CHART_DAYS + 3
-    rej_rows = [(rp.REJECT_LABELS[k].split(" (")[0], o7[k]) for k in rp.REJECT_ORDER if k != "title"] + [("Kept", o7["kept"]), ("Waiting", o7["pending"] + o7["abandoned"])]
+    short = {"age": "Too old", "location": "Outside US", "experience": "4+ yrs required", "language": "Language", "closed": "Closed", "score": "Low score"}
+    rej_rows = [(short[k], o7[k]) for k in rp.REJECT_ORDER if k != "title"] + [("Kept", o7["kept"]), ("Waiting", o7["pending"] + o7["abandoned"])]
     put(rej_head, DATA_COL, Cell("Outcome", "data_head"))
     put(rej_head, DATA_COL + 1, Cell("Jobs", "data_head"))
     for i, (name, n) in enumerate(rej_rows):
@@ -188,25 +189,21 @@ def render(sm: dict[str, Any]) -> Grid:
 
     # ---- cards: label, big number, 14-day sparkline
     cards = [
-        ("Last run", (last or {}).get("outcome", UNKNOWN), None, f"card_value_{color}"),
-        ("Reached scoring · 7d", r7["eligible_matches_scored"], spark(2), "card_value"),
-        (f"Verified fresh · 7d  (of {r7['matches_kept']} kept)", r7["verified_fresh_matches"], spark(3), "card_value"),
-        ("Alerts delivered · 7d", r7["alerts_delivered"], spark(4), "card_value"),
-        ("Needs attention", F["table_total"], None, "card_value" if not F["table_total"] else "card_value_bad"),
+        ("Last run", (last or {}).get("outcome", UNKNOWN), None, f"card_value_{color}", f"{_clock((last or {}).get('started_at'))} UTC"),
+        ("Reached scoring · 7d", r7["eligible_matches_scored"], spark(2), "card_value", f"of {r7['new_postings']} new postings"),
+        ("Verified fresh · 7d", r7["verified_fresh_matches"], spark(3), "card_value", f"of {r7['matches_kept']} kept for the tracker"),
+        ("Alerts delivered · 7d", r7["alerts_delivered"], spark(4), "card_value", f"{r7['alerts_unique_jobs']} unique jobs"),
+        ("Needs attention", F["table_total"], None, "card_value" if not F["table_total"] else "card_value_bad", f"{stuck} waiting" if stuck else "all clear"),
     ]
-    for kind in ("label", "value", "spark"):
+    for kind in ("label", "value", "spark", "note"):
         cells: list[Cell] = []
-        for title, value, sp, vstyle in cards:
-            if kind == "label":
-                cells += [Cell(title, "card_label"), Cell("", "card_label")]
-            elif kind == "value":
-                cells += [Cell(fmt(value), vstyle), Cell("", vstyle)]
-            else:
-                sub = f"{_clock((last or {}).get('started_at'))} UTC" if title == "Last run" else (f"{stuck} waiting" if title == "Needs attention" and stuck else "all clear" if title == "Needs attention" else "")
-                cells += [sp if sp else Cell(sub, "card_note"), Cell("", "card_note")]
-        j = g.add(cells, {"label": 24, "value": 40, "spark": 30}[kind])
-        for k_ in range(5):
-            g.merges.append((j, 2 * k_, 2 * k_ + 1))
+        for n_, (title, value, sp, vstyle, note) in enumerate(cards):
+            style = {"label": "card_label", "value": vstyle, "spark": "card_note", "note": "card_note"}[kind]
+            cell = {"label": Cell(title, style), "value": Cell(fmt(value), style), "spark": sp or Cell("", style), "note": Cell(note, style)}[kind]
+            cells += [cell] if n_ == 0 else [cell, Cell("", style)]  # the first card is one column (A); the rest span two
+        j = g.add(cells, {"label": 24, "value": 40, "spark": 34, "note": 22}[kind])
+        for start in (1, 3, 5, 7):
+            g.merges.append((j, start, start + 1))
     spacer(18)
 
     # ---- charts: two rows of two
@@ -218,10 +215,10 @@ def render(sm: dict[str, Any]) -> Grid:
 
     a, b = chart_slot(), chart_slot()
     g.charts += [
-        Chart("line", "Relevant jobs per day", (0, d0, d1), [(2, "blue"), (3, "teal")], a, 0, 616, 258),
-        Chart("column", "Alerts delivered and tracker additions", (0, d0, d1), [(4, "teal"), (5, "slate")], a, 5, 470, 258),
-        Chart("stacked_column", "Runs per day", (0, d0, d1), [(6, "teal"), (7, "crimson")], b, 0, 616, 258),
-        Chart("bar", "Why relevant-title jobs were dropped · 7d", (0, rej_head + 1, rej_head + 1 + len(rej_rows)), [(1, "blue")], b, 5, 470, 258),
+        Chart("line", "Relevant jobs per day", (0, d0, d1), [(2, "blue"), (3, "teal")], a, 0, 490, 258),
+        Chart("column", "Alerts delivered and tracker additions", (0, d0, d1), [(4, "teal"), (5, "slate")], a, 4, 500, 258),
+        Chart("stacked_column", "Runs per day", (0, d0, d1), [(6, "teal"), (7, "crimson")], b, 0, 490, 258),
+        Chart("bar", "Why relevant-title jobs were dropped · 7d", (0, rej_head + 1, rej_head + 1 + len(rej_rows)), [(1, "blue")], b, 4, 500, 258),
     ]
     for ch in g.charts:  # domains/series refer to columns of the data block: shift to absolute columns
         ch.domain = (DATA_COL + ch.domain[0], ch.domain[1], ch.domain[2])
@@ -415,7 +412,7 @@ def chart_request(ch: Chart, idx: int, sheet_id: int) -> dict[str, Any]:
             basic["stackedType"] = "STACKED"
         if ch.kind == "bar":
             for s_ in series:
-                s_["dataLabel"] = {"type": "DATA", "textFormat": {"fontFamily": FONT, "fontSize": 9, "foregroundColor": _rgb("muted")}}
+                s_["dataLabel"] = {"type": "DATA", "placement": "OUTSIDE_END", "textFormat": {"fontFamily": FONT, "fontSize": 9, "foregroundColor": _rgb("muted")}}
         spec = {"basicChart": basic}
     spec["title"] = ch.title
     spec["titleTextFormat"] = {"fontFamily": FONT, "fontSize": 11, "bold": True, "foregroundColor": _rgb("deep")}
@@ -449,7 +446,7 @@ def requests_for(grid: Grid, sheet_id: int, existing_chart_ids: list[int] | None
         reqs.append({"mergeCells": {"range": {"sheetId": sheet_id, "startRowIndex": r, "endRowIndex": r + 1, "startColumnIndex": c0, "endColumnIndex": c1 + 1}, "mergeType": "MERGE_ALL"}})
     for i, px in enumerate(WIDTHS):
         reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1}, "properties": {"pixelSize": px}, "fields": "pixelSize"}})
-    reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": DATA_COL, "endIndex": TOTAL_COLUMNS}, "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
+    reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": DATA_COL - 1, "endIndex": TOTAL_COLUMNS}, "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
     for r, px in sorted(grid.heights.items()):
         reqs.append({"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": r, "endIndex": r + 1}, "properties": {"pixelSize": px}, "fields": "pixelSize"}})
     reqs += [chart_request(ch, i, sheet_id) for i, ch in enumerate(grid.charts)]
