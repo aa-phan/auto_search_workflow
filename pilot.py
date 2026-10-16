@@ -53,6 +53,8 @@ def build_report(
     run_timeout_s: int = 25 * 60,
 ) -> dict[str, Any]:  # fmt: skip
     start = now - timedelta(days=days)
+    unfinished = [r for r in runs if not r.completed]  # run-start records never completed: shown, never counted as runs
+    runs = [r for r in runs if r.completed]
     in_window = [r for r in runs if (t := _parse(r.run_at, now.tzinfo)) and t >= start]
     expected = days * 24
 
@@ -65,7 +67,7 @@ def build_report(
         triggers[marker] = triggers.get(marker, 0) + 1
     polling = {
         "runs_by_trigger": dict(sorted(triggers.items())),  # `schedule` runs are the proof that the schedule fires; a manual run is not
-        "runs": len(in_window), "expected_hourly_runs": expected, "run_coverage_pct": round(100 * len(in_window) / expected) if expected else None,
+        "runs": len(in_window), "unfinished_run_records": len(unfinished), "expected_hourly_runs": expected, "run_coverage_pct": round(100 * len(in_window) / expected) if expected else None,
         "gap_minutes": _stats(gaps), "late_runs_over_90_min": sum(1 for g in gaps if g > LATE_RUN_MIN),
         "worst_board_gap_minutes": _stats(board_gaps), "board_poll_failures": sum(r.boards_failed for r in in_window),
         "boards_polled": sum(r.boards_ok for r in in_window),
@@ -291,7 +293,7 @@ def format_report(rep: dict[str, Any]) -> str:
         f"  runs by trigger: {p['runs_by_trigger'] or 'none'}  (only `schedule` shows that the schedule really fires)",
         f"  gap between runs: {_fmt_stats(p['gap_minutes'])}",
         f"  worst board gap per run: {_fmt_stats(p['worst_board_gap_minutes'])}; boards polled {p['boards_polled']}, failed polls {p['board_poll_failures']}",
-        "  (a run that never started leaves no record: the gap before the next run shows it)",
+        f"  run-start records that never finished: {p['unfinished_run_records']} (a run that never started leaves no record: the gap before the next run shows it)",
         "",
         "RELEVANT FRESH JOBS BY SOURCE (title gate passed, source timestamp inside the window)",
     ]

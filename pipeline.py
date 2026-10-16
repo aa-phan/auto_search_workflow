@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -31,7 +32,9 @@ from boards import (
     activate_waiting, fetch_board, poll_boards, registry_counts, apply_poll_result,
 )  # fmt: skip
 from discovery import SearchJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
-from state import RunRecord
+from state import (
+    CREDIT_NONE, CREDIT_REPORTED, CREDIT_UNRESOLVED, KIND_PRODUCTION, OUTCOME_DEGRADED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED, RunRecord,
+)  # fmt: skip
 
 log = logging.getLogger("hunter")
 
@@ -108,6 +111,7 @@ class Deps:
     workers: int = 8
     sleep: Callable[[float], None] = time.sleep  # backoff between validation retries (tests pass a no-op)
     dry_run: bool = False
+    run_kind: str = KIND_PRODUCTION  # `rehearsal` for a local run: its run record says so and reports leave it out
     pool_policy: pools.PoolPolicy = field(default_factory=pools.PoolPolicy)  # max_active is always max_monitored_boards
 
 
@@ -130,6 +134,26 @@ def _minutes(td: timedelta | None) -> int | None:
     return None if td is None else int(td.total_seconds() // 60)
 
 
+def degraded_reason(run: RunRecord) -> str:
+    """Why a run that finished is not plainly `ok` (empty = it is ok). A handful of boards failing is normal and is
+    not degradation by itself; discovery or persistence failures, failed alerts, temporary scoring failures or a
+    tenth of the boards failing are."""
+    reasons = []
+    if "discovery failed" in run.notes or "every search request failed" in run.notes or "search stopped" in run.notes:
+        reasons.append("discovery")
+    if "final write failed" in run.notes or "run-start record not written" in run.notes:
+        reasons.append("persistence")
+    if run.alerts_failed:
+        reasons.append("alerts")
+    if run.eval_transient:
+        reasons.append("scoring")
+    if "provider backoff after HTTP 429" in run.notes:
+        reasons.append("provider")
+    if run.boards_failed and run.boards_failed >= max(3, run.boards_total // 10):
+        reasons.append("boards")
+    return ",".join(reasons)
+
+
 def run_cycle(d: Deps) -> RunRecord:
     now = d.now()
     t_start = time.monotonic()
@@ -139,10 +163,13 @@ def run_cycle(d: Deps) -> RunRecord:
     events_loaded = d.state.load_events()
     states = lg.replay(events_loaded)
     runs = d.state.load_runs()
-    run = RunRecord(lg.stamp(now))
+    run = RunRecord(lg.stamp(now), run_id=f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}", outcome=OUTCOME_STARTED, run_kind=d.run_kind)
     run.load_s, run.events_rows, run.boards_rows = round(time.monotonic() - t_start), len(events_loaded), len(boards)
     t_eval: float | None = None
-    if runs and (prev := _parse_stamp(runs[-1].run_at, now.tzinfo)):
+    # The gap is measured from the previous run that FINISHED: an interrupted run polled nothing that was saved
+    # (state is written at the end), so counting its start would hide a real polling gap.
+    finished = [r for r in runs if r.completed]
+    if finished and (prev := _parse_stamp(finished[-1].run_at, now.tzinfo)):
         run.gap_since_prev_run_min = _minutes(now - prev)
     pending_events: list[lg.Event] = []
     pending_rows: list[dict[str, Any]] = []
@@ -161,6 +188,13 @@ def run_cycle(d: Deps) -> RunRecord:
             d.state.append_events(pending_events)
             pending_events = []
 
+    if not d.dry_run:
+        try:  # instrumentation only: failing to write the start record must never stop the run
+            d.state.begin_run(run)
+        except Exception as exc:
+            log.error("Could not write the run-start record: %s", exc)
+            run.notes += f"run-start record not written: {exc}; "
+    crashed = True  # cleared only when the body completes: an exception (or a fatal stop) leaves it set
     try:
         def admit(found: list[BoardId], source: str) -> inv.AdmissionResult:
             """The one admission path (inventory import, web search, manual seeds)."""
@@ -225,6 +259,8 @@ def run_cycle(d: Deps) -> RunRecord:
                 found_keys = adm.keys
                 search_jobs = found.jobs
                 run.search_queries, run.search_pages, run.search_credits = len(found.queries), found.pages, found.credits
+                run.search_failed = sum(1 for q in found.queries if q.error)
+                run.credit_status = CREDIT_UNRESOLVED if run.search_failed else CREDIT_REPORTED
                 run.search_repeated, run.new_unique_boards = found.repeated, adm.added
                 run.notes += (
                     f"{found.kind} discovery: {len(found.queries)} queries, {found.pages} pages, {found.credits} credits"
@@ -245,6 +281,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 log.warning("Discovery failed: %s", exc)
                 run.notes += f"discovery failed: {exc}; "
                 found = None
+                run.credit_status = CREDIT_UNRESOLVED  # requests may have been charged before it failed
             finally:
                 # Credits are recorded even when discovery or a dry run stops early: the ledger must never
                 # under-count what the provider charged (a dry run that searches still spends credits).
@@ -254,6 +291,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 except Exception as exc:
                     log.error("Could not record the search credit ledger: %s", exc)
                     run.notes += f"search ledger not saved: {exc}; "
+            run.search_account_used = budget.account_used
             log.info(budget.summary())
 
         run.discovery_s = round(time.monotonic() - t_disc)
@@ -316,7 +354,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 run.notes += f"{rec.key} re-baselined; "
                 baseline_pass = True
             pass_kind = "baseline" if baseline_pass else "reentry" if reentry else ""
-            obs = lg.Observation(now, gap, was_baselined, baseline_pass, "poll", d.fresh_window, d.max_age_days, pass_kind, reentry)
+            obs = lg.Observation(now, gap, was_baselined, baseline_pass, "poll", d.fresh_window, d.max_age_days, pass_kind, reentry, run.run_id)
             for job in res.jobs:
                 st = states.get(job.ident.key)
                 if st and st.seen:
@@ -440,7 +478,7 @@ def run_cycle(d: Deps) -> RunRecord:
             if listed is None:
                 continue  # closed posting: nothing to observe
             board = boards.get(sj.ident.board_id.key)
-            obs = lg.Observation(now, None, bool(board and board.baselined_at), False, "search", d.fresh_window, d.max_age_days)
+            obs = lg.Observation(now, None, bool(board and board.baselined_at), False, "search", d.fresh_window, d.max_age_days, run_id=run.run_id)
             ev = lg.observe_new(listed, obs, d.title_gate)
             pending_events.append(ev)
             states[ev.key] = lg.replay([ev])[ev.key]
@@ -502,8 +540,9 @@ def run_cycle(d: Deps) -> RunRecord:
         for i, st in enumerate(todo[: d.max_jobs], 1):
             ident = JobIdentity(st.key.split("|")[0], str(st.seen_detail.get("board") or st.key.split("|")[1]), st.key.split("|", 2)[2])
             out = d.evaluate(ident, st)
+            run.eval_attempted += 1
             if out.kind == "done" and out.payload is not None:
-                payload = dict(out.payload, freshness=st.freshness, source=st.seen_detail.get("source", ""), alert=False)
+                payload = dict(out.payload, freshness=st.freshness, source=st.seen_detail.get("source", ""), alert=False, run=run.run_id)
                 payload["alert"] = bool(st.freshness in fr.ALERTABLE and payload.get("status") == "To Apply")
                 if payload.get("visible") and st.key not in d.tracked_keys:
                     pending_rows.append(payload)
@@ -514,10 +553,12 @@ def run_cycle(d: Deps) -> RunRecord:
             elif out.kind == "transient":
                 # A temporary outage records nothing: it must neither mark the job done nor
                 # use up its bounded retry attempts. The next run simply tries again.
+                run.eval_transient += 1
                 log.warning("Transient failure evaluating %s (will retry): %s", st.key, out.message)
                 run.notes += "transient evaluation failures; " if "transient evaluation" not in run.notes else ""
             else:
-                pending_events += lg.failure_events(st.key, lg.STAGE_EVALUATE, out.message or out.kind, st, now)
+                run.eval_failed += 1
+                pending_events += lg.failure_events(st.key, lg.STAGE_EVALUATE, out.message or out.kind, st, now, run.run_id)
                 st.errors[lg.STAGE_EVALUATE] = st.errors.get(lg.STAGE_EVALUATE, 0) + 1
             if i % FLUSH_EVERY == 0:
                 write()
@@ -539,17 +580,18 @@ def run_cycle(d: Deps) -> RunRecord:
                 run.alerts_failed += 1
                 log.warning("Alert failed for %s (will retry): %s", st.key, exc)
                 if getattr(getattr(exc, "response", None), "status_code", 500) < 500 and getattr(getattr(exc, "response", None), "status_code", 429) != 429:
-                    pending_events += lg.failure_events(st.key, lg.STAGE_ALERT, str(exc), st, now)
+                    pending_events += lg.failure_events(st.key, lg.STAGE_ALERT, str(exc), st, now, run.run_id)
                 continue
             pub, _ = fr.parse_instant(st.last_published)
             lag = _minutes(now - pub) if pub else None
-            pending_events.append(lg.Event(lg.stamp(now), st.key, lg.ALERTED, detail={"channel": "telegram" if sent else "none", "lag_min": lag, "late": bool(late)}))
+            pending_events.append(lg.Event(lg.stamp(now), st.key, lg.ALERTED, detail={"channel": "telegram" if sent else "none", "lag_min": lag, "late": bool(late), "run": run.run_id}))
             st.alerted = True
             run.alerts_sent += bool(sent)
             if sent and lag is not None and (run.max_alert_lag_min is None or lag > run.max_alert_lag_min):
                 run.max_alert_lag_min = lag
             write()  # record the delivery immediately: shrinks the duplicate-alert window
         write()
+        crashed = False
     finally:
         # Reached on success and on failure. A failing flush must not hide the original error
         # or skip the run record; the run record is what shows the user that something broke.
@@ -565,9 +607,16 @@ def run_cycle(d: Deps) -> RunRecord:
         run.sheets_reads, run.sheets_writes, run.sheets_429 = (int(used.get(k, 0)) for k in ("sheets_reads", "sheets_writes", "sheets_429"))
         run.ats_requests, run.ats_429, run.ats_seconds = int(used.get("ats_requests", 0)), int(used.get("ats_429", 0)), round(used.get("ats_seconds", 0))
         run.groq_calls, run.groq_429 = int(used.get("groq_calls", 0)), int(used.get("groq_429", 0))
+        run.credit_status = run.credit_status or CREDIT_NONE
+        run.finished_at = lg.stamp(d.now())
+        run.outcome = OUTCOME_FAILED if crashed else OUTCOME_DEGRADED if degraded_reason(run) else OUTCOME_OK
         if not d.dry_run:
             try:
-                d.state.append_run(run)
+                d.state.finish_run(run)
             except Exception as exc:
-                log.error("Could not record the run: %s", exc)
+                log.error("Could not complete the run record: %s", exc)
+                try:  # the start record still says `started`; a second, finished record (same Run_ID) wins in reports
+                    d.state.append_run(run)
+                except Exception as exc2:
+                    log.error("Could not record the run: %s", exc2)
     return run

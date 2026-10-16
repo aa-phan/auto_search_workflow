@@ -144,6 +144,8 @@ Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defa
 | `User_Notes` | **Yours** |
 | `Freshness`, `Source` | How sure we are it's new (see the table above), and whether it came from a watched board or a search |
 
+**Dashboard tab** is a one-screen health and results summary the app rewrites after every hourly run (a plain-English status line, status cards, today / 7-day / 30-day columns, a daily trend, why jobs were rejected, search credits, board coverage, what is stuck and what to do about it, and your feedback counts). It is generated output: editing it changes nothing about how the app works, and it never touches your Job Tracker. `n/a` means "never recorded", not zero. A stopped workflow cannot update it, so check the "Generated" time at the top; an independent missed-run alert and a daily Telegram digest are planned, not built. `python hunter.py --dashboard --dry-run` prints the same numbers as text.
+
 The hidden tabs are the app's memory (which jobs were seen, scored and alerted, which boards are watched, and a log of every run). Please don't edit them; to make the app re-check a job, ask a developer.
 
 ### How scoring works

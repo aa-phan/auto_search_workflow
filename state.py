@@ -52,7 +52,15 @@ RUN_COLUMNS = [
     "Result_Boards", "Result_Parked", "Result_Invalid", "Result_Awaiting_Validation",
     "Duration_S", "Load_S", "Discovery_S", "Poll_S", "Evaluate_S", "Events_Rows", "Boards_Rows",
     "Sheets_Reads", "Sheets_Writes", "Sheets_429", "ATS_Requests", "ATS_429", "ATS_Seconds", "Groq_Calls", "Groq_429",
+    "Run_ID", "Finished_At", "Outcome", "Run_Kind", "Search_Failed", "Search_Account_Used", "Credit_Status",
+    "Eval_Attempted", "Eval_Transient", "Eval_Failed",
 ]  # fmt: skip
+RUN_ID_COLUMN = RUN_COLUMNS.index("Run_ID") + 1  # 1-based sheet column
+# Run outcomes. A run-start record is written first with STARTED; the end of the run overwrites it. A record that
+# still says STARTED after the workflow timeout means the run was interrupted (killed, timed out, lost its runner).
+OUTCOME_STARTED, OUTCOME_OK, OUTCOME_DEGRADED, OUTCOME_FAILED = "started", "ok", "degraded", "failed"
+KIND_PRODUCTION, KIND_REHEARSAL = "production", "rehearsal"  # rehearsal = a local run (never GitHub Actions): excluded from reports
+CREDIT_NONE, CREDIT_REPORTED, CREDIT_UNRESOLVED = "none", "reported", "unresolved"  # search credit accounting for the run
 APPEND_CHUNK = 2000
 
 
@@ -116,6 +124,22 @@ class RunRecord:
     ats_seconds: int = 0  # summed request time (requests run 8 at a time)
     groq_calls: int = 0
     groq_429: int = 0
+    # Reporting instrumentation (blank on rows written before it existed; never back-filled):
+    run_id: str = ""  # stable identity of this run; ledger events carry it in their detail (`run`)
+    finished_at: str = ""  # when the run record was completed; blank while STARTED
+    outcome: str = ""  # started | ok | degraded | failed ("" = a row written before outcomes were recorded)
+    run_kind: str = ""  # production | rehearsal ("" = unknown, written before the kind was recorded)
+    search_failed: int = 0  # search requests that errored: whether the provider charged for them is unknown
+    search_account_used: int | None = None  # the provider's own counter as read this run (None = not read)
+    credit_status: str = ""  # none (no search) | reported (every charge came from a response) | unresolved (a failed request may have been charged)
+    eval_attempted: int = 0  # evaluation attempts made this run (retries included; not unique jobs)
+    eval_transient: int = 0  # attempts that ended in a temporary failure (retried later, nothing recorded per job)
+    eval_failed: int = 0  # attempts recorded as failures against the job (bounded)
+
+    @property
+    def completed(self) -> bool:
+        """False only for a run-start record that was never finished. Rows from before outcomes existed count as completed."""
+        return self.outcome != OUTCOME_STARTED
 
     def to_row(self) -> list[Any]:
         out = []
@@ -140,7 +164,8 @@ class RunRecord:
                    num(8) or 0, num(9) or 0, num(10) or 0, num(11), num(12), num(13), row[14],
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
                    *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
-                   *(num(i) or 0 for i in range(36, 55)))  # fmt: skip
+                   *(num(i) or 0 for i in range(36, 55)),
+                   row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0)  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
@@ -253,6 +278,9 @@ class SheetState:
         (header row only; no data row is touched)."""
         try:
             ws = self.sh.worksheet(tab)
+            have = getattr(ws, "col_count", None)
+            if isinstance(have, int) and have < len(columns):  # an in-place row update cannot write past the grid's last column
+                ws.add_cols(len(columns) - have)
             header = ws.row_values(1) if hasattr(ws, "row_values") else []
             if header and header != columns and header == columns[: len(header)]:
                 ws.update(values=[columns], range_name="A1", value_input_option="RAW")
@@ -389,6 +417,21 @@ class SheetState:
     def append_run(self, run: RunRecord) -> None:
         self.sh.worksheet(RUNS_TAB).append_rows([run.to_row()], value_input_option="RAW", table_range="A1")
 
+    def begin_run(self, run: RunRecord) -> None:
+        """Persist the run-start record (outcome `started`) so a run that never finishes is visible."""
+        self.append_run(run)
+
+    def finish_run(self, run: RunRecord) -> None:
+        """Complete the run's own record in place (found by Run_ID). If it cannot be found (the start record was
+        never written) the finished record is appended instead, so a run always leaves exactly one record."""
+        ws = self.sh.worksheet(RUNS_TAB)
+        ids = ws.col_values(RUN_ID_COLUMN) if run.run_id else []
+        rows = [i for i, v in enumerate(ids, start=1) if i > 1 and v == run.run_id]
+        if not rows:
+            self.append_run(run)
+            return
+        ws.update(values=[run.to_row()], range_name=f"A{rows[-1]}", value_input_option="RAW")
+
     def load_runs(self) -> list[RunRecord]:
         rows = self.sh.worksheet(RUNS_TAB).get_all_values()[1:]
         return [r for r in (RunRecord.from_row(x) for x in rows) if r]
@@ -482,6 +525,24 @@ class CsvState:
     def append_run(self, run: RunRecord) -> None:
         with self._path(RUNS_TAB).open("a", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerow(run.to_row())
+
+    def begin_run(self, run: RunRecord) -> None:
+        self.append_run(run)
+
+    def finish_run(self, run: RunRecord) -> None:
+        p = self._path(RUNS_TAB)
+        rows = self._rows(RUNS_TAB)
+        idx = [i for i, r in enumerate(rows) if run.run_id and len(r) >= RUN_ID_COLUMN and r[RUN_ID_COLUMN - 1] == run.run_id]
+        if not idx:
+            self.append_run(run)
+            return
+        rows[idx[-1]] = [str(c) for c in run.to_row()]
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(RUN_COLUMNS)
+            w.writerows(rows)
+        os.replace(tmp, p)  # atomic
 
     def load_runs(self) -> list[RunRecord]:
         return [r for r in (RunRecord.from_row(x) for x in self._rows(RUNS_TAB)) if r]

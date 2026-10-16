@@ -147,6 +147,7 @@ class Observation:
     max_age_days: int = fr.DEFAULT_MAX_AGE_DAYS
     pass_kind: str = ""  # "baseline" | "reentry" | "" (an ordinary poll); recorded so activity counts can exclude it
     reentry: bool = False  # the board returned to monitoring: gap jobs are judged by source evidence only
+    run_id: str = ""  # the run that made this observation (reporting joins events to runs through it)
 
 
 def observe_new(job: ListedJob, obs: Observation, title_gate: Callable[[str], str | None]) -> Event:
@@ -172,6 +173,8 @@ def observe_new(job: ListedJob, obs: Observation, title_gate: Callable[[str], st
     }  # fmt: skip
     if obs.pass_kind:
         detail["pass"] = obs.pass_kind
+    if obs.run_id:
+        detail["run"] = obs.run_id
     return Event(stamp(obs.now), job.ident.key, SEEN, f.cls, disposition, fr.iso(published, precision), detail)
 
 
@@ -188,10 +191,11 @@ def observe_known(job: ListedJob, st: JobState, now: datetime) -> list[Event]:
     return events
 
 
-def failure_events(key: str, stage: str, message: str, st: JobState | None, now: datetime) -> list[Event]:
+def failure_events(key: str, stage: str, message: str, st: JobState | None, now: datetime, run_id: str = "") -> list[Event]:
     """Record a failed attempt; abandon the stage after MAX_ATTEMPTS so it cannot loop forever."""
     attempt = (st.errors.get(stage, 0) if st else 0) + 1
-    events = [Event(stamp(now), key, ERROR, detail={"stage": stage, "message": message[:300], "attempt": attempt})]
+    extra = {"run": run_id} if run_id else {}
+    events = [Event(stamp(now), key, ERROR, detail={"stage": stage, "message": message[:300], "attempt": attempt, **extra})]
     if attempt >= MAX_ATTEMPTS:
-        events.append(Event(stamp(now), key, ABANDONED, detail={"stage": stage, "reason": message[:200]}))
+        events.append(Event(stamp(now), key, ABANDONED, detail={"stage": stage, "reason": message[:200], **extra}))
     return events

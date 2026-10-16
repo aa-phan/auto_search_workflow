@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated 2026-10-14 (search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-15 (operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## State
 
@@ -9,6 +9,19 @@ Board polling -> new-ID detection -> freshness classification -> filters/scoring
 Latest change (D-23..D-30, quick task 261014-olj): board slot allocation. A complete hourly poll now refreshes each monitored board's relevant / eligible counts and new-posting activity from the listing it already fetched; `Max_Active_Boards` is split into an established pool (400) and an exploration pool (100) with 7-day trials; a weekly bounded rebalance compares ended trials with the weakest established boards (**report mode by default**; `python hunter.py --rebalance-report` previews it); demoted boards keep their ledger, baseline, provenance and pending retries and re-enter with a re-established baseline; monitored SmartRecruiters boards are parked every run (history kept); validation runs two independently budgeted queues so re-checks no longer starve behind the candidate backlog; the title gate accepts "Internship", "Jr.", "Entry-Level" and "New Grad" variants. **Everything for this change is verified only with offline mocks: no live Sheet, Groq, Telegram, Serper or GitHub Actions run, and no real ATS call, was made** (tests: 275 offline).
 
 Previous change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
+
+## Operational dashboard (D-40)
+
+**Built:** `reporting.py` (pure summary), `dashboard.py` (render + one-batch publish), run-start records and the new `Runs` / ledger fields, `--dashboard` and `--dashboard --dry-run`, refresh after every poller run (contained). **445 offline tests** pass (47 new in `tests/test_reporting.py`: totals checked against hand-built ledgers and real pipeline runs for retries, duplicate observations, partial failures, missing dates, local-day boundaries, exclusions, idempotence; mutation spot-checks on nine behaviours each fail the suite).
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Summary totals vs the ledger (unique vs attempts, alerts, rejections partition, freshness denominators, latency split, boundaries, rehearsal / fixture exclusion) | pass | **mocked** (fake ATS, CSV state) |
+| Run-start record visible during a run; one record per run; failed / degraded outcomes; gap ignores interrupted runs | pass | **mocked** |
+| Dashboard tab written in one batch, only that tab, tracker feedback untouched, rerun identical, failure contained | pass | **mocked** (fake spreadsheet: request shapes are NOT validated by the real Sheets API) |
+| Rendered tab inspected in a real Sheet; first refresh; `Runs` header widening to 65 columns; Actions run | **not verified** | no Sheet credentials / GitHub repository here |
+
+**Remaining setup:** none required (the tab and the new `Runs` columns are created on the first run). Rows written before this change show `n/a` for the new fields. Open items: view the first real render (column widths, merged cells, colours) and adjust; the daily Telegram digest and the independent missed-run watchdog are documented in SPEC and not built.
 
 ## Deployment and pilot status (running log)
 

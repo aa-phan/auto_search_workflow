@@ -103,17 +103,23 @@ def location_blocks(location: str) -> str | None:
     return None
 
 
-def hard_gate(title: str, location: str, text: str, resume: str) -> str | None:
-    """Reject only on explicit signals found in the hydrated posting."""
+def hard_gate_coded(title: str, location: str, text: str, resume: str) -> tuple[str, str] | None:
+    """The hard gate with a stable reason code for reporting: ("location" | "experience" | "language", reason)."""
     if blocked := location_blocks(location):
-        return blocked
+        return "location", blocked
     years = min_years_required(text)
     if years is not None and years >= HARD_YEARS:
-        return f"requires {years}+ years of experience"
+        return "experience", f"requires {years}+ years of experience"
     if re.search(r"\bbilingual\b", title, re.I) and not re.search(r"\bbilingual\b", resume, re.I):
-        return "title requires bilingual ability"
+        return "language", "title requires bilingual ability"
     for m in _LANG_REQ_RE.finditer(f"{title}\n{text}"):
         lang = (m.group(1) or m.group(2) or "").lower()
         if lang and not re.search(rf"\b{lang}\b", resume, re.I):
-            return f"requires {lang}, which is not on the resume"
+            return "language", f"requires {lang}, which is not on the resume"
     return None
+
+
+def hard_gate(title: str, location: str, text: str, resume: str) -> str | None:
+    """Reject only on explicit signals found in the hydrated posting."""
+    coded = hard_gate_coded(title, location, text, resume)
+    return coded[1] if coded else None

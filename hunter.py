@@ -40,12 +40,14 @@ import freshness as fr
 import ledger as lg
 import pipeline as pl
 import search
+import dashboard
 import pilot
+import reporting
 from meter import METER
 import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
 from freshness import parse_posted
-from state import CsvState, SheetState
+from state import KIND_PRODUCTION, KIND_REHEARSAL, CsvState, SheetState
 
 try:  # optional: load .env for local runs
     from dotenv import load_dotenv
@@ -1286,6 +1288,10 @@ class SheetStore:
         header = values[0] if values else []
         return [dict(zip(header, list(r) + [""] * (len(header) - len(r)))) for r in values[1:]]
 
+    def publish_dashboard(self, grid: dashboard.Grid) -> None:
+        """Rewrite the generated Dashboard tab only (one batched request). Never touches the tracker or any state tab."""
+        dashboard.publish_sheet(self.sh, grid)
+
     # -- writes: strictly append-only so the user's edits to My_Status / User_Notes / My_Feedback survive
     def append_jobs(self, rows: list[JobRow]) -> None:
         if rows:
@@ -1340,6 +1346,9 @@ class CsvStore:
     def tracker_rows(self) -> list[dict[str, str]]:
         with self.path.open(newline="", encoding="utf-8") as fh:
             return list(csv.DictReader(fh))
+
+    def publish_dashboard(self, grid: dashboard.Grid) -> None:
+        dashboard.publish_csv(self.state.dir, grid)
 
     def append_jobs(self, rows: list[JobRow]) -> None:
         with self.path.open("a", newline="", encoding="utf-8") as fh:
@@ -1445,17 +1454,19 @@ def make_evaluator(
         url = str(st.seen_detail.get("url") or ident.url)
         title_hint = str(st.seen_detail.get("title") or "")
 
-        def done(status: str, score: int | None, posting: Posting | None, verdict: str, gaps: str = "") -> pl.EvalOutcome:
+        def done(status: str, score: int | None, posting: Posting | None, verdict: str, gaps: str = "", reject: str = "") -> pl.EvalOutcome:
             row = JobRow(
                 status, score, (posting.company if posting else ident.board), (posting.title if posting else title_hint),
                 posting.location if posting else "", verdict, gaps, url, posting.posted if posting else "",
             )  # fmt: skip
-            return pl.EvalOutcome("done", row.payload(is_visible(row, s.min_score)))
+            # `reject` is the stage that ended the evaluation (closed | age | title | location | experience | language | score);
+            # empty = the job was scored and kept. Stored in the ledger so reports never have to parse the verdict text.
+            return pl.EvalOutcome("done", dict(row.payload(is_visible(row, s.min_score)), reject=reject))
 
         try:
             posting = hydrate(ref_for(ident, url))
         except ClosedPosting:
-            return done(STATUS_CLOSED, 0, None, "Posting is closed or removed.")
+            return done(STATUS_CLOSED, 0, None, "Posting is closed or removed.", reject="closed")
         except TransientError as exc:
             return pl.EvalOutcome("transient", message=str(exc))
         except Exception as exc:
@@ -1466,12 +1477,11 @@ def make_evaluator(
         age = job_age_days(posting.posted)
         if s.max_age_days > 0 and age is not None and age > s.max_age_days:
             when = "Last updated" if posting.posted_source == "updated_at" else "Posted"
-            return done(s.stale_status, 0, posting, f"{when} {posting.posted} ({age} days ago).")
-        reason = eligibility.title_gate(posting.title, s.roles, s.levels, excluded) or eligibility.hard_gate(
-            posting.title, posting.location, posting.description, s.resume
-        )
-        if reason:
-            return done(STATUS_FILTERED, 0, posting, f"Filtered before scoring: {reason}.")
+            return done(s.stale_status, 0, posting, f"{when} {posting.posted} ({age} days ago).", reject="age")
+        if reason := eligibility.title_gate(posting.title, s.roles, s.levels, excluded):
+            return done(STATUS_FILTERED, 0, posting, f"Filtered before scoring: {reason}.", reject="title")
+        if coded := eligibility.hard_gate_coded(posting.title, posting.location, posting.description, s.resume):
+            return done(STATUS_FILTERED, 0, posting, f"Filtered before scoring: {coded[1]}.", reject=coded[0])
 
         try:
             ev = groq.evaluate(s, posting)
@@ -1482,7 +1492,7 @@ def make_evaluator(
         except Exception as exc:
             return pl.EvalOutcome("failed", message=f"AI scoring failed: {exc}")
         status = STATUS_APPLY if ev.score >= s.min_score else STATUS_STRETCH if ev.score >= MIN_TRACKER_SCORE else STATUS_FILTERED
-        return done(status, ev.score, posting, ev.verdict, ev.missing_gaps)
+        return done(status, ev.score, posting, ev.verdict, ev.missing_gaps, reject="score" if status == STATUS_FILTERED else "")
 
     return evaluate
 
@@ -1697,6 +1707,20 @@ def run_pilot_report(store: Any, settings: Settings, days: int) -> int:
     return 0
 
 
+def run_dashboard(cfg: Config, store: Any, settings: Settings, *, dry_run: bool) -> int:
+    """`--dashboard`: rebuild the generated Dashboard tab (the only thing written). `--dry-run` prints instead."""
+    if dry_run:
+        print(reporting.format_text(dashboard.build(store, settings)))
+        return 0
+    if why := local_write_refusal(
+        uses_sheet=bool(cfg.sheet_id), in_actions=(os.getenv("GITHUB_ACTIONS") or "").strip() == "true",
+        allow_local=(os.getenv("ALLOW_LOCAL_SHEET_WRITES") or "").strip() == "1",
+    ):  # fmt: skip
+        log.error("%s", why)
+        return 4
+    return 0 if dashboard.refresh(store, settings) else 1
+
+
 def run_rebalance_report(store: Any, settings: Settings, allow_sr: bool) -> int:
     """Dry-run board rebalance report: what the next run and the next weekly rebalance would do.
     Read-only: it loads the registry, ledger and Discovery tab and writes nothing."""
@@ -1751,9 +1775,10 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--max-seconds", type=float, default=900.0, help="time budget for --validate")
     inv.add_argument("--allow-smartrecruiters", action="store_true", help="also bulk-validate SmartRecruiters boards (its robots.txt disallows generic crawlers)")
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
+    parser.add_argument("--dashboard", action="store_true", help="rebuild the Dashboard tab from the state now (writes only that tab); with --dry-run print the text version and write nothing")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.pilot_report is not None
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -1785,6 +1810,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_search_usage(cfg, store, settings)
     if args.pilot_report is not None:
         return run_pilot_report(store, settings, max(1, args.pilot_report))
+    if args.dashboard:
+        return run_dashboard(cfg, store, settings, dry_run=args.dry_run)
     if args.rebalance_report:
         allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
         return run_rebalance_report(store, settings, allow_sr)
@@ -1850,6 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_smartrecruiters=(os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1",
         config_notes=config_notes,
         trigger=run_trigger(os.getenv("GITHUB_EVENT_NAME"), os.getenv("TRIGGER_SOURCE")),
+        run_kind=KIND_PRODUCTION if (os.getenv("GITHUB_ACTIONS") or "").strip() == "true" else KIND_REHEARSAL,
         hydrate_listed=make_search_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),
         max_age_days=settings.max_age_days,
@@ -1872,7 +1900,11 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     except pl.FatalRunError as exc:
         log.error("Run stopped: %s", exc)
+        if not args.dry_run:
+            dashboard.refresh(store, settings)  # the failed run's record says why; contained, never raises
         return 2
+    if not args.dry_run:
+        dashboard.refresh(store, settings)  # after the run's own work is saved; a failure here is logged and ignored
     log.info(
         "Run: boards %d ok / %d failed of %d (+%d new) | new jobs %d (%d verified fresh) | evaluated %d | alerts %d sent / %d failed | "
         "gap since previous run %s min, worst board gap %s min",
