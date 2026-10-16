@@ -435,7 +435,7 @@ def build_summary(
         g = gaps_by_day.get(d_, [])
         trend.append({
             "date": d_.isoformat(), "recorded": known,
-            "runs_finished": c["runs_finished"] if known else None, "runs_not_ok": (c["run_degraded"] + c["run_failed"] + c["runs_unfinished"]) if known else None,
+            "runs_finished": c["runs_finished"] if known else None, "runs_ok": (c["run_ok"] + c["run_unrecorded"]) if known else None, "runs_not_ok": (c["run_degraded"] + c["run_failed"] + c["runs_unfinished"]) if known else None,
             "max_gap_min": max(g) if g else None, "new_postings": c["seen_new"] if known else None, "baselined": c["out:baseline"] if known else None,
             "eligible": c["eligible"] if known else None, "verified_fresh_matches": c["match_vf"] if known else None,
             "tracker_additions": c["tracker_added"] if known else None, "alerts_delivered": c["alert_deliveries"] if known else None,

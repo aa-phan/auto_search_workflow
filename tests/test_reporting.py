@@ -580,16 +580,20 @@ class DashboardTabTests(unittest.TestCase):
         sh, tracker = self.fake_sheet()
         before = [list(r) for r in tracker.values]
         db.publish_sheet(sh, db.render(self.sample()))
+        self.assertEqual(len(sh.batches[0]["requests"][-6:]), 6)
         self.assertIn("Dashboard", sh.tabs)
         self.assertEqual(tracker.values, before)  # My_Feedback, My_Status and User_Notes untouched (FakeWorksheet raises on any tracker update)
         self.assertEqual(tracker.appended, [])
         self.assertEqual(len(sh.batches), 1)  # one batched write for the whole tab
         kinds = {next(iter(r)) for r in sh.batches[0]["requests"]}
-        self.assertLessEqual(kinds, {"updateCells", "repeatCell", "unmergeCells", "mergeCells", "updateDimensionProperties", "updateSheetProperties"})
+        self.assertLessEqual(kinds, {"updateCells", "repeatCell", "unmergeCells", "mergeCells", "updateDimensionProperties", "updateSheetProperties", "addChart"})
         targets = set()
         for r in sh.batches[0]["requests"]:
             body = next(iter(r.values()))
-            targets.add((body.get("range") or body.get("start") or body.get("properties"))["sheetId"])
+            if "chart" in body:
+                targets.add(body["chart"]["position"]["overlayPosition"]["anchorCell"]["sheetId"])
+            else:
+                targets.add((body.get("range") or body.get("start") or body.get("properties"))["sheetId"])
         self.assertEqual(targets, {sh.tabs["Dashboard"].id})  # every request targets the Dashboard sheet only
 
     def test_rerun_is_idempotent_and_replaces_rather_than_appends(self) -> None:
@@ -602,6 +606,47 @@ class DashboardTabTests(unittest.TestCase):
         first = sh.batches[0]["requests"]
         self.assertIn("repeatCell", first[1])  # clears the whole tab first, so a shorter dashboard leaves nothing stale behind
 
+    def test_charts_are_added_with_fixed_ids_and_last_times_charts_are_deleted_first(self) -> None:
+        sh, _ = self.fake_sheet()
+        grid = db.render(self.sample())
+        self.assertEqual(len(grid.charts), 6)
+        db.publish_sheet(sh, grid)
+        first = sh.batches[0]["requests"]
+        ids = [r["addChart"]["chart"]["chartId"] for r in first if "addChart" in r]
+        self.assertEqual(ids, [db.CHART_ID_BASE + i for i in range(6)])
+        self.assertFalse(any("deleteEmbeddedObject" in r for r in first))  # nothing to delete the first time
+        sid = sh.tabs["Dashboard"].id
+        sh.metadata = {"sheets": [{"properties": {"sheetId": sid}, "charts": [{"chartId": i} for i in ids]}, {"properties": {"sheetId": sid + 1}, "charts": [{"chartId": 5}]}]}
+        db.publish_sheet(sh, grid)
+        second = sh.batches[1]["requests"]
+        self.assertEqual([r["deleteEmbeddedObject"]["objectId"] for r in second if "deleteEmbeddedObject" in r], ids)  # only this sheet's charts
+        self.assertEqual([i for i, r in enumerate(second) if "deleteEmbeddedObject" in r], list(range(6)))  # deleted before anything is re-added
+        self.assertEqual(second[6:], first)
+
+    def test_chart_data_block_is_chronological_blank_for_unknown_and_matches_the_summary(self) -> None:
+        sm = self.sample()
+        grid = db.render(sm)
+        col = lambda j: [grid.rows[r][db.DATA_COL + j].value for r in range(3, 3 + db.CHART_DAYS)]  # noqa: E731
+        dates = col(0)
+        self.assertEqual(dates, sorted(dates))  # oldest first
+        self.assertEqual(dates[-1], sm["trend"][0]["date"][5:])
+        newest = sm["trend"][0]
+        self.assertEqual((col(1)[-1], col(4)[-1], col(6)[-1]), (newest["new_postings"], newest["alerts_delivered"], newest["runs_ok"]))
+        self.assertEqual(col(1)[0], "")  # a day before anything was recorded is blank (unknown), not 0
+        line = grid.charts[0]
+        self.assertEqual((line.domain[1], line.domain[2]), (3, 3 + db.CHART_DAYS))
+        self.assertTrue(all(c >= db.DATA_COL for c, _ in line.series))
+        req = db.chart_request(line, 0, 9)["addChart"]["chart"]["spec"]["basicChart"]
+        self.assertEqual((req["headerCount"], req["domains"][0]["domain"]["sourceRange"]["sources"][0]["startRowIndex"]), (1, 2))  # the header row names the series
+
+    def test_cards_carry_sparklines_over_the_data_block_and_the_page_is_not_shifted(self) -> None:
+        grid = db.render(self.sample())
+        self.assertEqual(grid.rows[0][0].value, "Job Hunter · Operations")
+        formulas = [c.formula for row in grid.rows for c in row if c.formula]
+        self.assertEqual(len(formulas), 3)
+        self.assertTrue(all(f.startswith("=SPARKLINE(") and f"{db.col_letter(db.DATA_COL + 1)}" in f + db.col_letter(db.DATA_COL + 1) for f in formulas))
+        self.assertTrue(all(c.formula == "" for row in grid.rows for c in row if c.style != "card_spark"))
+
     def test_cells_are_literal_strings_never_formulas(self) -> None:
         grid = db.Grid()
         grid.add([db.Cell("=HYPERLINK(\"x\")"), db.Cell("+1"), db.Cell(3), db.Cell(None)])
@@ -613,8 +658,8 @@ class DashboardTabTests(unittest.TestCase):
 
     def test_rendered_grid_shows_generation_time_source_freshness_and_unknowns(self) -> None:
         text = "\n".join(str(v) for row in db.render(self.sample()).values() for v in row)
-        for needle in ("Generated 2026-10-14 12:00:00 UTC", "latest run record", "latest ledger event", "n/a", "KNOWN eligible boards", "Unique jobs first observed",
-                       "Publication -> detection", "Detection -> delivery", "Days 8 to 30", "watchdog"):
+        for needle in ("Updated 2026-10-14 12:00:00 UTC", "last run record", "last ledger event", "n/a", "KNOWN eligible boards", "Unique jobs first observed",
+                       "Publication → detection", "Detection → delivery", "Days 8 to 30", "watchdog", "of dated"):
             self.assertIn(needle, text)
         empty = "\n".join(str(v) for row in db.render(summary()).values() for v in row)
         self.assertIn("No data yet", empty)
@@ -626,8 +671,9 @@ class DashboardTabTests(unittest.TestCase):
         rows = {str(r[0].value).strip(): [c.value for c in r[1:4]] for r in grid.rows if r[0].value}
         r = sm["periods"]
         self.assertEqual(rows["Unique jobs first observed"], [r["today"]["results"]["unique_jobs_observed"], r["7d"]["results"]["unique_jobs_observed"], r["30d"]["results"]["unique_jobs_observed"]])
-        self.assertEqual(rows["verified fresh"][1], r["7d"]["freshness"]["verified_fresh"] if False else r["7d"]["results"]["verified_fresh_matches"])
-        self.assertEqual(rows["Alerts delivered (event count)"][1], r["7d"]["results"]["alerts_delivered"])
+        self.assertEqual(rows["verified fresh"][1], r["7d"]["results"]["verified_fresh_matches"])
+        self.assertEqual(rows["Alerts delivered (events)"][1], r["7d"]["results"]["alerts_delivered"])
+        self.assertEqual(rows["Jobs first observed"][1], r["7d"]["results"]["unique_jobs_observed"])
 
     def test_refresh_failure_is_contained(self) -> None:
         class Broken:
@@ -652,7 +698,7 @@ class DashboardTabTests(unittest.TestCase):
     def test_csv_store_gets_a_flat_dashboard_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = db.publish_csv(Path(tmp), db.render(self.sample()))
-            self.assertTrue(path.read_text().startswith("Job Hunter"))
+            self.assertTrue(path.read_text().startswith("Job Hunter"))  # the page starts at row 1: the chart data block never shifts it
 
     def test_store_publish_goes_through_one_batch_on_the_real_store_class(self) -> None:
         sh, _ = self.fake_sheet()

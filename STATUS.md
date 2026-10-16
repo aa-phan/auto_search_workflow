@@ -12,13 +12,14 @@ Previous change (D-17..D-21): scheduled discovery is a persistent rotation of da
 
 ## Operational dashboard (D-40)
 
-**Built:** `reporting.py` (pure summary), `dashboard.py` (render + one-batch publish), run-start records and the new `Runs` / ledger fields, `--dashboard` and `--dashboard --dry-run`, refresh after every poller run (contained). **445 offline tests** pass (47 new in `tests/test_reporting.py`: totals checked against hand-built ledgers and real pipeline runs for retries, duplicate observations, partial failures, missing dates, local-day boundaries, exclusions, idempotence; mutation spot-checks on nine behaviours each fail the suite).
+**Built:** `reporting.py` (pure summary), `dashboard.py` (render + one-batch publish), run-start records and the new `Runs` / ledger fields, `--dashboard` and `--dashboard --dry-run`, refresh after every poller run (contained). **448 offline tests** pass (50 new in `tests/test_reporting.py`: totals checked against hand-built ledgers and real pipeline runs for retries, duplicate observations, partial failures, missing dates, local-day boundaries, exclusions, idempotence; mutation spot-checks on nine behaviours each fail the suite).
 
 | Check | Result | Live or mocked |
 |---|---|---|
 | Summary totals vs the ledger (unique vs attempts, alerts, rejections partition, freshness denominators, latency split, boundaries, rehearsal / fixture exclusion) | pass | **mocked** (fake ATS, CSV state) |
 | Run-start record visible during a run; one record per run; failed / degraded outcomes; gap ignores interrupted runs | pass | **mocked** |
 | Dashboard tab written in one batch, only that tab, tracker feedback untouched, rerun identical, failure contained | pass | **mocked** (fake spreadsheet: request shapes are NOT validated by the real Sheets API) |
+| Charts, sparklines and the compact layout (D-41): every request validated against Google's Sheets v4 discovery schema (0 problems); chart data block, fixed ids and delete-then-add checked | pass | **mocked** + schema (not rendered) |
 | Rendered tab inspected in a real Sheet; first refresh; `Runs` header widening to 65 columns; Actions run | **not verified** | no Sheet credentials / GitHub repository here |
 
 **Remaining setup:** none required (the tab and the new `Runs` columns are created on the first run). Rows written before this change show `n/a` for the new fields. Open items: view the first real render (column widths, merged cells, colours) and adjust; the daily Telegram digest and the independent missed-run watchdog are documented in SPEC and not built.
