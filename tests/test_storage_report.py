@@ -85,7 +85,18 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(self.build()["pending_must_be_preserved"], 1)
 
     def test_load_time_slope_comes_from_the_runs_log(self) -> None:
-        self.assertEqual(self.build()["load_seconds_per_100k_ledger_rows"], 100.0)  # 2 s at 1,000 rows -> 7 s at 6,000 rows
+        a = self.build()
+        self.assertIsNone(a["load_seconds_per_100k_ledger_rows"])  # a 5,000-row spread is too small to claim a per-row slope
+        self.assertEqual(a["load_seconds_by_ledger_size"]["largest third"]["median_load_s"], 6.5)  # runs 5-6: loads of 6 s and 7 s
+
+    def test_projection_separates_one_time_admission_from_steady_state(self) -> None:
+        p = self.build()["projection"]
+        self.assertEqual(sorted(p), ["3", "8"])  # today's 3 monitored boards, and +200 capped by the 5 that actually wait
+        self.assertEqual((p["3"]["one_time_admission_rows"], p["8"]["one_time_admission_rows"]), (0, 500))
+        self.assertEqual(p["8"]["ledger_rows_after_admission"], p["3"]["ledger_rows_after_admission"] + 500)
+        self.assertEqual(p["8"]["steady_rows_per_day_now"], round(12 * 8 / 3))  # 10 identity-only + 2 operational rows a day at 3 boards, scaled to 8
+        self.assertLess(p["8"]["steady_cells_per_day_compact"], p["8"]["steady_cells_per_day_now"])
+
 
     def test_the_report_text_names_its_assumptions_and_changes_nothing(self) -> None:
         text = sr.format_report(self.build())

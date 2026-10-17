@@ -109,15 +109,39 @@ def analyze(events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[R
         }
     # ---- compact baseline design: one row per board (and per 40k-character chunk)
     compact_rows = sum(max(1, math.ceil(c / COMPACT_CELL_CHARS)) for c in baseline_id_chars.values())
+    operational_cells = kinds["operational"] * EVENT_COLUMNS
+    compact_cells_now = compact_rows * COMPACT_COLUMNS
     # ---- load time per ledger row, from the Runs log (a measured slope, not a promise)
-    pts = [(r.events_rows, r.load_s) for r in runs if r.events_rows and r.load_s and r.completed]
-    slope = None
-    if len(pts) >= 5:
-        lo = statistics.median([p[1] for p in pts[: max(1, len(pts) // 4)]])
-        hi = statistics.median([p[1] for p in pts[-max(1, len(pts) // 4):]])
-        rlo = statistics.median([p[0] for p in pts[: max(1, len(pts) // 4)]])
-        rhi = statistics.median([p[0] for p in pts[-max(1, len(pts) // 4):]])
-        slope = round((hi - lo) / ((rhi - rlo) / 100_000), 2) if rhi > rlo else None
+    pts = sorted((r.events_rows, r.load_s) for r in runs if r.events_rows and r.completed)
+    load_by_size: dict[str, Any] = {}
+    if len(pts) >= 6:
+        third = len(pts) // 3
+        for label, chunk in (("smallest third of ledger sizes", pts[:third]), ("middle third", pts[third : 2 * third]), ("largest third", pts[2 * third :])):
+            load_by_size[label] = {"ledger_rows": f"{chunk[0][0]:,}-{chunk[-1][0]:,}", "median_load_s": statistics.median(p[1] for p in chunk), "runs": len(chunk)}
+    slope = None  # whole-second resolution and a registry of ~22k rows dominate: a per-row slope is only reported when it is real
+    if len(pts) >= 6 and pts[-1][0] - pts[0][0] > 20_000:
+        n = len(pts)
+        mx, my = sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n
+        var = sum((p[0] - mx) ** 2 for p in pts)
+        slope = round(100_000 * sum((p[0] - mx) * (p[1] - my) for p in pts) / var, 2) if var else None
+    # ---- 500 vs 700 boards: one-time admission growth kept apart from steady-state growth (linear in boards: an ASSUMPTION)
+    projection: dict[str, Any] = {}
+    nb = len(monitored)
+    for target in sorted({nb, nb + min(200, len(waiting))}):  # today's size, and +200 (fewer when fewer relevant boards wait)
+        if not nb or ops_day is None or ident_day is None:
+            break
+        scale = target / nb
+        adm_rows = 0 if target == nb else sum(max(0, b.last_job_count) for b in waiting[: target - nb])
+        ops_r, ident_r = ops_day * scale, ident_day * scale
+        rows_now = total + adm_rows
+        projection[str(target)] = {
+            "boards": target, "one_time_admission_rows": adm_rows, "ledger_rows_after_admission": rows_now,
+            "steady_rows_per_day_now": round(ops_r + ident_r), "steady_cells_per_day_now": round((ops_r + ident_r) * EVENT_COLUMNS),
+            "days_until_200k_rows_now": round((200_000 - rows_now) / (ops_r + ident_r)) if rows_now < 200_000 else 0,
+            "days_until_10M_cells_now": round((SHEET_CELL_LIMIT - rows_now * EVENT_COLUMNS) / ((ops_r + ident_r) * EVENT_COLUMNS)),
+            "steady_cells_per_day_compact": round(ops_r * EVENT_COLUMNS + 20 * 6),  # operational rows stay as they are; identity-only becomes ID chunks plus ~20 daily counter rows
+            "cells_after_admission_compact": round(operational_cells + compact_cells_now + (target - nb) * COMPACT_COLUMNS),
+        }  # fmt: skip
     pending = [s for s in lg.replay(events).values() if lg.needs_evaluation(s) or lg.needs_alert(s, now)]
     return {
         "events_total": total, "cells_now": total * EVENT_COLUMNS, "chars_now": total_chars, "by_type": dict(by_type), "seen_by_disposition": dict(seen_disp),
@@ -133,9 +157,11 @@ def analyze(events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[R
         "waiting_boards": len(waiting), "validated_total": sum(1 for b in boards.values() if b.status == STATUS_VALIDATED),
         "compact_baseline": {"rows_if_one_row_per_board_chunk": compact_rows, "cells": compact_rows * COMPACT_COLUMNS, "id_chars": id_chars,
                              "cells_saved_vs_now": kinds["baseline"] * EVENT_COLUMNS - compact_rows * COMPACT_COLUMNS,
-                             "max_ids_chars_for_one_board": max(baseline_id_chars.values(), default=0)},
+                             "max_ids_chars_for_one_board": max(baseline_id_chars.values(), default=0),
+                             "mean_id_chars": round(id_chars / max(1, sum(baseline_by_board.values())), 1)},
         "pending_must_be_preserved": len(pending),
-        "load_seconds_per_100k_ledger_rows": slope,
+        "load_seconds_per_100k_ledger_rows": slope, "load_seconds_by_ledger_size": load_by_size,
+        "projection": projection,
         "ledger_rows_logged_in_runs": (runs[0].events_rows, runs[-1].events_rows) if runs else None,
     }  # fmt: skip
 
@@ -171,6 +197,16 @@ def format_report(a: dict[str, Any]) -> str:
         f"COMPACT BASELINE (one row per board per {COMPACT_CELL_CHARS:,}-character chunk of posting IDs): {c['rows_if_one_row_per_board_chunk']:,} rows = {c['cells']:,} cells for today's baselines "
         f"(saves {c['cells_saved_vs_now']:,} cells); the largest single board needs {c['max_ids_chars_for_one_board']:,} characters of IDs (cell limit {CELL_CHAR_LIMIT:,})",
         f"MUST BE PRESERVED: {a['pending_must_be_preserved']} jobs currently awaiting evaluation or alert delivery",
-        f"LOAD TIME: about {a['load_seconds_per_100k_ledger_rows']} seconds per 100,000 ledger rows (from Runs: Load_S against Events_Rows); ledger rows logged {a['ledger_rows_logged_in_runs']}",
+        "LOAD TIME (Runs.Load_S, whole seconds, includes the ~22k-row Boards registry): " + (
+            "; ".join(f"{k}: {v['median_load_s']} s at {v['ledger_rows']} rows ({v['runs']} runs)" for k, v in a["load_seconds_by_ledger_size"].items()) or "not enough runs with ledger sizes")
+        + (f"; fitted slope {a['load_seconds_per_100k_ledger_rows']} s per 100,000 rows" if a["load_seconds_per_100k_ledger_rows"] is not None else "; no per-row slope is measurable yet"),
+        "",
+        "500 vs 700 BOARDS (steady state scales linearly with monitored boards: an assumption; one-time admission is sized from the waiting boards' last job counts)",
     ]
+    for k, v in a["projection"].items():
+        L.append(
+            f"  {v['boards']} boards: one-time admission {v['one_time_admission_rows']:,} rows -> ledger {v['ledger_rows_after_admission']:,} rows; steady growth now ~{v['steady_rows_per_day_now']:,} rows "
+            f"({v['steady_cells_per_day_now']:,} cells) a day -> 200k rows in ~{v['days_until_200k_rows_now']} days, 10M cells in ~{v['days_until_10M_cells_now']} days; "
+            f"compact design: ~{v['steady_cells_per_day_compact']:,} cells a day, {v['cells_after_admission_compact']:,} cells total after admission"
+        )
     return "\n".join(L)
