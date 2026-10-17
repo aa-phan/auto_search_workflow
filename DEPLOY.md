@@ -90,6 +90,16 @@ Start: the first scheduled run after step 7 (note its `Run_At`). Keep unchanged 
 - Day 7: the report is the evidence. The pilot is **not** complete before seven full days of scheduled runs have elapsed; "complete" also needs at least one real alert to have gone through scoring, tracker and Telegram.
 - Stop and investigate if: runs by trigger shows no `schedule` runs after 24 hours, a duplicate alert appears, `awaiting alert now` stays above zero for more than a few hours, or search credits per day exceed 20.
 
+## Watchdog (missed-run alerts; D-42)
+
+The **Watchdog** workflow (`.github/workflows/watchdog.yml`) checks every 15 minutes (GitHub schedule) that a production polling run finished successfully within **2 hours**, and sends **one** Telegram message when it did not and **one** when polling recovers, to `TELEGRAM_CHAT_ID`. It reads the `Runs` tab only, keeps its own incident record in a hidden `Watchdog` tab, and never restarts anything or changes Settings. No new secret is needed.
+
+1. **Check it without sending anything:** Actions > Watchdog > Run workflow with `dry_run` ticked. The log line `WATCHDOG HEALTHY | last success ...` shows what it sees; nothing is written or sent.
+2. **Make it independent of the hunter's trigger (recommended).** GitHub's own schedule is best-effort (here the hunter's scheduled runs fired about every 4.7 hours), so also create a **second** job on the external scheduler you use for the hourly hunter dispatch, calling the dispatch API for `watchdog.yml` every 10 to 15 minutes (`POST /repos/<owner>/<repo>/actions/workflows/watchdog.yml/dispatches` with body `{"ref":"main"}`, a token with Actions write permission, kept in the scheduler's secret store, never in this repository). Use a separate job so the two triggers fail independently.
+3. **Threshold:** default 2 hours; set the repository variable `WATCHDOG_WARN_HOURS` (or the `warn_hours` input of a manual run) to change it.
+4. **Reading its messages:** an outage message names the cause (**failed** newest run, **stalled** run that never finished, **absent** run) and the last success; the recovery message says when polling resumed. `Exit 3` / a failed Watchdog run means *monitoring unavailable* (the Runs tab could not be read), which is not evidence that the hunter stopped.
+5. **Shared dependencies that remain:** GitHub Actions, the Google Sheets API, Telegram, and the external scheduler if it is the same account for both triggers. Nothing outside these watches the watchdog; the `Watchdog` tab's `last_checked_at` shows whether it is running.
+
 ## Approval needed
 
 Creating the private repository and pushing (steps 1) are outward-facing actions that have not been authorized yet. They are the first thing to approve; secrets, the Sheet and the Telegram bot are created by you and never shared in chat.

@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated 2026-10-15 (operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-17 (watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## State
 
@@ -9,6 +9,21 @@ Board polling -> new-ID detection -> freshness classification -> filters/scoring
 Latest change (D-23..D-30, quick task 261014-olj): board slot allocation. A complete hourly poll now refreshes each monitored board's relevant / eligible counts and new-posting activity from the listing it already fetched; `Max_Active_Boards` is split into an established pool (400) and an exploration pool (100) with 7-day trials; a weekly bounded rebalance compares ended trials with the weakest established boards (**report mode by default**; `python hunter.py --rebalance-report` previews it); demoted boards keep their ledger, baseline, provenance and pending retries and re-enter with a re-established baseline; monitored SmartRecruiters boards are parked every run (history kept); validation runs two independently budgeted queues so re-checks no longer starve behind the candidate backlog; the title gate accepts "Internship", "Jr.", "Entry-Level" and "New Grad" variants. **Everything for this change is verified only with offline mocks: no live Sheet, Groq, Telegram, Serper or GitHub Actions run, and no real ATS call, was made** (tests: 275 offline).
 
 Previous change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
+
+## Pilot reliability and reporting fixes (D-42, D-43; see PILOT_LOG.md for deployment times)
+
+**Built:** `watchdog.py` + `.github/workflows/watchdog.yml` (independent missed-run watchdog), pilot-report corrections and a reconciliation section, `Runs.Code_Version`, `--storage-report` (read only), `PILOT_LOG.md`. **508 offline tests** pass (60 new: `tests/test_watchdog.py`, `tests/test_pilot_corrections.py`, `tests/test_storage_report.py`; mutation spot-checks on six watchdog behaviours fail the suite). Nothing in discovery, filtering, scoring, board capacity, allocation or `Rebalance_Mode` changed (the pipeline diff is the version tag).
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Watchdog states: healthy, stale (failed / stalled / absent), running, recovered, unavailable, dedupe (one outage, one recovery), failed-send retry, dry run, threshold, rehearsal runs ignored, no hunter imports, own concurrency group | pass | **mocked** (fake store and notifier; nothing production was touched) |
+| Watchdog read of the production `Runs` tab (`--dry-run`) | HEALTHY, last success 29 min earlier, nothing written or sent | **live**, read only |
+| Watchdog Telegram delivery, incident tab creation, real outage / recovery | **not verified** | no outage has occurred; no test message was sent (none was requested) |
+| Pilot report: elapsed denominator, distinct intervals, gaps, workflow vs board polls, latency sample, coverage populations, code versions, reconciliation | pass | **mocked** tests, then **live** (the pilot report run of 2026-10-17 19:31 UTC printed every section) |
+| Dashboard and pilot report agree on the same window | pass | **mocked** (same window, same per-job definitions); not compared live at one instant |
+| Storage report | pass | **mocked** tests, then **live** read only |
+
+**Watchdog hosting:** GitHub Actions workflow `Watchdog` (own concurrency group, GitHub schedule every 15 minutes). **Notification:** Telegram to `TELEGRAM_CHAT_ID`. **Remaining setup (owner):** a second, external trigger for `watchdog.yml` (DEPLOY.md "Watchdog"), because GitHub's own schedule has fired only about every 4.7 hours here; optionally set the repository variable `WATCHDOG_WARN_HOURS`.
 
 ## Operational dashboard (D-40)
 
