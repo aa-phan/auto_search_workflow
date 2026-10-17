@@ -29,6 +29,10 @@ on:
         type: string
         default: ""
         required: false
+      storage_report:
+        description: "Print what the Events ledger is made of and a sized storage proposal (read only: nothing is pruned, compacted or archived)"
+        type: boolean
+        default: false
       dashboard:
         description: "Only rebuild the Dashboard tab from the existing state (no polling, scoring, discovery or alerts); writes only that tab"
         type: boolean
@@ -87,7 +91,7 @@ jobs:
       # rebalance) do not deliver, so they may run before Telegram is configured.
       - name: Check configuration
         env:
-          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report || inputs.dashboard) && 'no' || 'yes' }}
+          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report) && 'no' || 'yes' }}
         run: |
           missing=""
           required="GROQ_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON GOOGLE_SHEET_ID"
@@ -104,7 +108,7 @@ jobs:
       # every search path). When the month's credits are used up, discovery is skipped and polling continues.
       # Unfiltered search only runs when 'backfill' is ticked by hand.
       - name: Poll boards, detect new jobs, score, deliver
-        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test && !inputs.dashboard }}
+        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test && !inputs.dashboard && !inputs.storage_report }}
         run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
 
       # Read-only reports (tick by hand): they read the registry, ledger, Runs and tracker and write nothing.
@@ -125,3 +129,7 @@ jobs:
       - name: Dashboard refresh only
         if: ${{ inputs.dashboard }}
         run: python hunter.py --dashboard
+
+      - name: Storage report (read only)
+        if: ${{ inputs.storage_report }}
+        run: python hunter.py --storage-report

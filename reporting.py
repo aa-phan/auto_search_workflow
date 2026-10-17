@@ -31,7 +31,7 @@ import discovery as dsc
 import freshness as fr
 import inventory
 import ledger as lg
-from boards import MONITORED, STATUS_CANDIDATE, STATUS_DISABLED, STATUS_INVALID, STATUS_VALIDATED, BoardRecord
+from boards import open_jobs, MONITORED, STATUS_CANDIDATE, STATUS_DISABLED, STATUS_INVALID, STATUS_VALIDATED, BoardRecord
 from search import BUDGET_KEY, SearchBudget
 from state import CREDIT_UNRESOLVED, KIND_REHEARSAL, OUTCOME_DEGRADED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED, RunRecord
 
@@ -326,8 +326,15 @@ def build_summary(
                     c["search_vf_match"] += 1
             if f.eval_legacy and f.eval_at is not None:
                 c["legacy_reason"] += 1
-            if (f.freshness == fr.VERIFIED_FRESH and f.disposition == lg.PENDING and f.precision == fr.TIME and f.published is not None and not f.pass_kind and f.seen_at >= f.published):
-                lat_pub[local(f.seen_at)].append((f.seen_at - f.published).total_seconds() / 60)
+            if f.disposition == lg.PENDING and not f.pass_kind:  # relevant new postings found by an ordinary poll or search: the latency sample
+                c["lat_sample"] += 1
+                if f.precision == fr.TIME and f.published is not None and f.seen_at >= f.published:
+                    c["lat_time_precise"] += 1
+                    lat_pub[local(f.seen_at)].append((f.seen_at - f.published).total_seconds() / 60)
+                elif f.published is not None:
+                    c["lat_day_precise"] += 1
+                else:
+                    c["lat_undated"] += 1
         if f.eval_at is not None:
             day[local(f.eval_at)]["evaluated_events"] += 1
             if f.eval_visible:
@@ -410,6 +417,10 @@ def build_summary(
                 "by_class": {k: total(p, f"rel:{k}") for k in (fr.VERIFIED_FRESH, fr.OBSERVED_NEW, fr.RECENT, fr.UNCERTAIN)},
             },
             "latency_min": {"publication_to_detection": lat(p, lat_pub), "detection_to_delivery": lat(p, lat_del)},
+            "latency_sample": {  # what the publication -> detection figure is measured on
+                "relevant_new_postings_detected": total(p, "lat_sample"), "time_precise_date": total(p, "lat_time_precise"),
+                "day_precision_date": total(p, "lat_day_precise"), "no_date": total(p, "lat_undated"),
+            },
             "legacy_reason_codes": total(p, "legacy_reason"),
             "errors_recorded": {s: total(p, f"errors:{s}") for s in ("evaluate", "alert")},
             "attempts": {"evaluation": total(p, "eval_attempts"), "evaluation_transient": total(p, "eval_transient"), "evaluation_failed": total(p, "eval_failed")},
@@ -618,6 +629,16 @@ def _coverage(now, finished, boards, discovery, established_target, exploration_
     ended = [b for b in trials if (t := parse_stamp(b.trial_until)) and t <= now]
     soon = [b for b in trials if (t := parse_stamp(b.trial_until)) and now < t <= now + timedelta(hours=48)]
     waiting_with_jobs = sum(1 for b in boards.values() if b.status == STATUS_VALIDATED and (b.eligible_jobs or 0) > 0)
+    open_monitored = sum(1 for b in monitored if open_jobs(b) > 0)  # monitored boards with something open for the user's targets (now)
+    waiting_run = last.waiting_relevant if last and last.run_at else None  # relevant boards waiting for a slot, as the last run counted them
+    coverage_known = None
+    if waiting_run is not None:
+        coverage_known = {
+            "monitored_with_open_relevant_jobs": open_monitored, "monitored_without": len(monitored) - open_monitored, "relevant_waiting": waiting_run,
+            "known_relevant_boards": open_monitored + waiting_run,
+            "coverage_pct": round(100 * open_monitored / (open_monitored + waiting_run), 1) if open_monitored + waiting_run else None,
+            "slots_share_pct": round(100 * len(monitored) / (len(monitored) + waiting_run), 1) if len(monitored) + waiting_run else None,
+        }  # coverage_pct: boards with open relevant jobs that have a slot / all known boards with open relevant jobs (the Runs definition); slots_share_pct counts every monitored board, including those with nothing open
     rebalance = _json_dict(discovery.get("rebalance"))
     return {
         "label": "Coverage of KNOWN eligible boards (the boards this system has found and validated), not of the job market.",
@@ -629,6 +650,7 @@ def _coverage(now, finished, boards, discovery, established_target, exploration_
         "last_run_waiting_relevant": last.waiting_relevant if last and last.run_at else None,
         "oldest_waiting_hours": last.oldest_waiting_hours if last else None,
         "relevant_board_coverage_pct": last.relevant_coverage_pct if last else None, "as_of_run": last.run_at if last else None,
+        "coverage_known_relevant": coverage_known,
         "validation": {
             "revalidation_overdue_valid": overdue_valid, "revalidation_overdue_invalid": overdue_invalid, "never_validated": never,
             "oldest_overdue_days": oldest_overdue_days, "oldest_candidate_days": oldest_candidate_days,
@@ -801,3 +823,112 @@ def format_text(s: dict[str, Any]) -> str:
     fr7 = p7["freshness"]
     out.append(f"  freshness of new postings that passed the cheap gates: {fr7['verified_fresh']} verified fresh of {fr7['dated']} dated ({fr7['verified_fresh_share_of_dated_pct']}%); {fr7['date_unknown']} have no date")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- reconciliation of the headline counts (pilot report)
+
+
+def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], start: datetime, end: datetime) -> dict[str, Any]:
+    """Name every population behind the headline counts (jobs kept, verified-fresh matches, alerts, tracker rows) for ONE
+    explicit window [start, end], so unrelated counts are never forced into a funnel. Same cleaning (rehearsal runs,
+    their events, tracker fixtures) and the same per-job facts as the dashboard; only the window differs (the
+    dashboard uses calendar days in the display time zone, this uses exact timestamps)."""
+    from boards import parse_job_url
+
+    clean = clean_inputs(runs, events, tracker)
+    facts = job_facts(clean.events)
+    inside = lambda t: t is not None and start <= t <= end  # noqa: E731
+    seen = [f for f in facts.values() if inside(f.seen_at)]
+    out = Counter(f.outcome() for f in seen)
+    kept = [f for f in seen if f.outcome() == "kept"]
+    scored = [f for f in seen if f.outcome() in ("kept", "score")]
+    fresh = lambda f: f.freshness == fr.VERIFIED_FRESH  # noqa: E731
+    expected_alert = {f.key for f in kept if fresh(f) and f.eval_alert}
+    delivered = [(f, t) for f in facts.values() for t in f.delivered_times if inside(t)]
+    alerted_keys = {f.key for f, _ in delivered}
+    seen_keys = {f.key for f in seen}
+
+    def why_not_expected(key: str) -> str:
+        f = facts[key]
+        if key not in seen_keys:
+            return "first seen outside this window" if f.seen_at else "no first-seen event"
+        if f.outcome() != "kept":
+            return f"not kept ({f.outcome()})"
+        if not fresh(f):
+            return f"class {f.freshness or 'unknown'}, not verified fresh"
+        return "evaluation did not mark it alertable (score below Min_Alert_Score)"
+
+    def why_not_alerted(key: str) -> str:
+        f = facts[key]
+        if f.alert_times and not f.delivered_times:
+            return "alert recorded but not delivered (no channel at the time)"
+        if f.delivered_times:
+            return "alert delivered outside this window"
+        return "alert pending"
+
+    not_expected: Counter[str] = Counter(why_not_expected(k) for k in alerted_keys - expected_alert)
+    not_alerted: Counter[str] = Counter(why_not_alerted(k) for k in expected_alert - alerted_keys)
+    visible_all = {f.key for f in facts.values() if f.eval_visible}
+    visible_in = {f.key for f in facts.values() if f.eval_visible and inside(f.eval_at)}
+    tracker_keys: Counter[str] = Counter()
+    unparsed = 0
+    for row in clean.tracker:
+        ident = parse_job_url((row.get("Apply_URL") or "").strip())
+        if ident is None:
+            unparsed += 1
+        else:
+            tracker_keys[ident.key] += 1
+    tkeys = set(tracker_keys)
+    return {
+        "window": {"from": _stamp(start), "to": _stamp(end), "hours": round((end - start).total_seconds() / 3600, 1)},
+        "excluded": {"rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events, "tracker_fixture_rows": clean.excluded_fixture_rows},
+        "jobs_first_observed": {  # one cohort: each job once, by the time of its first observation
+            "total": len(seen), "baseline_existing_postings": out["baseline"], "new_postings": len(seen) - out["baseline"],
+            "stopped_by_title_gate": out["title"], "stale_at_observation": out["age"],
+            "relevant_pending_or_evaluated": sum(1 for f in seen if f.disposition == lg.PENDING),
+            "awaiting_evaluation": out["pending"], "abandoned": out["abandoned"],
+            "rejected_after_hydration": {k: out[k] for k in ("location", "experience", "language", "closed")},
+            "reached_scoring": len(scored), "scored_below_threshold": out["score"], "kept_for_tracker": len(kept),
+            "kept_verified_fresh": sum(1 for f in kept if fresh(f)),
+            "kept_dated_not_fresh": sum(1 for f in kept if not fresh(f) and f.date_known), "kept_date_unknown": sum(1 for f in kept if not fresh(f) and not f.date_known),
+            "scored_verified_fresh_incl_below_threshold": sum(1 for f in scored if fresh(f)),
+            "alert_eligible": len(expected_alert),
+        },
+        "alerts_delivered": {  # an event cohort: counted by delivery time, whatever day the job was first seen
+            "delivery_events": len(delivered), "unique_jobs": len(alerted_keys), "repeat_deliveries": len(delivered) - len(alerted_keys),
+            "matching_alert_eligible_jobs": len(alerted_keys & expected_alert),
+            "alerted_but_not_in_the_alert_eligible_set": dict(not_expected), "alert_eligible_but_not_alerted": dict(not_alerted),
+        },
+        "tracker": {
+            "rows_raw": len(clean.tracker) + clean.excluded_fixture_rows, "fixture_rows_excluded": clean.excluded_fixture_rows, "rows_real": len(clean.tracker),
+            "rows_without_a_job_identity": unparsed, "distinct_jobs": len(tkeys), "duplicate_rows": sum(n - 1 for n in tracker_keys.values() if n > 1),
+            "in_ledger_as_kept_any_time": len(tkeys & visible_all), "not_in_ledger_as_kept": len(tkeys - visible_all),
+            "ledger_kept_in_window": len(visible_in), "ledger_kept_in_window_and_in_tracker": len(visible_in & tkeys),
+            "ledger_kept_any_time_but_not_in_tracker": len(visible_all - tkeys),
+        },
+    }  # fmt: skip
+
+
+def format_reconciliation(r: dict[str, Any]) -> list[str]:
+    w, j, a, t, x = r["window"], r["jobs_first_observed"], r["alerts_delivered"], r["tracker"], r["excluded"]
+    rej = j["rejected_after_hydration"]
+    lines = [
+        f"  window {w['from']} -> {w['to']} ({w['hours']:g} h); excluded: {x['rehearsal_runs']} rehearsal run(s), {x['events_from_rehearsal_runs']} of their events, {x['tracker_fixture_rows']} tracker fixture row(s)",
+        f"  JOBS FIRST OBSERVED IN THE WINDOW (one cohort, each job once): {j['total']} = {j['baseline_existing_postings']} existing postings recorded at a board's first read + {j['new_postings']} new postings",
+        f"    of the {j['new_postings']} new: {j['stopped_by_title_gate']} stopped by the title gate, {j['stale_at_observation']} stale on observation, {j['relevant_pending_or_evaluated']} relevant (queued for evaluation)",
+        f"    of the {j['relevant_pending_or_evaluated']} relevant: {j['awaiting_evaluation']} awaiting evaluation, {j['abandoned']} abandoned, {sum(rej.values())} rejected after reading the posting "
+        f"(location {rej['location']}, experience {rej['experience']}, language {rej['language']}, closed {rej['closed']}), {j['reached_scoring']} reached scoring",
+        f"    of the {j['reached_scoring']} scored: {j['scored_below_threshold']} below the tracker threshold, {j['kept_for_tracker']} KEPT for the tracker",
+        f"    of the {j['kept_for_tracker']} kept: {j['kept_verified_fresh']} verified fresh, {j['kept_dated_not_fresh']} dated but older than the window, {j['kept_date_unknown']} with no publication date; "
+        f"({j['scored_verified_fresh_incl_below_threshold']} verified-fresh jobs were scored including those below the threshold)",
+        f"    {j['alert_eligible']} of the kept, verified-fresh jobs were alert-eligible (score at or above Min_Alert_Score)",
+        f"  ALERTS DELIVERED IN THE WINDOW (an event count by delivery time, not a share of the cohort above): {a['delivery_events']} deliveries of {a['unique_jobs']} unique jobs ({a['repeat_deliveries']} repeats)",
+        f"    {a['matching_alert_eligible_jobs']} of those jobs are in the alert-eligible set above; alerted but not in it: {a['alerted_but_not_in_the_alert_eligible_set'] or 'none'}; "
+        f"alert-eligible but not alerted: {a['alert_eligible_but_not_alerted'] or 'none'}",
+        f"  TRACKER (all time, not windowed): {t['rows_raw']} rows = {t['fixture_rows_excluded']} labelled test fixture(s) + {t['rows_real']} real rows ({t['distinct_jobs']} distinct jobs"
+        f"{', ' + str(t['duplicate_rows']) + ' duplicate row(s)' if t['duplicate_rows'] else ''}{', ' + str(t['rows_without_a_job_identity']) + ' without a recognizable job URL' if t['rows_without_a_job_identity'] else ''})",
+        f"    {t['in_ledger_as_kept_any_time']} of those jobs are kept in the ledger; {t['not_in_ledger_as_kept']} are not (rows from before the ledger, hand-made rows, or other test data); "
+        f"ledger-kept jobs missing from the tracker: {t['ledger_kept_any_time_but_not_in_tracker']} (should be 0)",
+        f"    ledger-kept in this window: {t['ledger_kept_in_window']} ({t['ledger_kept_in_window_and_in_tracker']} are in the tracker)",
+    ]
+    return lines

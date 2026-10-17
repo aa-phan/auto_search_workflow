@@ -9,12 +9,14 @@ never started, or requests made outside this application) the report says so ins
 from __future__ import annotations
 
 import statistics
+from collections import Counter as Counter_
 from datetime import datetime, timedelta
 from typing import Any
 
 import freshness as fr
 import ledger as lg
-from boards import MONITORED, STATUS_VALIDATED, BoardRecord
+import reporting as rp
+from boards import MONITORED, STATUS_VALIDATED, BoardRecord, open_jobs
 from search import BUDGET_KEY, SearchBudget
 from state import RunRecord
 
@@ -52,11 +54,18 @@ def build_report(
     max_active: int = 500,
     run_timeout_s: int = 25 * 60,
 ) -> dict[str, Any]:  # fmt: skip
-    start = now - timedelta(days=days)
+    raw_runs, raw_events, raw_tracker = runs, events, tracker  # the reconciliation cleans its own copy with the same rules
+    clean = rp.clean_inputs(runs, events, tracker)  # drops rehearsal runs, their events and tracker fixtures; merges a run's start and finished records
+    runs, events, tracker = clean.runs, clean.events, clean.tracker
     unfinished = [r for r in runs if not r.completed]  # run-start records never completed: shown, never counted as runs
     runs = [r for r in runs if r.completed]
+    # The pilot window starts when the pilot actually started (its first production run), never before: dividing by a
+    # nominal 7 days when the system is 3 days old understates everything it measured.
+    first_run = min((t for r in clean.runs if (t := _parse(r.run_at, now.tzinfo))), default=None)
+    start = max(now - timedelta(days=days), first_run) if first_run else now - timedelta(days=days)
+    elapsed_hours = (now - start).total_seconds() / 3600
     in_window = [r for r in runs if (t := _parse(r.run_at, now.tzinfo)) and t >= start]
-    expected = days * 24
+    expected = int(elapsed_hours) if first_run else 0  # whole hourly intervals since the start (nothing is expected before a first run)
 
     # ---- polling gaps
     gaps = [float(r.gap_since_prev_run_min) for r in in_window if r.gap_since_prev_run_min is not None]
@@ -65,9 +74,26 @@ def build_report(
     for r in in_window:
         marker = next((part.split("=", 1)[1] for part in (r.notes or "").split("; ") if part.startswith("trigger=")), "unrecorded")
         triggers[marker] = triggers.get(marker, 0) + 1
+    # Coverage by DISTINCT hourly intervals with a successful polling run, not runs divided by hours: two runs in one
+    # hour (a manual dispatch beside the scheduled one) must not hide an empty hour.
+    successes = sorted(t for r in in_window if r.outcome in ("ok", "degraded", "") and (t := _parse(r.finished_at or r.run_at, now.tzinfo)))
+    covered = len({int((t - start).total_seconds() // 3600) for t in successes if 0 <= (t - start).total_seconds() < expected * 3600})
+    gap_edges = [start, *successes, now] if successes else []
+    long_gaps = [{"from": a.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": b.strftime("%Y-%m-%dT%H:%M:%SZ"), "minutes": round((b - a).total_seconds() / 60)}
+                 for a, b in zip(gap_edges, gap_edges[1:]) if (b - a).total_seconds() / 60 > LATE_RUN_MIN]  # fmt: skip
+    outcomes = Counter_(r.outcome or "unrecorded" for r in in_window)
+    attempted = sum(r.boards_ok + r.boards_failed for r in in_window)
     polling = {
+        "pilot_started_at": first_run.strftime("%Y-%m-%dT%H:%M:%SZ") if first_run else None, "window_from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "elapsed_hours": round(elapsed_hours, 1), "requested_days": days,
+        "intervals_expected": expected, "intervals_with_a_successful_poll": covered,
+        "interval_coverage_pct": round(100 * covered / expected, 1) if expected else None,
+        "gaps_between_successful_runs_over_90_min": long_gaps,
+        "workflow_runs_by_outcome": dict(sorted(outcomes.items())), "unfinished_run_records": len(unfinished),
+        "board_polls_attempted": attempted, "board_polls_failed": sum(r.boards_failed for r in in_window),
+        "board_poll_failure_pct": round(100 * sum(r.boards_failed for r in in_window) / attempted, 2) if attempted else None,
         "runs_by_trigger": dict(sorted(triggers.items())),  # `schedule` runs are the proof that the schedule fires; a manual run is not
-        "runs": len(in_window), "unfinished_run_records": len(unfinished), "expected_hourly_runs": expected, "run_coverage_pct": round(100 * len(in_window) / expected) if expected else None,
+        "runs": len(in_window), "expected_hourly_runs": expected,
         "gap_minutes": _stats(gaps), "late_runs_over_90_min": sum(1 for g in gaps if g > LATE_RUN_MIN),
         "worst_board_gap_minutes": _stats(board_gaps), "board_poll_failures": sum(r.boards_failed for r in in_window),
         "boards_polled": sum(r.boards_ok for r in in_window),
@@ -226,7 +252,38 @@ def build_report(
         "recent_gains_waiting": sum(1 for e in up_events if (b := boards.get(e.get("k", ""))) and b.status == STATUS_VALIDATED),
         "recent_gains_listed": len(up_events),
     }  # fmt: skip
+    # ---- detection latency: what it is measured on (sample sizes and unknown dates are part of the figure)
+    facts = rp.job_facts(events)
+    sample = [f for f in facts.values() if f.seen_at and f.seen_at >= start and f.disposition == lg.PENDING and not f.pass_kind]
+    precise = [f for f in sample if f.precision == fr.TIME and f.published and f.seen_at >= f.published]
+    minutes = [(f.seen_at - f.published).total_seconds() / 60 for f in precise]
+    detection_sample = {
+        "population": "relevant new postings (passed the title gate, not stale, not a first-read baseline) first observed in the window",
+        "detected": len(sample), "time_precise_publication": len(precise), "day_precision_publication": sum(1 for f in sample if f.published and f not in precise and f.precision != fr.TIME),
+        "no_publication_date": sum(1 for f in sample if not f.published), "publication_to_detection_minutes": _stats(minutes),
+        "detected_within_window_pct_of_time_precise": round(100 * sum(1 for m in minutes if m <= window_minutes) / len(minutes)) if minutes else None,
+        "note": "only jobs whose source gave a time-precise publication time can be measured; the others are counted here, not guessed",
+    }  # fmt: skip
+    # ---- coverage with explicit populations
+    open_mon = sum(1 for b in monitored if open_jobs(b) > 0)
+    waiting = last.waiting_relevant if last is not None else None
+    coverage["populations"] = None if waiting is None else {
+        "monitored": len(monitored), "monitored_with_open_relevant_jobs": open_mon, "monitored_with_nothing_open": len(monitored) - open_mon,
+        "relevant_boards_waiting_for_a_slot": waiting, "known_relevant_boards": open_mon + waiting,
+        "coverage_of_known_relevant_boards_pct": round(100 * open_mon / (open_mon + waiting), 1) if open_mon + waiting else None,
+        "monitored_share_of_monitored_plus_waiting_pct": round(100 * len(monitored) / (len(monitored) + waiting), 1) if len(monitored) + waiting else None,
+    }  # fmt: skip
+    # ---- code versions seen in the window: where a deployment or correction splits the measurements
+    versions: list[dict[str, Any]] = []
+    for r in sorted(in_window, key=lambda r: r.run_at):
+        tag = r.code_version or "untagged"
+        if versions and versions[-1]["version"] == tag:
+            versions[-1]["last_run_at"], versions[-1]["runs"] = r.run_at, versions[-1]["runs"] + 1
+        else:
+            versions.append({"version": tag, "first_run_at": r.run_at, "last_run_at": r.run_at, "runs": 1})
+    reconciliation = rp.reconcile(runs=raw_runs, events=raw_events, tracker=raw_tracker, start=start, end=now)
     return {
+        "detection_sample": detection_sample, "code_versions": versions, "reconciliation": reconciliation,
         "revalidation": revalidation,
         "limits": limits,
         "window": {"days": days, "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "to": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "fresh_window_hours": window_minutes / 60},
@@ -286,14 +343,20 @@ def _fmt_stats(s: dict[str, Any], unit: str = "min") -> str:
 def format_report(rep: dict[str, Any]) -> str:
     w, p, d, f, s, c, fb = rep["window"], rep["polling"], rep["delivery"], rep["failures"], rep["search"], rep["coverage"], rep["feedback"]
     lines = [
-        f"PILOT REPORT: {w['from']} -> {w['to']} ({w['days']} days; freshness window {w['fresh_window_hours']:g} h). Measured from the state; not a verdict.",
+        f"PILOT REPORT: {w['from']} -> {w['to']} (freshness window {w['fresh_window_hours']:g} h). Measured from the state; not a verdict.",
+        f"  the pilot started at {p['pilot_started_at'] or 'unknown (no run recorded)'}: {p['elapsed_hours']:g} h elapsed, so the {p['requested_days']}-day request covers {p['elapsed_hours']:g} h, not {p['requested_days'] * 24}",
+        "  code versions in the window (a deployment or correction splits the measurements here): " + (
+            "; ".join(f"{v['version']} from {v['first_run_at']} ({v['runs']} runs)" for v in rep["code_versions"]) or "none"),
         "",
-        "POLLING",
-        f"  runs recorded {p['runs']} of {p['expected_hourly_runs']} hourly slots ({p['run_coverage_pct']}%); late runs (gap > {LATE_RUN_MIN} min): {p['late_runs_over_90_min']}",
-        f"  runs by trigger: {p['runs_by_trigger'] or 'none'}  (only `schedule` shows that the schedule really fires)",
-        f"  gap between runs: {_fmt_stats(p['gap_minutes'])}",
-        f"  worst board gap per run: {_fmt_stats(p['worst_board_gap_minutes'])}; boards polled {p['boards_polled']}, failed polls {p['board_poll_failures']}",
-        f"  run-start records that never finished: {p['unfinished_run_records']} (a run that never started leaves no record: the gap before the next run shows it)",
+        "POLLING (a successful poll = a finished production run, outcome ok or degraded)",
+        f"  hourly intervals with at least one successful poll: {p['intervals_with_a_successful_poll']} of {p['intervals_expected']} whole hours since the start ({p['interval_coverage_pct']}%); distinct intervals, so extra runs in one hour do not count twice",
+        f"  gaps between successful runs over {LATE_RUN_MIN} min: " + ("; ".join(f"{g['minutes']} min ({g['from']} -> {g['to']})" for g in p["gaps_between_successful_runs_over_90_min"]) or "none"),
+        f"  workflow runs by outcome: {p['workflow_runs_by_outcome'] or 'none'}; run-start records that never finished: {p['unfinished_run_records']}",
+        f"  individual board polls (a different thing from workflow success): {p['board_polls_attempted']} attempted, {p['board_polls_failed']} failed ({p['board_poll_failure_pct']}%)",
+        f"  runs by trigger: {p['runs_by_trigger'] or 'none'}  (only `schedule` shows that the GitHub schedule really fires; `workflow_dispatch:external` is the external hourly trigger)",
+        f"  gap between runs: {_fmt_stats(p['gap_minutes'])}; late runs (gap > {LATE_RUN_MIN} min): {p['late_runs_over_90_min']}",
+        f"  worst board gap per run: {_fmt_stats(p['worst_board_gap_minutes'])}",
+        "  (a run that never started leaves no record: the gap before the next run shows it)",
         "",
         "RELEVANT FRESH JOBS BY SOURCE (title gate passed, source timestamp inside the window)",
     ]
@@ -304,10 +367,15 @@ def format_report(rep: dict[str, Any]) -> str:
         lines.append("  none yet")
     lines += [
         "",
-        "LATENCY",
-        f"  publication -> first seen, by source: " + ("; ".join(f"{k}: {_fmt_stats(v)}" for k, v in d["discovery_latency_minutes_by_source"].items()) or "none yet"),
-        f"  publication -> alert delivered: {_fmt_stats(d['publication_to_alert_minutes'])}",
-        f"  first seen -> alert delivered: {_fmt_stats(d['first_seen_to_alert_minutes'])}",
+        "LATENCY (measured only among detected jobs with usable publication evidence)",
+        f"  population: {rep['detection_sample']['population']}",
+        f"  of {rep['detection_sample']['detected']} detected: {rep['detection_sample']['time_precise_publication']} have a time-precise publication time (measured), "
+        f"{rep['detection_sample']['day_precision_publication']} a date only, {rep['detection_sample']['no_publication_date']} none (not measurable)",
+        f"  publication -> detection, all time-precise detected jobs (n={rep['detection_sample']['publication_to_detection_minutes']['n']}): {_fmt_stats(rep['detection_sample']['publication_to_detection_minutes'])}; "
+        f"{rep['detection_sample']['detected_within_window_pct_of_time_precise']}% detected inside the freshness window",
+        f"  publication -> detection, verified-fresh subset by source: " + ("; ".join(f"{k}: {_fmt_stats(v)}" for k, v in d["discovery_latency_minutes_by_source"].items()) or "none yet"),
+        f"  publication -> alert delivered (alerts in the window with a publication time, n={d['publication_to_alert_minutes'].get('n', 0)}): {_fmt_stats(d['publication_to_alert_minutes'])}",
+        f"  first seen -> alert delivered (n={d['first_seen_to_alert_minutes'].get('n', 0)}): {_fmt_stats(d['first_seen_to_alert_minutes'])}",
         "",
         "DELIVERY",
         f"  alerts sent {d['alerts_sent']}; labelled late {d['late_alerts']}; later than the window {d['alerts_later_than_the_window']}; duplicate alerts {d['duplicate_alerts']}",
@@ -326,7 +394,15 @@ def format_report(rep: dict[str, Any]) -> str:
     ]
     if c["last_run"]:
         lr = c["last_run"]
-        lines.append(f"  last run {lr['at']}: established {lr['established']}, exploration {lr['exploration']}, relevant boards waiting {lr['relevant_waiting']}, relevant-board coverage {lr['relevant_board_coverage_pct']}%")
+        lines.append(f"  last run {lr['at']}: established {lr['established']}, exploration {lr['exploration']}, relevant boards waiting {lr['relevant_waiting']}")
+    pop = c.get("populations")
+    if pop:
+        lines += [
+            f"  coverage of KNOWN relevant boards (not of the market): {pop['monitored_with_open_relevant_jobs']} of {pop['known_relevant_boards']} = {pop['coverage_of_known_relevant_boards_pct']}%  "
+            f"[{pop['monitored']} monitored, of which {pop['monitored_with_open_relevant_jobs']} have an open relevant job and {pop['monitored_with_nothing_open']} have nothing open; {pop['relevant_boards_waiting_for_a_slot']} relevant boards wait]",
+            f"  for comparison, every monitored board over monitored + waiting: {pop['monitored']} of {pop['monitored'] + pop['relevant_boards_waiting_for_a_slot']} = {pop['monitored_share_of_monitored_plus_waiting_pct']}% "
+            "(counts monitored boards with nothing open as covered; the Runs column Relevant_Coverage_Pct uses the first definition)",
+        ]
     lines += [
         "",
         "RE-CHECK FLIPS (does a 7-day re-check interval miss boards?)",
@@ -335,7 +411,10 @@ def format_report(rep: dict[str, Any]) -> str:
         "LIMITS AUDIT (measured per run; not a verdict)",
     ] + _limits_lines(rep["limits"]) + [
         "",
-        "YOUR FEEDBACK (column My_Feedback in Job Tracker; read only)",
+        "RECONCILIATION OF THE HEADLINE COUNTS (explicit window and population for each; they are not one funnel)",
+    ] + rp.format_reconciliation(rep["reconciliation"]) + [
+        "",
+        "YOUR FEEDBACK (column My_Feedback in Job Tracker; read only; test fixtures excluded)",
         f"  rows {fb['tracker_rows']}: Would apply {fb['labelled']['Would apply']}, Maybe {fb['labelled']['Maybe']}, Irrelevant {fb['labelled']['Irrelevant']}; unlabelled {fb['unlabelled']}, other text {fb['other_text']}",
         "  " + (
             f"of the labelled ones {fb['would_apply_share_of_labelled_pct']}% were 'Would apply' and {fb['useful_share_of_labelled_pct']}% 'Would apply' or 'Maybe'"

@@ -43,6 +43,7 @@ import search
 import dashboard
 import pilot
 import reporting
+import storage_report
 from meter import METER
 import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
@@ -1775,10 +1776,11 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--max-seconds", type=float, default=900.0, help="time budget for --validate")
     inv.add_argument("--allow-smartrecruiters", action="store_true", help="also bulk-validate SmartRecruiters boards (its robots.txt disallows generic crawlers)")
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
+    parser.add_argument("--storage-report", action="store_true", help="print what the Events ledger is made of and a sized proposal for compact baselines / archiving; read only, changes nothing")
     parser.add_argument("--dashboard", action="store_true", help="rebuild the Dashboard tab from the state now (writes only that tab); with --dry-run print the text version and write nothing")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.pilot_report is not None
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -1810,6 +1812,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_search_usage(cfg, store, settings)
     if args.pilot_report is not None:
         return run_pilot_report(store, settings, max(1, args.pilot_report))
+    if args.storage_report:
+        state = store.state
+        print(storage_report.format_report(storage_report.analyze(state.load_events(), state.load_boards(), state.load_runs(), fr.utcnow())))
+        return 0
     if args.dashboard:
         return run_dashboard(cfg, store, settings, dry_run=args.dry_run)
     if args.rebalance_report:
@@ -1877,6 +1883,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_smartrecruiters=(os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1",
         config_notes=config_notes,
         trigger=run_trigger(os.getenv("GITHUB_EVENT_NAME"), os.getenv("TRIGGER_SOURCE")),
+        code_version=(os.getenv("GITHUB_SHA") or "").strip()[:8],
         run_kind=KIND_PRODUCTION if (os.getenv("GITHUB_ACTIONS") or "").strip() == "true" else KIND_REHEARSAL,
         hydrate_listed=make_search_hydrator(),
         fresh_window=timedelta(hours=settings.fresh_window_hours),

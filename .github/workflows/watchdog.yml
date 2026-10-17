@@ -1,0 +1,59 @@
+name: Watchdog
+
+# Independent missed-run watchdog for the hourly Job Hunter (SPEC "Operational dashboard", D-42).
+# It reads the hunter's `Runs` tab and nothing else of its state, keeps its own incident record in a separate
+# `Watchdog` tab, and sends ONE outage and ONE recovery message to the existing Telegram recipient. It never
+# restarts a workflow, changes Settings, takes the writer lease or writes the repository.
+#
+# Triggers: GitHub's own schedule (below) AND, recommended, a second external trigger that dispatches this workflow
+# on its own timer (DEPLOY.md "Watchdog"). GitHub's schedule alone is best-effort: this repository's scheduled runs
+# have fired only about every 4-5 hours, which is too slow to catch a two-hour outage promptly.
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Read and report only: no incident state is written and no Telegram message is sent"
+        type: boolean
+        default: false
+      warn_hours:
+        description: "Warning threshold in hours (default 2; WATCHDOG_WARN_HOURS repository variable overrides the default)"
+        type: string
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+# Its own queue: it must never wait behind (or be cancelled by) a hunter run, and a running check is never cancelled.
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      WATCHDOG_WARN_HOURS: ${{ inputs.warn_hours || vars.WATCHDOG_WARN_HOURS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Only two libraries: the watchdog imports none of the hunter's own modules.
+      - name: Install dependencies
+        run: pip install "gspread>=6.0,<7" "google-auth>=2.30,<3" "requests>=2.32,<3"
+
+      # Exit 3 (monitoring unavailable) deliberately shows this run as failed, so GitHub's own failure e-mail covers
+      # a monitor that cannot read the health data. It is not evidence that the hunter stopped.
+      - name: Check polling health
+        run: python watchdog.py ${{ inputs.dry_run && '--dry-run' || '' }}

@@ -251,6 +251,9 @@ def render(sm: dict[str, Any]) -> Grid:
     row("Alerts delivered", three(["results", "alerts_delivered"]))
     row("Verified fresh, share of dated jobs", [_share(P[k]["freshness"]["verified_fresh"], P[k]["freshness"]["dated"]) for k in ("today", "7d", "30d")], "num_s")
     row("Publication → detection, median", [_med(P[k]["latency_min"]["publication_to_detection"]) for k in ("today", "7d", "30d")], "num_s")
+    ls = P["7d"]["latency_sample"]
+    i = g.add([Cell(f"Detection sample (7d): {ls['time_precise_date']} of {ls['relevant_new_postings_detected']} detected relevant postings had a time-precise publication time; {ls['day_precision_date']} a date only, {ls['no_date']} none.", "muted")], 20)
+    g.merges.append((i, 0, COLUMNS - 1))
     row("Detection → delivery, median", [_med(P[k]["latency_min"]["detection_to_delivery"]) for k in ("today", "7d", "30d")], "num_s")
 
     # ---- system, in a few lines
@@ -265,7 +268,10 @@ def render(sm: dict[str, Any]) -> Grid:
     rot = D["rotation"]
     line("Discovery", f"{D['unique_eligible_boards_found_by_search']['7d']} eligible boards found (7d) · {D['unique_verified_fresh_search_matches']['7d']} fresh matches via search · " + (UNKNOWN if rot is None else f"rotation at slot {rot['cursor']} of {fmt(rot['total_slots'])}"))
     v_, t_ = C["validation"], C["trials"]
-    line("Boards (known eligible)", f"{C['established']} established + {C['exploration']} exploring of {C['monitored']} monitored · {C['eligible_waiting_boards']} waiting for a slot · {v_['revalidation_overdue_valid']} re-checks overdue · {t_['ended_awaiting_rebalance']} trials ended")
+    ck = C["coverage_known_relevant"]
+    cover = "coverage not recorded yet" if ck is None else f"{ck['monitored_with_open_relevant_jobs']} of {ck['known_relevant_boards']} known relevant boards have a slot ({fmt(ck['coverage_pct'], '%')}; {ck['monitored_without']} monitored have nothing open, {ck['relevant_waiting']} wait)"
+    line("Board coverage", cover + " · of known boards, not the market")
+    line("Pools", f"{C['established']} established + {C['exploration']} exploring = {C['monitored']} monitored · {v_['revalidation_overdue_valid']} re-checks overdue · {t_['ended_awaiting_rebalance']} trials ended")
     line("Dropped (7d)", f"title {o7['title']} · age {o7['age']} · location {o7['location']} · experience {o7['experience']} · language {o7['language']} · closed {o7['closed']} · score {o7['score']} · {f7['new_postings_date_unknown']} new posting(s) without a date")
     fb = FB["feedback"]
     line("Your feedback", f"Would apply {fb['Would apply']} · Maybe {fb['Maybe']} · Irrelevant {fb['Irrelevant']} · unlabelled {FB['unlabelled']}" + (f"  ({fmt(FB['would_apply_or_maybe_pct_of_labelled'], '%')} of {FB['labelled_total']} labelled are Would apply or Maybe)" if FB["labelled_total"] else ""))

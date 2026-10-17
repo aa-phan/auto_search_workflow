@@ -111,6 +111,7 @@ class Deps:
     workers: int = 8
     sleep: Callable[[float], None] = time.sleep  # backoff between validation retries (tests pass a no-op)
     dry_run: bool = False
+    code_version: str = ""  # commit that ran (GITHUB_SHA, 8 characters); recorded in Runs so reports can mark deployment periods
     run_kind: str = KIND_PRODUCTION  # `rehearsal` for a local run: its run record says so and reports leave it out
     pool_policy: pools.PoolPolicy = field(default_factory=pools.PoolPolicy)  # max_active is always max_monitored_boards
 
@@ -163,7 +164,7 @@ def run_cycle(d: Deps) -> RunRecord:
     events_loaded = d.state.load_events()
     states = lg.replay(events_loaded)
     runs = d.state.load_runs()
-    run = RunRecord(lg.stamp(now), run_id=f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}", outcome=OUTCOME_STARTED, run_kind=d.run_kind)
+    run = RunRecord(lg.stamp(now), run_id=f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}", outcome=OUTCOME_STARTED, run_kind=d.run_kind, code_version=d.code_version)
     run.load_s, run.events_rows, run.boards_rows = round(time.monotonic() - t_start), len(events_loaded), len(boards)
     t_eval: float | None = None
     # The gap is measured from the previous run that FINISHED: an interrupted run polled nothing that was saved

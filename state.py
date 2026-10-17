@@ -53,7 +53,7 @@ RUN_COLUMNS = [
     "Duration_S", "Load_S", "Discovery_S", "Poll_S", "Evaluate_S", "Events_Rows", "Boards_Rows",
     "Sheets_Reads", "Sheets_Writes", "Sheets_429", "ATS_Requests", "ATS_429", "ATS_Seconds", "Groq_Calls", "Groq_429",
     "Run_ID", "Finished_At", "Outcome", "Run_Kind", "Search_Failed", "Search_Account_Used", "Credit_Status",
-    "Eval_Attempted", "Eval_Transient", "Eval_Failed",
+    "Eval_Attempted", "Eval_Transient", "Eval_Failed", "Code_Version",
 ]  # fmt: skip
 RUN_ID_COLUMN = RUN_COLUMNS.index("Run_ID") + 1  # 1-based sheet column
 # Run outcomes. A run-start record is written first with STARTED; the end of the run overwrites it. A record that
@@ -135,6 +135,7 @@ class RunRecord:
     eval_attempted: int = 0  # evaluation attempts made this run (retries included; not unique jobs)
     eval_transient: int = 0  # attempts that ended in a temporary failure (retried later, nothing recorded per job)
     eval_failed: int = 0  # attempts recorded as failures against the job (bounded)
+    code_version: str = ""  # first 8 characters of the commit that ran (GITHUB_SHA): reports use it to find the periods a deployment or correction affected
 
     @property
     def completed(self) -> bool:
@@ -165,7 +166,7 @@ class RunRecord:
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
                    *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
                    *(num(i) or 0 for i in range(36, 55)),
-                   row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0)  # fmt: skip
+                   row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0, row[65])  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
