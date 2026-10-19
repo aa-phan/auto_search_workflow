@@ -32,7 +32,7 @@ Deployment times and material corrections during the seven-day pilot, so the fin
 
 ## Tracker column move (2026-10-18)
 
-The user moved `My_Feedback` to column D; rows written after the move (rows 38 to 44, Date_Found 2026-10-18 and the night before) were appended one column off because the app wrote by fixed position. **Affected period:** from the first row written after the move until the repair, 2026-10-18 2026-10-19 02:45 UTC. **Effect on measurements:** the pilot report's and dashboard's feedback counts read those seven rows' `My_Feedback` as numeric "other text" and left their real label blank; duplicate-row protection read the wrong column. Ledger-based counts (jobs, alerts, tracker additions) were not affected. Repaired by hand in the Sheet; the code now writes by header name (D-44, deployed in the commit following b1b20ce).
+The user moved `My_Feedback` to column D; rows written after the move (rows 38 to 44, Date_Found 2026-10-18 and the night before) were appended one column off because the app wrote by fixed position. **Affected period:** from the first row written after the move until the repair, 2026-10-18 2026-10-19 02:45 UTC. **Effect on measurements:** the pilot report's and dashboard's feedback counts read those seven rows' `My_Feedback` as numeric "other text" and left their real label blank; duplicate-row protection read the wrong column. Ledger-based counts (jobs, alerts, tracker additions) were not affected. Repaired by hand in the Sheet; the code now writes by header name (D-44, deployed 2026-10-19 02:45 UTC in 0447ad0).
 
 ## Earlier failed runs (not affecting the pilot window)
 
