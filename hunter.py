@@ -1049,6 +1049,33 @@ def is_visible(row: JobRow, min_alert_score: int) -> bool:
     return row.score is not None and row.score >= min(MIN_TRACKER_SCORE, min_alert_score)
 
 
+def column_letter(index: int) -> str:
+    """0-based column index -> A1 letters (0 -> A, 26 -> AA)."""
+    out, n = "", index + 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def header_index(header: list[str], name: str, default: int) -> int:
+    """0-based position of a tracker column by its HEADER NAME, so the user may reorder the columns; `default` only when
+    the header has no such name (an old or hand-built tab)."""
+    names = [h.strip() for h in header]
+    return names.index(name) if name in names else default
+
+
+def tracker_row_for_header(header: list[str], cells: list[Any]) -> list[Any]:
+    """`cells` (in TRACKER_COLUMNS order) laid out the way the tracker's own header orders its columns. Columns the app
+    does not know (the user's own) stay blank; a header that does not even contain Apply_URL is not a tracker we can
+    place values in by name, so the standard order is used."""
+    values = dict(zip(TRACKER_COLUMNS, cells))
+    names = [h.strip() for h in header]
+    if "Apply_URL" not in names:
+        return list(cells)
+    return [values.get(n, "") for n in names]
+
+
 DISPLAY_FORMAT = "%m/%d/%Y %I:%M %p"
 
 
@@ -1216,13 +1243,23 @@ class SheetStore:
         except Exception as exc:
             log.warning("Sheet styling skipped: %s", exc)
 
+    def _tracker_header(self, ws: Any) -> list[str]:
+        try:
+            header = ws.row_values(1) if hasattr(ws, "row_values") else []
+        except Exception as exc:
+            log.warning("Could not read the tracker header: %s", exc)
+            header = []
+        return [str(h) for h in header] or list(TRACKER_COLUMNS)
+
     def _status_dropdown(self, ws: Any) -> None:
-        self._dropdown(ws, 2, STATUS_CHOICES, "Status")
+        self._dropdown(ws, header_index(self._tracker_header(ws), "My_Status", 2), STATUS_CHOICES, "Status")
 
     def _status_row_colors(self, ws: Any) -> None:
         """Colour a tracker row by the status the user set (conditional formatting on column C; nothing is written
         to any cell). Idempotent: a rule that already exists, matched by its formula, is not added again."""
         try:
+            header = self._tracker_header(ws)
+            letter = column_letter(header_index(header, "My_Status", ord(STATUS_COLUMN_LETTER) - ord("A")))
             existing: set[str] = set()
             meta = self.sh.fetch_sheet_metadata() if hasattr(self.sh, "fetch_sheet_metadata") else {}
             for sheet in (meta or {}).get("sheets", []):
@@ -1232,11 +1269,11 @@ class SheetStore:
                             existing.add(str(v.get("userEnteredValue", "")))
             requests_: list[dict[str, Any]] = []
             for status, (r, g, b) in STATUS_ROW_COLORS.items():
-                formula = f'=${STATUS_COLUMN_LETTER}2="{status}"'
+                formula = f'=${letter}2="{status}"'
                 if formula in existing:
                     continue
                 requests_.append({"addConditionalFormatRule": {"index": 0, "rule": {
-                    "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2000, "startColumnIndex": 0, "endColumnIndex": len(TRACKER_COLUMNS)}],
+                    "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2000, "startColumnIndex": 0, "endColumnIndex": max(len(header), len(TRACKER_COLUMNS))}],
                     "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
                                     "format": {"backgroundColor": {"red": r, "green": g, "blue": b}}},
                 }}})  # fmt: skip
@@ -1281,7 +1318,9 @@ class SheetStore:
 
     def tracked_keys(self) -> set[str]:
         """Identity keys already in Job Tracker (read from Apply_URL, column I)."""
-        return tracker_keys_from_urls(self.sh.worksheet(TRACKER_TAB).col_values(URL_COLUMN)[1:])
+        ws = self.sh.worksheet(TRACKER_TAB)
+        column = header_index(self._tracker_header(ws), "Apply_URL", URL_COLUMN - 1) + 1  # found by header name: the user may have moved columns
+        return tracker_keys_from_urls(ws.col_values(column)[1:])
 
     def tracker_rows(self) -> list[dict[str, str]]:
         """Every tracker row as {column: value} (read only: used for the pilot report)."""
@@ -1296,8 +1335,10 @@ class SheetStore:
     # -- writes: strictly append-only so the user's edits to My_Status / User_Notes / My_Feedback survive
     def append_jobs(self, rows: list[JobRow]) -> None:
         if rows:
-            self.sh.worksheet(TRACKER_TAB).append_rows(
-                [r.cells(tz=self.display_tz) for r in rows], value_input_option="USER_ENTERED", table_range="A1"
+            ws = self.sh.worksheet(TRACKER_TAB)
+            header = self._tracker_header(ws)  # each value goes under its own header, wherever the user has put that column
+            ws.append_rows(
+                [tracker_row_for_header(header, r.cells(tz=self.display_tz)) for r in rows], value_input_option="USER_ENTERED", table_range="A1"
             )
 
 
@@ -1352,8 +1393,10 @@ class CsvStore:
         dashboard.publish_csv(self.state.dir, grid)
 
     def append_jobs(self, rows: list[JobRow]) -> None:
+        with self.path.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), None) or list(TRACKER_COLUMNS)
         with self.path.open("a", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerows(r.cells(tz=self.display_tz) for r in rows)
+            csv.writer(fh).writerows(tracker_row_for_header(header, r.cells(tz=self.display_tz)) for r in rows)
 
 
 def make_store(cfg: Config) -> SheetStore | CsvStore:

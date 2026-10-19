@@ -132,7 +132,7 @@ The first runs mostly *learn* the boards (quietly recording what is already ther
 
 Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defaults then apply (add the rows to change them). `Target_Levels` now defaults to `Coordinator, Associate, Specialist, Intern, Assistant, Junior, Entry Level, New Grad`; a Sheet that already has its own value keeps it, so add `Entry Level` and `New Grad` there if you want those titles. "Internship" matches `Intern`, "Jr"/"Jr." matches `Junior`, and "Entry-Level" matches `Entry Level`; seniority words such as Senior or Lead still exclude a title.
 
-**Job Tracker tab** shows jobs scoring 50 or higher. The script only ever *adds* rows, so your edits are safe:
+**Job Tracker tab** shows jobs scoring 50 or higher. You can reorder its columns (for example put `My_Feedback` next to `My_Status`) and add your own; the app finds each column by its **header name**, so please do not rename the headers. The script only ever *adds* rows, so your edits are safe:
 
 | Column | Meaning |
 |---|---|

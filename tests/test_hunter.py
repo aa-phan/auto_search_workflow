@@ -561,6 +561,78 @@ class SheetTests(unittest.TestCase):
         self.assertEqual(store.state.load_events(), [ev])
 
 
+class MovedColumnTests(unittest.TestCase):
+    """The user may reorder tracker columns (for example move My_Feedback next to My_Status). The app writes and reads by
+    HEADER NAME, so a moved column never shifts values into the wrong place."""
+
+    MOVED = ["Date_Found", "Date_Posted", "My_Status", "My_Feedback", "AI_Score", "Company_and_Title", "Location", "AI_Verdict", "Missing_Gaps", "Apply_URL", "User_Notes", "Freshness", "Source"]
+
+    def store(self, header: list[str], rows: list[list[str]] | None = None) -> tuple[h.SheetStore, FakeWorksheet]:
+        tracker = FakeWorksheet("Job Tracker", [header] + (rows or []))
+        return sheet_store(FakeSpreadsheet([FakeWorksheet("Settings"), tracker])), tracker
+
+    def test_a_new_row_lands_under_its_own_headers_when_a_column_was_moved(self) -> None:
+        store, tracker = self.store(self.MOVED)
+        store.append_jobs([job(score=88, url="https://boards.greenhouse.io/acme/jobs/9")])
+        written = dict(zip(self.MOVED, tracker.appended[0][0][0]))
+        self.assertEqual((written["My_Status"], written["AI_Score"], written["My_Feedback"], written["User_Notes"]), ("To Apply", 88, "", ""))
+        self.assertEqual((written["Apply_URL"], written["Freshness"], written["Source"]), ("https://boards.greenhouse.io/acme/jobs/9", "Verified fresh", "Board poll"))
+        self.assertIn("Acme", written["Company_and_Title"])
+        self.assertEqual(len(tracker.appended[0][0][0]), len(self.MOVED))
+
+    def test_an_unmoved_tracker_is_written_exactly_as_before(self) -> None:
+        store, tracker = self.store(list(h.TRACKER_COLUMNS))
+        r = job()
+        store.append_jobs([r])
+        self.assertEqual(tracker.appended[0][0][0], r.cells(tz=store.display_tz))
+
+    def test_the_users_own_extra_columns_stay_blank(self) -> None:
+        header = ["My_Notes_Mine", *self.MOVED, "Interview_Date"]
+        store, tracker = self.store(header)
+        store.append_jobs([job()])
+        written = dict(zip(header, tracker.appended[0][0][0]))
+        self.assertEqual((written["My_Notes_Mine"], written["Interview_Date"], written["My_Status"]), ("", "", "To Apply"))
+
+    def test_a_header_without_apply_url_falls_back_to_the_standard_order(self) -> None:
+        store, tracker = self.store(["a", "b", "c"])
+        r = job()
+        store.append_jobs([r])
+        self.assertEqual(tracker.appended[0][0][0], r.cells(tz=store.display_tz))
+
+    def test_tracked_keys_find_the_url_column_by_name_after_the_move(self) -> None:
+        row = ["d", "", "Applied", "Would apply", 90, "Acme — X", "NYC", "v", "gap", "https://boards.greenhouse.io/acme/jobs/123?gh_src=x", "note", "Verified fresh", "Board poll"]
+        store, _ = self.store(self.MOVED, [row, ["d"] * 9 + ["https://example.com/not-an-ats"]])
+        self.assertEqual(store.tracked_keys(), {"greenhouse|acme|123"})  # column I is Missing_Gaps now: reading it by position would find nothing
+
+    def test_row_colours_and_dropdowns_follow_the_moved_status_column(self) -> None:
+        header = ["Date_Found", "My_Feedback", "My_Status", *[c for c in self.MOVED if c not in ("Date_Found", "My_Feedback", "My_Status")]]
+        store, tracker = self.store(header)
+        store._status_row_colors(tracker)
+        formulas = [v["userEnteredValue"] for b in store.sh.batches for r in b["requests"] for v in r["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"]]
+        self.assertIn('=$C2="Applied"', formulas)  # My_Status is column C in this order
+        header2 = ["My_Status", *[c for c in self.MOVED if c != "My_Status"]]
+        store2, tracker2 = self.store(header2)
+        store2._status_row_colors(tracker2)
+        formulas2 = [v["userEnteredValue"] for b in store2.sh.batches for r in b["requests"] for v in r["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"]]
+        self.assertIn('=$A2="Applied"', formulas2)
+        store2._status_dropdown(tracker2)
+        self.assertEqual(store2.sh.batches[-1]["requests"][0]["setDataValidation"]["range"]["startColumnIndex"], 0)
+
+    def test_helpers(self) -> None:
+        self.assertEqual([h.column_letter(i) for i in (0, 2, 25, 26, 27)], ["A", "C", "Z", "AA", "AB"])
+        self.assertEqual(h.header_index(["x", " My_Status "], "My_Status", 9), 1)
+        self.assertEqual(h.header_index(["x"], "My_Status", 9), 9)
+
+    def test_csv_tracker_follows_its_header_too(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "t.csv"
+            path.write_text(",".join(self.MOVED) + "\n")
+            store = h.CsvStore(path, Path(d) / "state")
+            store.append_jobs([job(score=77)])
+            row = store.tracker_rows()[0]
+            self.assertEqual((row["AI_Score"], row["My_Feedback"], row["Source"]), ("77", "", "Board poll"))
+
+
 class CsvTests(unittest.TestCase):
     def test_migrates_legacy_header_keeping_history(self) -> None:
         with tempfile.TemporaryDirectory() as d:

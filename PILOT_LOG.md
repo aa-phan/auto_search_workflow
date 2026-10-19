@@ -30,6 +30,10 @@ Deployment times and material corrections during the seven-day pilot, so the fin
 4. **Feedback and tracker counts** exclude labelled test fixtures (two rows) in the pilot report as the dashboard already did.
 5. **Headline counts reconciled** with explicit windows and populations (see the report's RECONCILIATION section): the dashboard's "24 verified fresh of 30 kept" and the pilot report's "25 alerts" were generated 44 minutes apart (18:02 and 18:46 UTC) over different windows (calendar days in the Sheet's time zone against exact timestamps); at one instant the figures agree (25 alert-eligible fresh jobs, 25 alerted).
 
+## Tracker column move (2026-10-18)
+
+The user moved `My_Feedback` to column D; rows written after the move (rows 38 to 44, Date_Found 2026-10-18 and the night before) were appended one column off because the app wrote by fixed position. **Affected period:** from the first row written after the move until the repair, 2026-10-18 2026-10-19 02:45 UTC. **Effect on measurements:** the pilot report's and dashboard's feedback counts read those seven rows' `My_Feedback` as numeric "other text" and left their real label blank; duplicate-row protection read the wrong column. Ledger-based counts (jobs, alerts, tracker additions) were not affected. Repaired by hand in the Sheet; the code now writes by header name (D-44, deployed in the commit following b1b20ce).
+
 ## Earlier failed runs (not affecting the pilot window)
 
 Five workflow runs failed between 2026-10-15 01:21 and 01:53 UTC during setup (two missing-secret checks, an empty resume, a Groq key error in the delivery test, and one Sheets read-quota 429). The pilot's first production run is 01:47; the 01:53 failure is the only failed run inside the window, and the 429 retry fix deployed seconds later has held since.

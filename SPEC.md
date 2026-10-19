@@ -102,6 +102,7 @@ A failure at one stage never marks later stages done. These stages belong to the
 ## Delivery
 
 - **Statuses and colours:** `My_Status` choices are To Apply, Stretch / Review (written by the app) and Applied, Interviewing, Offer, Pass, Rejected (set by the user). A conditional-formatting rule per user-set status colours the whole row (the app writes no cell for this and adds a rule only if it is missing); the two app statuses keep the default look.
+- **Column order is yours:** the app finds every tracker column by its **header name** (it appends each value under its own header and finds `Apply_URL` and `My_Status` by name), so you may reorder columns (for example move `My_Feedback` next to `My_Status`) and add your own columns; do not rename the headers. A header without `Apply_URL` is not a tracker the app can place values in by name, so it falls back to the standard order. (Before D-44 new rows were written by fixed position, so a moved column put them out of place.)
 - **Job Tracker** tab (visible): jobs scoring >= 50; `To Apply` (>= `Min_Alert_Score`) or `Stretch / Review`; columns include `Freshness` and `Source`. Append-only; user edits to `My_Status` / `User_Notes` are never overwritten.
 - **Telegram**: one message per `verified_fresh` job scoring >= `Min_Alert_Score`, with title, company, location, score, verdict, gaps, apply link, tracker link.
 - Hidden tabs hold internal state: `Boards`, `Events` (append-only ledger), `Runs`, `Discovery` (rotation cursor, hydration retry queue, last run's queries).

@@ -10,6 +10,10 @@ Latest change (D-23..D-30, quick task 261014-olj): board slot allocation. A comp
 
 Previous change (D-17..D-21): scheduled discovery is a persistent rotation of date-windowed searches within a credit budget (unfiltered search is manual `--backfill` only); every source goes through one board-admission path; the freshness window is 12 hours (discovery interval is a separate setting); pending deliveries are no longer discarded when jobs age past the window. **Verified only with mocks** (offline tests); no live Serper call, Sheet, Groq or Telegram was made for this change.
 
+## Tracker column order (D-44)
+
+**Fixed:** the app wrote tracker rows by fixed position, so moving `My_Feedback` put seven new rows one column off (rows 38 to 44); it now writes and reads by header name. The seven rows were repaired by hand in the live Sheet and checked by screenshot (values under the right headers, dropdowns and colours intact, links restored). **516 offline tests** pass (8 new in `tests/test_hunter.py`; mutation checks on the three lookups fail the suite). **Not verified live:** no new tracker row has been written since the fix; the next real alert (or a `delivery_test`) will show it.
+
 ## Pilot reliability and reporting fixes (D-42, D-43; see PILOT_LOG.md for deployment times)
 
 **Built:** `watchdog.py` + `.github/workflows/watchdog.yml` (independent missed-run watchdog), pilot-report corrections and a reconciliation section, `Runs.Code_Version`, `--storage-report` (read only), `PILOT_LOG.md`. **508 offline tests** pass (60 new: `tests/test_watchdog.py`, `tests/test_pilot_corrections.py`, `tests/test_storage_report.py`; mutation spot-checks on six watchdog behaviours fail the suite). Nothing in discovery, filtering, scoring, board capacity, allocation or `Rebalance_Mode` changed (the pipeline diff is the version tag).
