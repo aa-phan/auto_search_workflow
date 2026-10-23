@@ -23,7 +23,7 @@ Deployment times and material corrections during the seven-day pilot, so the fin
 | 2026-10-17 19:33 | 3b41c83 | Storage report projections | none |
 | 2026-10-19 02:45 | 0447ad0 | Tracker written and read by header name (D-44) | tracker placement only |
 | 2026-10-22 01:47 | | **Seven-day pilot window ends** (168 of 168 hourly intervals polled; see STATUS "Pilot week 1 result") | end of the pilot measurement |
-| (on push) | | Graduation floor (D-45) and tracker header refusal (D-46); then, set by the user in Settings, `Max_Active_Boards` 700 and `Rebalance_Mode` on | **post-pilot: parameters held constant above change here**; board counts, polls per run, ATS requests and Events growth are not comparable across this point |
+| 2026-10-23 20:52 | 76726a6 | Graduation floor (D-45) and tracker header refusal (D-46); Settings changed at the user's request at the same time: `Max_Active_Boards` 700 and `Rebalance_Mode` on | **post-pilot: parameters held constant above change here**; board counts, polls per run, ATS requests and Events growth are not comparable across this point |
 
 ## Material corrections (reporting only; no behaviour changed)
 
