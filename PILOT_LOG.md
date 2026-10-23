@@ -24,6 +24,7 @@ Deployment times and material corrections during the seven-day pilot, so the fin
 | 2026-10-19 02:45 | 0447ad0 | Tracker written and read by header name (D-44) | tracker placement only |
 | 2026-10-22 01:47 | | **Seven-day pilot window ends** (168 of 168 hourly intervals polled; see STATUS "Pilot week 1 result") | end of the pilot measurement |
 | 2026-10-23 20:52 | 76726a6 | Graduation floor (D-45) and tracker header refusal (D-46); Settings changed at the user's request at the same time: `Max_Active_Boards` 700 and `Rebalance_Mode` on | **post-pilot: parameters held constant above change here**; board counts, polls per run, ATS requests and Events growth are not comparable across this point |
+| 2026-10-23 21:21 | (Settings only) | Title and location Settings broadened at the user's request (written through the Sheets connector, read back): `Target_Roles` +17 (graphic / visual / motion design, video, editorial, copywriting, paid and planned media, influencer, website), `Target_Levels` +19 (early-career words and unqualified job nouns such as Analyst, Strategist, Designer, Writer, Editor, Producer), `Excluded_Title_Words` +11 (sales, accounting, customer service / support / success, moderation, social worker), `Target_Locations` + US Hybrid, Dallas, Houston | relevant-job counts, board relevance and eligible counts, Groq calls, tracker inflow and the search rotation length (6 sites x 36 roles) are not comparable across this point; the 2026-10-29 rebalance mixes evidence from both rules |
 
 ## Material corrections (reporting only; no behaviour changed)
 

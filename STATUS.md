@@ -195,4 +195,6 @@ Post-pilot week at 700 boards with `Rebalance_Mode` on (from 2026-10-23 20:52 UT
 2. **First real rebalance** (due about 2026-10-29 01:00 UTC): read the `rebalance_report` run and check graduations against the floor (D-45), replacements against the bound, and that no board moved on thin evidence. This is the first evidence about the D-30 operating choices.
 3. **Limits at 700:** run duration against the 25 min timeout, Sheets reads per minute and Events growth (compare with the 500-board pilot and the storage report projection; not comparable across the 2026-10-23 change).
 
+4. **Wider title and location Settings** (2026-10-23 21:21 UTC, PILOT_LOG; aim: 20-30 tracker rows a day, pilot was about 7): watch relevant jobs per day, the share scored 50+, tracker rows per day, Groq 429s, and whether sales / support / accounting titles still reach the tracker. Checked offline only against the title gate (sample titles); the live effect is unmeasured. The user's existing roles `Account`, `Digital`, `Community` and `Social` are broad; the new exclusions block the known leaks (accounts payable, digital sales, social worker) but not, for example, "Community Associate" (often front desk).
+
 No score tuning or new features until these are read (AGENTS.md rule 7).
