@@ -98,7 +98,7 @@ class AllocationProgressTests(unittest.TestCase):
             self.assertLessEqual(h_["plan"].replacements, 20)
 
     def test_graduation_into_a_vacancy_is_not_a_replacement_and_the_cap_does_not_limit_exploration_turnover(self) -> None:
-        trials = [mk(f"t{i:02d}", EXP, n30=0, open_=1) for i in range(30)]
+        trials = [mk(f"t{i:02d}", EXP, n30=0, open_=2) for i in range(30)]  # score 2.0: at the graduation floor
         registry = reg(*trials, *[wait(f"w{i:02d}") for i in range(30)])
         plan = pools.plan_rebalance(registry, policy(max_active=100, exploration_pct=50, max_replacements=2), T0)
         self.assertEqual((plan.count("graduate"), plan.replacements), (30, 0))  # 50 vacancies in established: no victims needed

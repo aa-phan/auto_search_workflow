@@ -1065,14 +1065,22 @@ def header_index(header: list[str], name: str, default: int) -> int:
     return names.index(name) if name in names else default
 
 
+class TrackerLayoutError(RuntimeError):
+    """Job Tracker row 1 is not a header the app can place values under (cleared, overwritten or renamed)."""
+
+
 def tracker_row_for_header(header: list[str], cells: list[Any]) -> list[Any]:
     """`cells` (in TRACKER_COLUMNS order) laid out the way the tracker's own header orders its columns. Columns the app
-    does not know (the user's own) stay blank; a header that does not even contain Apply_URL is not a tracker we can
-    place values in by name, so the standard order is used."""
+    does not know (the user's own) stay blank. A header without Apply_URL is refused, never filled by fixed position:
+    a cleared row 1 once made every new row land one or more columns off (D-46). The caller's failure leaves the job
+    retryable, and the failed run is what the watchdog reports."""
     values = dict(zip(TRACKER_COLUMNS, cells))
-    names = [h.strip() for h in header]
+    names = [str(h).strip() for h in header]
     if "Apply_URL" not in names:
-        return list(cells)
+        raise TrackerLayoutError(
+            "Job Tracker row 1 is not the header (no 'Apply_URL' column): nothing was written. Restore the header row "
+            "(File > Version history, or type the column names back); the rows wait and are written on the next run"
+        )
     return [values.get(n, "") for n in names]
 
 
@@ -1249,7 +1257,7 @@ class SheetStore:
         except Exception as exc:
             log.warning("Could not read the tracker header: %s", exc)
             header = []
-        return [str(h) for h in header] or list(TRACKER_COLUMNS)
+        return [str(h) for h in header]  # may be empty: a cleared row 1 is reported, never replaced by the standard order
 
     def _status_dropdown(self, ws: Any) -> None:
         self._dropdown(ws, header_index(self._tracker_header(ws), "My_Status", 2), STATUS_CHOICES, "Status")
@@ -1319,13 +1327,18 @@ class SheetStore:
     def tracked_keys(self) -> set[str]:
         """Identity keys already in Job Tracker (read from Apply_URL, column I)."""
         ws = self.sh.worksheet(TRACKER_TAB)
-        column = header_index(self._tracker_header(ws), "Apply_URL", URL_COLUMN - 1) + 1  # found by header name: the user may have moved columns
-        return tracker_keys_from_urls(ws.col_values(column)[1:])
+        names = [h.strip() for h in self._tracker_header(ws)]
+        if "Apply_URL" in names:  # found by header name: the user may have moved columns
+            return tracker_keys_from_urls(ws.col_values(names.index("Apply_URL") + 1)[1:])
+        log.error("Job Tracker row 1 is not the header (no 'Apply_URL'): duplicate-row protection reads every cell instead")
+        return tracker_keys_from_urls(str(c) for row in ws.get_all_values() for c in row)
 
     def tracker_rows(self) -> list[dict[str, str]]:
         """Every tracker row as {column: value} (read only: used for the pilot report)."""
         values = self.sh.worksheet(TRACKER_TAB).get_all_values()
-        header = values[0] if values else []
+        header = [str(h).strip() for h in values[0]] if values else []
+        if values and "Apply_URL" not in header:
+            log.error("Job Tracker row 1 is not the header (no 'Apply_URL'): tracker counts in this report are not meaningful")
         return [dict(zip(header, list(r) + [""] * (len(header) - len(r)))) for r in values[1:]]
 
     def publish_dashboard(self, grid: dashboard.Grid) -> None:

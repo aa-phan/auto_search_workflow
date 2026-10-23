@@ -21,6 +21,9 @@ Deployment times and material corrections during the seven-day pilot, so the fin
 | 2026-10-16 20:45 - 20:58 | 919e0b9 .. db55dee | Dashboard charts and layout (D-41) | the Dashboard tab only |
 | 2026-10-17 19:30 | 6291a5b | **Missed-run watchdog workflow** (D-42), **pilot-report corrections**, `Code_Version` column, storage report | see "Material corrections" |
 | 2026-10-17 19:33 | 3b41c83 | Storage report projections | none |
+| 2026-10-19 02:45 | 0447ad0 | Tracker written and read by header name (D-44) | tracker placement only |
+| 2026-10-22 01:47 | | **Seven-day pilot window ends** (168 of 168 hourly intervals polled; see STATUS "Pilot week 1 result") | end of the pilot measurement |
+| (on push) | | Graduation floor (D-45) and tracker header refusal (D-46); then, set by the user in Settings, `Max_Active_Boards` 700 and `Rebalance_Mode` on | **post-pilot: parameters held constant above change here**; board counts, polls per run, ATS requests and Events growth are not comparable across this point |
 
 ## Material corrections (reporting only; no behaviour changed)
 
@@ -41,3 +44,7 @@ Five workflow runs failed between 2026-10-15 01:21 and 01:53 UTC during setup (t
 ## Watchdog
 
 Deployed 2026-10-17 19:30 (6291a5b). Live dry run at 19:31 against the production Runs tab: `HEALTHY`, last success 29 minutes before, no state written, no message sent. The first real outage or recovery notification has not happened and has not been tested live (see DEPLOY.md "Watchdog" for what remains).
+
+## Tracker header cleared (2026-10-22 to 2026-10-23)
+
+Row 1 of the Job Tracker was cleared between the rows written 10/22 12:04 PM and 10/22 10:03 PM Central (a manual edit; no code writes row 1). The next append filled row 1 with a job, and that row plus the three written on 10/23 went in by fixed position (score under `My_Feedback`). **Effect on measurements:** from then on the pilot report and dashboard keyed tracker rows by that job's values: the 2026-10-23 20:17 UTC report's tracker reconciliation ("0 distinct jobs, 77 without a recognizable job URL") and feedback counts ("unlabelled 77") are wrong; ledger-based counts (jobs, alerts, evaluations) are not affected. **Repaired** 2026-10-23 about 20:50 UTC through the Sheets connector (header restored in the user's order, four rows rewritten at rows 76 to 79); the code now refuses to write without a header (D-46, from its deployment).

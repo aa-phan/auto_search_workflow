@@ -595,10 +595,21 @@ class RebalancePlanTests(unittest.TestCase):
                 self.assertEqual(actions(plan)["greenhouse|t1"], "replace")  # 2.0 apart and a second weak cycle
 
     def test_free_established_slots_graduate_ended_trials_without_a_victim(self) -> None:
-        registry = reg(mk("e1", EST, **STRONG), mk("t1", EXP, **STRONG), mk("t2", EXP, n30=0, open_=1))
+        registry = reg(mk("e1", EST, **STRONG), mk("t1", EXP, **STRONG), mk("t2", EXP, n30=0, open_=2))
         plan = pools.plan_rebalance(registry, policy(max_active=6, exploration_pct=50), T0)  # established target 3, one filled
         self.assertEqual(sorted(actions(plan).values()), ["graduate", "graduate"])
         self.assertEqual(plan.replacements, 0)
+
+    def test_a_free_established_slot_needs_the_graduation_floor(self) -> None:
+        # established is empty (every slot free); t1 scores 2.0 (at the floor), t2 1.0 and t3 0.0 (below it)
+        registry = reg(mk("t1", EXP, n30=0, open_=2), mk("t2", EXP, n30=0, open_=1), mk("t3", EXP, n30=0, open_=0), wait("w1"), wait("w2"))
+        plan = pools.plan_rebalance(registry, policy(max_active=10, exploration_pct=20), T0)
+        self.assertEqual(actions(plan), {"greenhouse|t1": "graduate", "greenhouse|t2": "return", "greenhouse|t3": "return"})
+        reasons = {d.key: d.reason for d in plan.decisions}
+        self.assertIn("below the graduation floor", reasons["greenhouse|t3"])
+        # nobody waiting: a below-floor trial keeps its trial slot instead of taking an established one
+        registry = reg(mk("t1", EXP, n30=0, open_=1))
+        self.assertEqual(actions(pools.plan_rebalance(registry, policy(max_active=10, exploration_pct=20), T0)), {"greenhouse|t1": "keep"})
 
     def test_losing_trials_return_only_as_many_as_there_are_waiting_boards_weakest_first(self) -> None:
         trials = [mk(f"t{i}", EXP, n30=0, open_=1 + (i % 2)) for i in range(5)]  # scores 1 and 2: none beats e1 (score 3) by more than 1

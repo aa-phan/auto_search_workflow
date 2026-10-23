@@ -1,6 +1,25 @@
 # STATUS
 
-Last updated 2026-10-17 (watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-23 (pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+
+## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
+
+All figures from the read-only `pilot_report` and `rebalance_report` workflow runs against the production Sheet (**live**). Window of the report: the last 168 h.
+
+| Criterion (DEPLOY.md section 9) | Result |
+|---|---|
+| Seven full days of runs | 168 of 168 hourly intervals had a successful poll; no gap over 90 min; 207 runs, all `ok`; 0.31% of 103,500 board polls failed |
+| Real alert through scoring, tracker and Telegram | 20 alerts, 20 unique jobs, 0 duplicates, 0 failed sends, 1 labelled late (Telegram receipt not checked by the agent) |
+| Schedule fires | 38 `schedule` runs (about every 4.4 h) plus 168 `workflow_dispatch:external`: the external trigger carries the hourly cadence |
+| Pending failures | 0 awaiting evaluation, 0 awaiting alert, 0 hydration retries |
+| Search credits | 140 in 7 days (20/day: at the stop threshold, not over) |
+
+**Freshness:** publication -> detection, verified-fresh poll jobs median 29 min, p90 54 min (n=310); search-found median 455 min (n=8); all time-precise relevant jobs 79% inside the 12 h window (n=402). Publication -> alert median 29.5 min. **Funnel (one cohort):** 19,380 new postings -> 472 relevant -> 212 rejected after reading (location 131, experience 71, language 10) -> 260 scored -> 47 kept -> 20 alerted (about 3 a day). **Limits:** run median 113 s, max 770 s (51% of the 25 min timeout); Sheets reads peak 12.4/min (quota ~60); no ATS or Groq 429s; Events 140,668 rows, ~2,900/day. **Coverage:** 500 monitored (all exploration trials), 849 relevant boards waiting, 33% of known relevant boards. **Re-checks:** 12,460 validated boards overdue (the daily budget cannot re-check ~21,000 boards weekly); 0.7% of re-checks gained relevant jobs and all 55 gainers still wait for a slot. **Feedback:** labelled on most tracker rows (the report could not read them until the header fix below).
+
+**Changes after the pilot (code on this branch; not deployed until pushed):**
+- **D-45 graduation floor** (`pools.GRADUATION_FLOOR` = 2.0): a free established slot needs a score of at least 2; offline tests (the floor test fails when the floor is 0). The user is raising `Max_Active_Boards` to 700 and setting `Rebalance_Mode` to `on` in Settings **after** this is deployed; without the floor all ~495 ended trials, including ~94 scoring 0-1, would take established slots. The next rebalance is due about 2026-10-29 01:00 UTC.
+- **D-46 tracker header** (found live): row 1 had been cleared, so four rows (10/22 10:03 PM and three on 10/23) were written by fixed position and the report could not read the tracker. **Sheet repaired live** through the Sheets connector (header restored in the user's order, the four rows rewritten in place, read back and checked). Code now refuses to write without a header, reads every cell for duplicate protection, strips header names in reports and flags it on the dashboard; **mocked** tests only (520 offline pass; mutation checks on refusal and name stripping fail the suite). Not yet verified live: the next tracker row after deployment.
+
 
 ## State
 
@@ -48,7 +67,7 @@ Previous change (D-17..D-21): scheduled discovery is a persistent rotation of da
 
 - **Deployed:** private-then-public repo, secrets set, Sheet connected, Telegram group delivery verified (labelled fixture), two manual polling runs (second added 0 jobs: no duplicates), a quota failure under back-to-back runs found and fixed (retry on HTTP 429), SmartRecruiters unparked by decision (D-38), Board Inventory enabled with its schedule.
 - **Diagnostics for the limits audit** (this change): per-run duration and phase times, Google Sheets request counts and quota rejections, ATS and Groq request counts and 429s, and Events/Boards row counts are recorded in `Runs` and summarized in the pilot report (`LIMITS AUDIT`). Measured values only exist from this change onward.
-- **Not yet true:** the schedule is unverified until `Runs.Notes` shows `trigger=schedule`; no real alert has been delivered; the pilot has not started.
+- **Since then (2026-10-23):** the schedule fired (38 `schedule` runs in the last 7 days), 20 real alerts were delivered and the seven-day pilot is complete (see "Pilot week 1 result" above).
 
 ## Deployment preparation and pilot (D-37)
 

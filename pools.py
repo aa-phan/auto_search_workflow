@@ -212,6 +212,7 @@ RATE_CAP = 5.0  # new relevant postings per week counted at most this far
 RATE_WEIGHT = 2.0  # one new relevant posting per week is worth two open jobs
 MARGIN = 1.0  # a trial must beat the weakest established board by MORE than this to displace it
 WEAK_CYCLES_TO_DEMOTE = 2  # consecutive rebalance cycles as a replacement target before an established board leaves
+GRADUATION_FLOOR = 2.0  # a free established slot goes only to a trial scoring at least this (about one new relevant posting a week, or two open eligible jobs)
 EVIDENCE_MAX_AGE = timedelta(hours=24)
 SLACK = timedelta(hours=1)  # clock slack for "trial ended" and "rebalance due"
 REBALANCE_KEY = "rebalance"  # Discovery-tab key: when the last rebalance ran
@@ -478,10 +479,15 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
     vacancies = max(0, policy.established_target - (len(established) - shed_established))
     weak: set[str] = set()
     losers: list[BoardRecord] = []
+    below_floor: set[str] = set()
     vi = 0
     for g in ended:
         sg = sc(g)
         if vacancies > 0:
+            if sg < GRADUATION_FLOOR:
+                below_floor.add(g.key)  # a free slot is not a reason to keep a board that shows nothing for the user
+                losers.append(g)
+                continue
             vacancies -= 1
             plan.decisions.append(Decision(g.key, "graduate", sg, reason=f"graduated: trial ended with score {sg:.1f}; established has a free slot"))
             continue
@@ -524,7 +530,11 @@ def plan_rebalance(registry: dict[str, BoardRecord], policy: PoolPolicy, now: da
     for i, g in enumerate(losers):
         sg = sc(g)
         if i < waiting:
-            plan.decisions.append(Decision(g.key, "return", sg, reason=f"trial lost: score {sg:.1f} does not beat the weakest established board by more than {MARGIN:g}; returned to the waiting list"))
+            why = (
+                f"score {sg:.1f} is below the graduation floor of {GRADUATION_FLOOR:g}" if g.key in below_floor
+                else f"score {sg:.1f} does not beat the weakest established board by more than {MARGIN:g}"
+            )
+            plan.decisions.append(Decision(g.key, "return", sg, reason=f"trial lost: {why}; returned to the waiting list"))
         else:
             plan.decisions.append(Decision(g.key, "keep", sg, reason="trial ended, kept (no relevant board waiting)"))
     # Unjudged trials share what is left of the waiting list, oldest trial first. They were never
@@ -723,7 +733,8 @@ def format_report(pv: Preview, policy: PoolPolicy, now: datetime) -> str:
         f"({policy.exploration_pct}% exploration, initial choices, not proven values) | trial {policy.exploration_days} days | "
         f"rebalance every {policy.rebalance_every_days} days | at most {policy.max_replacements} established boards replaced per cycle",
         f"score = {RATE_WEIGHT:g} x min(new relevant postings per week, {RATE_CAP:g}) + min(open eligible jobs, {OPEN_CAP}); a trial must beat an "
-        f"established board by more than {MARGIN:g}, which must be weak in {WEAK_CYCLES_TO_DEMOTE} consecutive cycles; decisions need "
+        f"established board by more than {MARGIN:g}, which must be weak in {WEAK_CYCLES_TO_DEMOTE} consecutive cycles; a free established "
+        f"slot needs a score of at least {GRADUATION_FLOOR:g}; decisions need "
         f"{policy.min_complete_polls} complete polls, a good last poll and evidence under 24 h old",
         "",
         "COVERAGE",

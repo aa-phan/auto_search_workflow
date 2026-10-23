@@ -695,6 +695,10 @@ def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finishe
         if t and (now - t).total_seconds() > run_timeout_s + 600:
             rows.append({"severity": 0, "what": "run interrupted", "ref": r.run_id or r.run_at, "count": 1, "since": r.run_at, "last": None,
                          "detail": "started, never finished", "action": "Check the Actions run (timeout, cancel or runner loss); state of that run was not saved."})  # fmt: skip
+    if clean.tracker and not any("Apply_URL" in row for row in clean.tracker):
+        rows.append({"severity": 0, "what": "tracker header missing", "ref": "Job Tracker row 1", "count": len(clean.tracker), "since": None, "last": None,
+                     "detail": "row 1 of Job Tracker has no 'Apply_URL' header, so new rows cannot be placed and tracker counts are wrong",
+                     "action": "Restore the header row (File > Version history, or type the column names back); waiting rows are written on the next run."})  # fmt: skip
     for p in health["providers"]:
         if p["degraded"]:
             rows.append({"severity": 1, "what": "provider degraded", "ref": p["provider"], "count": p["failing_last_poll"], "since": None, "last": None,

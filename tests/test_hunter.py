@@ -593,11 +593,37 @@ class MovedColumnTests(unittest.TestCase):
         written = dict(zip(header, tracker.appended[0][0][0]))
         self.assertEqual((written["My_Notes_Mine"], written["Interview_Date"], written["My_Status"]), ("", "", "To Apply"))
 
-    def test_a_header_without_apply_url_falls_back_to_the_standard_order(self) -> None:
+    def test_a_header_without_apply_url_is_refused_not_filled_by_position(self) -> None:
         store, tracker = self.store(["a", "b", "c"])
-        r = job()
-        store.append_jobs([r])
-        self.assertEqual(tracker.appended[0][0][0], r.cells(tz=store.display_tz))
+        with self.assertRaises(h.TrackerLayoutError):
+            store.append_jobs([job()])
+        self.assertEqual(tracker.appended, [])
+
+    def test_a_cleared_header_row_is_refused_and_the_row_waits(self) -> None:
+        # D-46, found live: row 1 was cleared, Sheets' append filled the empty row 1, and rows went in by fixed position
+        old = ["d", "", "Applied", "Would apply", 90, "Acme — X", "NYC", "v", "gap", "https://boards.greenhouse.io/acme/jobs/123", "", "Verified fresh", "Board poll"]
+        store, tracker = self.store([""] * 13, [old])
+        with self.assertRaises(h.TrackerLayoutError):
+            store.append_jobs([job()])
+        self.assertEqual(tracker.appended, [])
+        self.assertEqual(store.tracked_keys(), {"greenhouse|acme|123"})  # duplicate protection still finds every job URL
+        self.assertEqual(store.tracker_rows()[0].get("Apply_URL"), None)  # no header: the report cannot key the rows
+
+    def test_header_names_are_matched_ignoring_stray_spaces_in_reports(self) -> None:
+        row = ["d", "", "Applied", "Maybe", 90, "Acme — X", "NYC", "v", "gap", "https://boards.greenhouse.io/acme/jobs/123", "", "Verified fresh", "Board poll"]
+        store, _ = self.store([c + " " if c in ("Apply_URL", "My_Feedback") else c for c in self.MOVED], [row])
+        got = store.tracker_rows()[0]
+        self.assertEqual((got["Apply_URL"], got["My_Feedback"]), ("https://boards.greenhouse.io/acme/jobs/123", "Maybe"))
+
+    def test_a_missing_tracker_header_is_listed_under_needs_attention(self) -> None:
+        import reporting
+        from test_core import T0
+        clean = reporting.clean_inputs([], [], [{"10/22/2026 10:03 PM": "x", "To Apply": "y"}])
+        health = {"providers": []}
+        out = reporting._failures(T0, clean, {}, {}, 1500, [], [], health)
+        self.assertIn("tracker header missing", [r["what"] for r in out["table"]])
+        clean = reporting.clean_inputs([], [], [{"Apply_URL": "https://boards.greenhouse.io/acme/jobs/1"}])
+        self.assertNotIn("tracker header missing", [r["what"] for r in reporting._failures(T0, clean, {}, {}, 1500, [], [], health)["table"]])
 
     def test_tracked_keys_find_the_url_column_by_name_after_the_move(self) -> None:
         row = ["d", "", "Applied", "Would apply", 90, "Acme — X", "NYC", "v", "gap", "https://boards.greenhouse.io/acme/jobs/123?gh_src=x", "note", "Verified fresh", "Board poll"]
