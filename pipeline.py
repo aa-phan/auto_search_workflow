@@ -421,6 +421,16 @@ def run_cycle(d: Deps) -> RunRecord:
                  "extend": plan.count("extend"), "rotate": plan.count("rotate"), "shed": plan.count("shed")}, separators=(",", ":"),
             )  # fmt: skip
             rebalance_values[pools.REBALANCE_REPORT_KEY] = pools.plan_json(plan, now, policy.mode)
+        elif policy.mode == "on":
+            # Between weekly cycles, ended trials below the graduation floor give their slot back now (D-47);
+            # the next run admits waiting boards into it.
+            released = pools.apply_releases(boards, pools.early_releases(boards, policy, now, blocked), now)
+            if released:
+                dirty.update({b.key: b for b in released})
+                run.demoted += len(released)
+                run.notes += f"{len(released)} ended trials below the graduation floor returned to the waiting list early; "
+                for b in released:
+                    log.info("Pool %s: exploration -> waiting (%s)", b.key, b.pool_reason)
         cov = pools.coverage(boards, now, blocked, policy.cooldown)
         run.pool_established, run.pool_exploration, run.waiting_relevant = cov["established"], cov["exploration"], cov["waiting"]
         run.oldest_waiting_hours, run.relevant_coverage_pct = cov["oldest_waiting_hours"], cov["coverage_pct"]

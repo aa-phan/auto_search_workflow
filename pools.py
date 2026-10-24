@@ -593,6 +593,32 @@ def apply_plan(registry: dict[str, BoardRecord], plan: RebalancePlan, now: datet
     return list(changed.values())
 
 
+RELEASE_PREFIX = "release"  # pool_reason prefix of an early release; NOT "rebalance ", so rebalance_due ignores it
+
+
+def early_releases(registry: dict[str, BoardRecord], policy: PoolPolicy, now: datetime, blocked: Callable[[str], Any] | None = None) -> list[Decision]:
+    """Between weekly rebalances (D-47): the trials the weekly plan would return to the waiting list
+    with a score below the graduation floor. They lose on every weekly path, so holding their slots
+    until the next cycle only keeps waiting boards out. Same evidence rules and the same cap (no more
+    than are actually waiting), because the decisions come from plan_rebalance itself; graduations,
+    replacements, streaks, rotations and extensions are left to the weekly cycle."""
+    plan = plan_rebalance(registry, policy, now, blocked)
+    return [d for d in plan.decisions if d.action == "return" and d.score is not None and d.score < GRADUATION_FLOOR]
+
+
+def apply_releases(registry: dict[str, BoardRecord], decisions: list[Decision], now: datetime) -> list[BoardRecord]:
+    """Apply early releases (mode "on"): each board returns to the waiting list, history kept."""
+    prefix = f"{RELEASE_PREFIX} {_day(now)}: "
+    changed: list[BoardRecord] = []
+    for d in decisions:
+        rec = registry.get(d.key)
+        if rec is None or rec.status not in MONITORED or rec.pool != POOL_EXPLORATION:
+            continue
+        demote(rec, now, prefix + d.reason)
+        changed.append(rec)
+    return changed
+
+
 def score_or_zero(rec: BoardRecord, now: datetime) -> float:
     value = score(rec, now)
     return 0.0 if value is None else value

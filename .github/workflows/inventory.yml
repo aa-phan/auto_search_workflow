@@ -8,7 +8,8 @@ name: Board Inventory
 # promoted within the polling budget (Settings: Max_Active_Boards, Max_New_Boards_Per_Run).
 # Two independently budgeted queues: never-validated candidates (--max-validations) and overdue
 # re-checks of validated/invalid boards (--max-revalidations, oldest first), so the candidate
-# backlog cannot starve the re-checks.
+# backlog cannot starve the re-checks. Re-checks run at about 4 boards/s, so 5000 fits inside
+# --max-seconds (D-47: a pass over the ~21,000 validated boards under the current title Settings).
 
 on:
   schedule:
@@ -79,6 +80,6 @@ jobs:
           REFRESH=false
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "23 5 * * 1" ]; then REFRESH=true; fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.refresh }}" = "true" ]; then REFRESH=true; fi
-          ARGS="--validate --max-validations 4000 --max-revalidations 2000 --max-seconds 1500"
+          ARGS="--validate --max-validations 4000 --max-revalidations 5000 --max-seconds 1500"
           if [ "$REFRESH" = "true" ]; then ARGS="--import-inventory $ARGS"; fi
           python hunter.py $ARGS

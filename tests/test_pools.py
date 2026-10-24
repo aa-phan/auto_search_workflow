@@ -7,6 +7,7 @@ Telegram.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -669,6 +670,49 @@ class RebalancePlanTests(unittest.TestCase):
         self.assertEqual(registry["greenhouse|e1"].weak_streak, 0)
 
 
+class EarlyReleaseTests(unittest.TestCase):
+    """D-47: between weekly cycles, ended trials below the graduation floor give their slot back."""
+
+    def test_only_below_floor_returns_are_released_and_no_more_than_are_waiting(self) -> None:
+        registry = reg(
+            mk("t1", EXP, n30=0, open_=2), mk("t2", EXP, n30=0, open_=1), mk("t3", EXP, n30=0, open_=0),
+            mk("running", EXP, n30=0, open_=0, trial_end_hours=48), mk("thin", EXP, n30=0, open_=0, polls=3), wait("w1"),
+        )  # fmt: skip
+        pol = policy(max_active=10, exploration_pct=20)
+        self.assertEqual([d.key for d in pools.early_releases(registry, pol, T0)], ["greenhouse|t3"])  # weakest first, one waiting
+        registry["greenhouse|w2"] = wait("w2")
+        released = pools.early_releases(registry, pol, T0)
+        self.assertEqual(sorted(d.key for d in released), ["greenhouse|t2", "greenhouse|t3"])  # t1 (at the floor) waits to graduate
+        self.assertTrue(all(d.action == "return" and "below the graduation floor" in d.reason for d in released))
+        del registry["greenhouse|w1"], registry["greenhouse|w2"]
+        self.assertEqual(pools.early_releases(registry, pol, T0), [])  # nobody waiting: nobody is freed
+
+    def test_a_below_floor_trial_that_beats_an_established_board_is_left_to_the_weekly_cycle(self) -> None:
+        # established target 1, filled by e1 (score 0); t1 scores about 1.9: below the floor but more than 1 above e1
+        registry = reg(mk("e1", EST, n30=0, open_=0), mk("t1", EXP, n30=2, open_=1), wait("w1"))
+        pol = policy(max_active=2, exploration_pct=50)
+        self.assertEqual(actions(pools.plan_rebalance(registry, pol, T0))["greenhouse|t1"], "defer")
+        self.assertEqual(pools.early_releases(registry, pol, T0), [])
+        # t2 scores 2 (at the floor) and loses to e2 (score 3): the weekly cycle returns it, an early release does not
+        registry = reg(mk("e2", EST, n30=0, open_=3), mk("t2", EXP, n30=0, open_=2), wait("w1"))
+        self.assertEqual(actions(pools.plan_rebalance(registry, pol, T0))["greenhouse|t2"], "return")
+        self.assertEqual(pools.early_releases(registry, pol, T0), [])
+
+    def test_applying_a_release_keeps_history_and_does_not_move_the_weekly_clock(self) -> None:
+        registry = reg(mk("t3", EXP, n30=0, open_=0), wait("w1"))
+        before = registry["greenhouse|t3"]
+        baseline, provenance = before.baselined_at, before.provenance
+        last = json.dumps({"at": stamp(T0 - timedelta(days=2))})
+        pol = policy(max_active=10, exploration_pct=20)
+        changed = pools.apply_releases(registry, pools.early_releases(registry, pol, T0), T0)
+        rec = registry["greenhouse|t3"]
+        self.assertEqual([r.key for r in changed], ["greenhouse|t3"])
+        self.assertEqual((rec.status, rec.pool, rec.baselined_at, rec.provenance), (bd.STATUS_VALIDATED, "", baseline, provenance))
+        self.assertTrue(rec.pool_reason.startswith("release 2026-10-14: trial lost: score 0.0 is below the graduation floor"))
+        self.assertFalse(pools.rebalance_due(last, registry, T0, pol))  # a release is not a rebalance
+        self.assertEqual(pools.apply_releases(registry, pools.early_releases(registry, pol, T0), T0), [])  # nothing left to release
+
+
 class CoverageTests(unittest.TestCase):
     def test_coverage_numbers(self) -> None:
         registry = reg(mk("e1", EST), mk("e2", EST, open_=0), mk("t1", EXP), wait("w1"), wait("w2", open_=0))
@@ -747,6 +791,41 @@ class RebalancePipelineTests(HarnessCase):
         self.assertIn("Pool greenhouse|strong: exploration -> established", text)
         self.assertIn("Pool greenhouse|weak: established -> waiting", text)
         self.assertEqual((run.pool_established, run.pool_exploration, run.waiting_relevant), (1, 0, 0))  # the replaced board is cooling down, not waiting
+
+    def release_setup(self, mode: str) -> tuple[bd.BoardId, bd.BoardId]:
+        """`dud` is admitted on a trial, then its relevant job closes and the trial ends with a month of
+        polls behind it (score 0); `nxt` is validated but waits for the single slot; a rebalance ran two
+        days ago, so the weekly cycle is not due."""
+        dud, nxt = bd.BoardId(bd.GREENHOUSE, "dud"), bd.BoardId(bd.GREENHOUSE, "nxt")
+        self.kw = {"max_monitored_boards": 1, "pool_policy": rebalance_policy(exploration_days=1, rebalance_every_days=7, mode=mode)}
+        self.w.listings[dud.key] = [job("dud", "d1", published=ago(days=30))]
+        self.w.listings[nxt.key] = [job("nxt", "n1", published=ago(days=30))]
+        self.assertEqual(self.w.run(seeds=[dud], **self.kw).boards_activated, 1)
+        self.w.listings[dud.key] = [job("dud", "d2", title="Warehouse Picker", published=ago(days=30))]
+        self.w.state.save_discovery_state({pools.REBALANCE_KEY: json.dumps({"at": ago(days=2)})}, stamp(T0))
+        rec = self.board(dud)
+        rec.trial_until, rec.complete_polls, rec.activity_since = ago(hours=1), 200, ago(days=40)
+        self.w.state.save_boards([rec])
+        return dud, nxt
+
+    def test_on_mode_releases_an_ended_trial_below_the_floor_between_weekly_cycles(self) -> None:
+        dud, nxt = self.release_setup("on")
+        with self.assertLogs("hunter", level="INFO") as logs:
+            run = self.w.run(minutes_later=60, seeds=[nxt], **self.kw)
+        self.assertEqual((run.rebalance, run.demoted), ("", 1))  # not a weekly cycle, one slot freed
+        out = self.board(dud)
+        self.assertEqual((out.status, out.pool), (bd.STATUS_VALIDATED, ""))
+        self.assertTrue(out.pool_reason.startswith("release 2026-10-14: trial lost: score 0.0"))  # one slot: no established target here
+        self.assertIn("Pool greenhouse|dud: exploration -> waiting", "\n".join(logs.output))
+        self.assertIn("returned to the waiting list early", run.notes)
+        nxt_run = self.w.run(minutes_later=60, **self.kw)
+        self.assertEqual((nxt_run.boards_activated, self.board(nxt).pool, nxt_run.rebalance), (1, EXP, ""))  # the waiting board takes the slot; still no weekly cycle
+        self.assertEqual(self.board(dud).status, bd.STATUS_VALIDATED)  # cooling down, not re-admitted
+
+    def test_report_mode_releases_nothing_between_weekly_cycles(self) -> None:
+        dud, nxt = self.release_setup("report")
+        run = self.w.run(minutes_later=60, seeds=[nxt], **self.kw)
+        self.assertEqual((run.demoted, self.board(dud).pool, self.board(nxt).status), (0, EXP, bd.STATUS_VALIDATED))
 
     def test_first_weak_cycle_only_advances_the_streak(self) -> None:
         self.mature(weak_streak=0)
