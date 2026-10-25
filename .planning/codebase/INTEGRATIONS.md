@@ -1,139 +1,132 @@
+---
+last_mapped_commit: aa1bab2d3c3e37ac119cd898b2e4f42a50f276fe
+last_mapped_at: 2026-10-24
+---
 # External Integrations
 
-**Analysis Date:** 2026-10-14
+**Analysis Date:** 2026-10-24
+
+Secrets are referred to by variable name only. No values are recorded here. Live vs mocked status follows `STATUS.md`; the same rule applies in `AGENTS.md` rule 5.
 
 ## APIs & External Services
 
-**Web search (job discovery):**
-- Serper (Google Search API) - Finds candidate job-posting URLs with `site:` filters for the supported ATS hosts.
-  - Endpoint: `https://google.serper.dev/search` (`SERPER_URL` in `hunter.py` ~line 85)
-  - Client: `requests.post` in the search function (`hunter.py` ~line 388), timeout `HTTP_TIMEOUT = 20`
-  - Auth: `SERPER_API_KEY` (sent as request header; fallback env `SEARCH_API_KEY`)
-  - Controls: `SEARCH_TBS` (default `qdr:d3`), `SEARCH_PAGES` (default 2), `SERPER_NUM` (default 0, Serper free tier rejects num > 10)
-  - Note: `legacy/hunter_local_scoring.py` also supports Tavily (`https://api.tavily.com/search`). The active `hunter.py` does not.
+**Job board ATS public APIs (polling and validation; no auth):**
+- Greenhouse Job Board API - `https://boards-api.greenhouse.io/v1/boards/{board}/jobs` (list) and `.../jobs/{job_id}` (hydrate). Adapter: `boards.py` (lines 27, 120). Verified live in `DECISIONS.md` D-33.
+- Lever Postings API - `https://api.lever.co/v0/postings/{board}` (list) and `.../{posting_id}` (hydrate). Adapter: `boards.py` line 28; `hunter.py` line 121. Per-provider spacing 1 s (`inventory.py` `MIN_INTERVAL`), per Lever's `Crawl-delay`.
+- Ashby Posting API - `https://api.ashbyhq.com/posting-api/job-board/{board}`. Adapter: `boards.py` line 29; `hunter.py` line 122.
+- Workable - `https://apply.workable.com/api/v1/widget/accounts/{board}` (list, undocumented widget endpoint) and `https://apply.workable.com/api/v2/accounts/{company}/jobs/{shortcode}` (hydrate). Adapter: `boards.py` lines 30, 126, 152-154; `hunter.py` line 123. Completeness is unverified (`DECISIONS.md` D-33).
+- SmartRecruiters Posting API - `https://api.smartrecruiters.com/v1/companies/{board}/postings` (list) and `.../postings/{posting_id}` (hydrate). Adapter: `boards.py` line 31; `hunter.py` line 124. **Policy:** `api.smartrecruiters.com/robots.txt` says `Disallow: /` for generic agents. The provider is parked by default, and polling is opted in for the pilot with `ALLOW_SMARTRECRUITERS_BULK=1` in `.github/workflows/job_hunter.yml`. Reversal steps are in `DECISIONS.md` D-38. Robots status is checked in `inventory.py` (line 343).
+- Public job URLs that are stored as links, not fetched: `jobs.lever.co`, `jobs.ashbyhq.com`, `job-boards.greenhouse.io`, `jobs.smartrecruiters.com`, `apply.workable.com/{board}/j/{job_id}/` (`boards.py` line 97 and surrounding code).
 
-**LLM scoring (job-to-resume fit):**
-- Groq (OpenAI-compatible Chat Completions API) - Scores each posting 0-100 against the candidate's resume and returns JSON.
-  - Endpoint: `https://api.groq.com/openai/v1/chat/completions` (`GROQ_URL` in `hunter.py` ~line 91)
-  - Client: raw `requests` session (`self.http.post`), no Groq SDK. Timeout 60 s.
-  - Auth: `Authorization: Bearer` header with `GROQ_API_KEY`
-  - Models: primary `GROQ_MODEL` (default `llama-3.3-70b-versatile`), fallback `GROQ_FALLBACK_MODEL` (default `llama-3.1-8b-instant`). Switches to fallback on 429 from the primary, and holds there for `FALLBACK_HOLD_SECONDS = 90`.
-  - Request shape: `temperature: 0.2`, `max_tokens: MAX_OUTPUT_TOKENS`, `response_format: {"type": "json_object"}`.
-  - Rate control: per-model `TokenBudget` (`GROQ_TPM` 12000, `GROQ_FALLBACK_TPM` 6000), `LLM_MIN_INTERVAL_SECONDS` 2.2 pacing, exponential backoff, honors `retry-after`. Error text `json_validate_failed` triggers a retry.
-  - Model JSON output is parsed defensively (tolerates code fences and surrounding prose).
+**Search (candidate discovery only; `SPEC.md` "Discovery"):**
+- Tavily Search API - `https://api.tavily.com/search` (POST) and `https://api.tavily.com/usage` (GET). Client: `search.py` (`TAVILY_API`, lines 32, 116-149), using `requests`. Auth: Bearer token from `TAVILY_API_KEY`. Rotating, date-windowed slots, budget-capped (`DECISIONS.md` D-18, D-36). Unfiltered `--backfill` is manual only. If the key is absent, discovery is skipped and polling still runs.
+- Earlier Serper provider is retired (`DECISIONS.md` D-36). Not used by the current code.
 
-**Job-board hydration (reading the full posting):**
-Each ATS has a public, unauthenticated JSON API. `classify_url` (`hunter.py` ~line 278) maps a posting URL to an ATS reference, then the matching `_hydrate_*` function fetches it with `requests.get(..., headers={"User-Agent": USER_AGENT, "Accept": ...}, timeout=HTTP_TIMEOUT)`.
+**Board inventories (weekly and daily import; public, no auth):**
+- `open-ats-feed` - `https://raw.githubusercontent.com/veresk06/open-ats-feed/main/actor/data/companies.json` (`inventory.py` line 47)
+- `ats-scrapers` - `https://api.github.com/repos/kalil0321/ats-scrapers/contents/ats-companies?ref=main` (listing, line 48) and `https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies/{name}.csv` (line 49)
+- Downloads are bounded by `MAX_DOWNLOAD_BYTES` (40 MB) and a shrink guard (`SHRINK_GUARD` 0.5) in `inventory.py`. User-Agent is set in `inventory.py` (line 59).
 
-| ATS | Recognized host(s) | API endpoint template (`hunter.py` ~lines 86-90) |
-|---|---|---|
-| Greenhouse | `boards.greenhouse.io`, `job-boards.greenhouse.io` | `https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}` |
-| Lever | `jobs.lever.co` | `https://api.lever.co/v0/postings/{company}/{posting_id}` |
-| Ashby | `jobs.ashbyhq.com` | `https://api.ashbyhq.com/posting-api/job-board/{company}` |
-| Workable | `apply.workable.com` | `https://apply.workable.com/api/v2/accounts/{company}/jobs/{shortcode}` |
-| SmartRecruiters | `jobs.smartrecruiters.com` | `https://api.smartrecruiters.com/v1/companies/{company}/postings/{posting_id}` |
+**LLM scoring:**
+- Groq OpenAI-compatible chat API - `https://api.groq.com/openai/v1/chat/completions` (`hunter.py` line 125). Models: primary `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b` (`hunter.py` lines 333-334; env overrides `GROQ_MODEL`, `GROQ_FALLBACK_MODEL`). Output cap 1,000 tokens (`DECISIONS.md` D-16). Auth: Bearer from `GROQ_API_KEY`. Retries: `GROQ_ATTEMPTS = 6` with linear backoff in the request loop (`hunter.py` lines 732, 900; generic sleep at line 488). Rate budget: `GROQ_TPM` / `GROQ_FALLBACK_TPM` (default 8000 each).
+- Model discovery and error hint: `GET https://api.groq.com/openai/v1/models` (`hunter.py` line 943). Used only to tell the operator which models are usable when a model is rejected.
+- Scoring applies only to jobs that pass the title gate and hard rules (`SPEC.md` "Filtering order"; `DECISIONS.md` D-08). The Groq model judges fit against the resume text. The resume is a personal file, not documented here.
+- Verification: scoring is verified live on real postings per `DECISIONS.md` D-16 and the pilot log (`STATUS.md` pilot section). The delivery test (`delivery_test` input) exercises the real Groq path.
 
-- Auth: none (public board APIs). Only a browser-like `USER_AGENT` header is sent.
-- Results are used to check the real publication date (`Max_Job_Age_Days`) and the open/closed state.
+**Messaging:**
+- Telegram Bot API - `https://api.telegram.org/bot{token}/sendMessage` with `parse_mode: "HTML"` (`hunter.py` lines 1447, 1451). Also used by `watchdog.py` (line 327) for one-per-incident outage and recovery messages. Auth: bot token in the URL path, from `TELEGRAM_BOT_TOKEN`. Recipient: `TELEGRAM_CHAT_ID`. Pending alerts are retried until accepted or rejected 5 times (`DECISIONS.md` D-21).
+- Live Telegram delivery is **not verified** in `STATUS.md` (no token in that run), but the pilot log records real alerts sent during week 1 (`STATUS.md` pilot table). Treat delivery as live-verified only for the pilot period recorded there.
 
-**Notifications:**
-- Telegram Bot API - Sends a formatted HTML alert for each new job at or above `Min_Alert_Score`.
-  - Endpoint: `https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage` (`send_alert`, `hunter.py` ~line 1231)
-  - Payload: `chat_id`, `text` (truncated to 4096 chars), `parse_mode: "HTML"`, `disable_web_page_preview: true`
-  - Auth: bot token embedded in the URL path. Treat it as a secret. Do not log or echo the URL.
-  - Optional: skipped when `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is empty.
-- Generic webhook - POSTs JSON to `ALERT_WEBHOOK_URL` (`hunter.py` ~line 1243). Optional.
-  - Payload fields: `title`, `company`, `score`, `verdict`, `missing_gaps`, `location`, `posted`, `url`, `tracker`.
-  - Auth: none added. Any secret must be part of the URL itself.
+**Optional outgoing webhook:**
+- `ALERT_WEBHOOK_URL` - generic alert webhook, read in `hunter.py` (`Config.webhook_url`, line 343). Receives the same alert content, including late-delivery labels (`DECISIONS.md` D-21). Not configured in the repository workflows beyond the secret pass-through.
 
 ## Data Storage
 
-**Primary database: Google Sheets (via gspread)**
-- Spreadsheet ID from `GOOGLE_SHEET_ID`. Opened with `gspread.service_account_from_dict(...).open_by_key(...)` in `SheetStore.__init__` (`hunter.py` ~line 1038-1041). Sheet URL: `https://docs.google.com/spreadsheets/d/{sheet_id}`.
-- Tabs:
-  - `Settings` (`SETTINGS_TAB`) - user-editable config and `Resume_Text`. Created with defaults if missing.
-  - `Job Tracker` (`TRACKER_TAB`) - append-only (`append_rows`) list of scored jobs. Columns in `TRACKER_COLUMNS` (`hunter.py` ~lines 48-60), with `Apply_URL` as the dedupe key (column I, `URL_COLUMN`).
-  - `Seen_Archive` (`ARCHIVE_TAB`, hidden) - rejected, closed, stale, and error URLs, used only to avoid re-fetching.
-- Dedupe reads: `col_values(URL_COLUMN)` on the tracker and `col_values(ARCHIVE_URL_COLUMN)` on the archive.
-- Writes use `append_rows`. Existing user edits are not overwritten.
-- Empty default tabs are removed with `del_worksheet` during setup (~line 1082).
+**Primary database: Google Sheets (via gspread):**
+- Client: `gspread` with `gspread.service_account_from_dict(...)` (`hunter.py` ~line 1186; `watchdog.py` line 288). Sheet opened by `GOOGLE_SHEET_ID`.
+- Credentials: service-account JSON in `GOOGLE_SERVICE_ACCOUNT_JSON` (repository secret). The code loads it through `load_service_account` and does not write it to disk.
+- Tabs (names from code): `Boards` (one row per board, rewritten in batches), `Events` (append-only ledger, `DECISIONS.md` D-03), `Runs` (run records, `DECISIONS.md` D-40), `Discovery` (rotation and credit state), `Inventory` (import rows), `Lock` (advisory writer lease, D-31), `Settings` (user-editable knobs), `Dashboard` (generated summary, D-40/D-41), plus the user's tracker tab, written and read by header name (D-44, D-46). A tracker without its header is refused, not written by position.
+- Sheets API schema: the dashboard requests are validated against Google's Sheets v4 discovery schema in offline tests (`STATUS.md`); the real Sheets API has rejected one chart shape (D-41).
+- Limits: `DECISIONS.md` D-03 notes an Events revisit point at about 200k rows. `D-43` storage report is read only and proposes no change.
+- Lease: the Sheet-based lease is write-then-verify, **not atomic** (`DECISIONS.md` D-31, D-37). Both workflows share `job-hunter-state` concurrency to serialize writes.
 
-**Fallback: local CSV**
-- Used when `GOOGLE_SHEET_ID` is unset. `Tracker` class (`hunter.py` ~line 1149) writes `tracked_jobs.csv`, with archive `ARCHIVE_PATH`. Mirrors the sheet column names (`TRACKER_COLUMNS`).
-- Files: `tracked_jobs.csv` (live, git-tracked, backed up by CI), `tracked_jobs.gemini-scored.csv` (an earlier scoring run, not referenced by code).
+**Local file state (development only):**
+- CSV and JSON files under `state/` when no Sheet is configured (`state/boards.csv`, `state/events.csv`, `state/runs.csv`, `state/discovery.csv`, `state/inventory.csv`, `state/lock.json`). The lease uses `fcntl` `flock` for local processes (`DECISIONS.md` D-37). The directory is gitignored.
+- Historical scoring exports: `tracked_jobs.csv`, `tracked_jobs.gemini-scored.csv` at the root are gitignored (`DEPLOY.md`), contain personal scoring data, and must not be read or quoted.
 
-**File storage:**
-- Local filesystem only. `resume.txt` (`RESUME_PATH`) is read when `Resume_Text` is blank in the sheet. Do not quote or commit its contents.
+**File storage:** Local filesystem only (`state/`, `.venv/`, `__pycache__/`). No object storage.
 
-**Caching:**
-- None. Dedupe state lives in the sheet or CSV. In-memory `deque` for LLM call pacing only.
+**Caching:** None external. Inventory download cache is local to the run within GitHub Actions cache (`inventory.yml` uses pip cache via `setup-python`).
 
 ## Authentication & Identity
 
-**Google (service account):**
-- Mechanism: OAuth2 service-account JWT via `google-auth`, invoked through `gspread`.
-- Credential: `GOOGLE_SERVICE_ACCOUNT_JSON` - full JSON text (GitHub Secret) or a path to a `.json` file (local). Parsed by `load_service_account` (`hunter.py` ~line 1022).
-- Required setup: the Google Sheets API and Google Drive API enabled, and the sheet shared with the service account's `client_email` as Editor (per `README.md`).
+**Google:**
+- Service account (gspread). Auth flow: JSON key from `GOOGLE_SERVICE_ACCOUNT_JSON`. The Sheet must be shared with the service account. Scope and identity specifics are in code (`hunter.py`, `watchdog.py`).
 
-**API keys:**
-- Serper, Groq, and Telegram each use a static secret, supplied only through environment variables or GitHub Actions secrets. No key rotation logic in code.
+**Telegram:**
+- Bot token auth in the request URL (`hunter.py` line 1447).
 
-**No end-user auth.** The app has no login, sessions, or user accounts. The "user" is the single operator who owns the sheet.
+**Groq / Tavily:**
+- Bearer-token API keys in request headers (`hunter.py` and `search.py`).
+
+**ATS boards:** No auth. Public endpoints only.
+
+**Application users:** None. No login, sessions or user accounts exist in this repository.
 
 ## Monitoring & Observability
 
-**Error tracking:**
-- None (no Sentry, Rollbar, or similar).
+**Error tracking:** None (no Sentry or similar detected).
 
 **Logs:**
-- Python `logging` to stderr, logger name `hunter` (`log = logging.getLogger("hunter")`). Warnings for Groq 429s, request errors, and unusable responses. Final summary line: "Done. N added to the tracker, N archived, N will retry next run, ..."
-- GitHub Actions run logs are the only persistent record.
+- Python `logging` to the GitHub Actions log. Run outcomes and counters are written to the `Runs` tab (`DECISIONS.md` D-40).
+- Operator-facing summaries: `Dashboard` tab (`dashboard.py`, `reporting.py`), `--pilot-report`, `--rebalance-report`, `--storage-report` (read only).
 
-**Alerting:**
-- Telegram and webhook per-job alerts (see Notifications above). No run-failure alerting.
+**Missed-run watchdog:**
+- `watchdog.py` reads the Sheet `Runs` tab (read only in `--dry-run`) and sends Telegram messages on stale or recovered states. Workflow: `.github/workflows/watchdog.yml`, GitHub schedule every 15 minutes, threshold 2 h (`WATCHDOG_WARN_HOURS` overrides). A second external trigger is recommended (`DEPLOY.md` "Watchdog"). Telegram delivery and real incident tabs are **not verified live** (`STATUS.md`).
 
 ## CI/CD & Deployment
 
-**Hosting:**
-- GitHub Actions, `ubuntu-latest`. No separate server or cloud deployment.
+**Hosting:** GitHub Actions on `ubuntu-latest`. The repository is private (`DEPLOY.md`). No hosting platform, container or server.
 
 **CI Pipeline:**
-- `.github/workflows/job_hunter.yml`:
-  - Triggers: `schedule` (`0 13-23/2 * * 1-5` UTC) and `workflow_dispatch`.
-  - Steps: `actions/checkout@v4`, `actions/setup-python@v5` (Python 3.12, pip cache), `pip install -r requirements.txt`, `python hunter.py`, then a CSV backup commit.
-  - Backup step: runs `always()` and only does work if `tracked_jobs.csv` changed. Commits as `github-actions[bot]` with `[skip ci]`, runs `git pull --rebase`, then `git push`.
-  - Concurrency: group `job-hunter`, `cancel-in-progress: false`.
-- Tests are not run in CI. The workflow has no test step.
+- `.github/workflows/job_hunter.yml` - hourly poll, manual inputs for discovery, backfill, reports, dashboard, delivery test
+- `.github/workflows/inventory.yml` - weekly import (Monday 05:23 UTC) and daily validation
+- `.github/workflows/watchdog.yml` - 15-minute watchdog
+- `actions/checkout@v4`, `actions/setup-python@v5` (Python 3.12, pip cache). No test step runs in the workflows; tests are run locally (`AGENTS.md` rule 8).
+- Workflow permissions: `contents: read`. The repository writes nothing; state lives in the Sheet.
+
+**External trigger:** An hourly external scheduler dispatches `job_hunter.yml` with `trigger_source` set to `external` (pilot evidence in `STATUS.md`: 168 `workflow_dispatch:external` runs in the week). The scheduler service is not configured in the repository (`DEPLOY.md`).
+
+**Secrets management:** GitHub repository secrets and variables only. Names are listed in the Environment Configuration section below.
 
 ## Environment Configuration
 
-**Required env vars (GitHub Secrets; names only):**
-- `SERPER_API_KEY`
-- `GROQ_API_KEY`
-- `GOOGLE_SHEET_ID`
-- `GOOGLE_SERVICE_ACCOUNT_JSON`
+**Required in production (GitHub repository secrets):**
+- `GROQ_API_KEY` - required by `job_hunter.yml` "Check configuration" step
+- `GOOGLE_SERVICE_ACCOUNT_JSON` - required
+- `GOOGLE_SHEET_ID` - required
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` - required for any run that can deliver (scheduled poll, delivery test); not required for pilot, rebalance, dashboard or storage reports
+- `TAVILY_API_KEY` - optional (warning only)
+- `ALERT_WEBHOOK_URL` - optional
 
-**Optional secrets:**
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- `ALERT_WEBHOOK_URL` (wired in the workflow, not documented in `README.md`)
+**Repository variables:** `SEARCH_WINDOW_DAYS` (optional), `WATCHDOG_WARN_HOURS` (optional).
 
-**Optional repository variable:**
-- `SEARCH_TBS` (`vars.SEARCH_TBS`, default `qdr:d3`)
-
-**Secrets location:**
-- GitHub repository secrets (for scheduled runs).
-- Local `.env` at the repo root (git-ignored, present, not read). Loaded by `python-dotenv` when available.
-- The Google service-account JSON is also a secret. The README warns to keep the repository private because the resume text can end up in the sheet and in `resume.txt`.
+**Secrets location:** GitHub Actions secrets for the repository. Local development uses a `.env` file that is loaded by `python-dotenv`. The file is gitignored and must never be read or committed (`AGENTS.md` rule 6, `DEPLOY.md`). Document only the variable names.
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- None. The app makes outbound calls only and runs no server.
+- `workflow_dispatch` on the three workflows (manual, and the external hourly trigger). No HTTP endpoint is served by this repository.
 
 **Outgoing:**
-- Telegram `sendMessage` (optional).
-- Generic JSON webhook at `ALERT_WEBHOOK_URL` (optional).
+- Telegram `sendMessage` (`hunter.py`, `watchdog.py`)
+- `ALERT_WEBHOOK_URL` POST (optional, `hunter.py` config)
+- Board API GET requests (Greenhouse, Lever, Ashby, Workable, SmartRecruiters)
+- Tavily POST and GET (`search.py`)
+- Groq POST and GET models (`hunter.py`)
+- Google Sheets API (gspread)
+- GitHub API and raw content (inventory download only)
 
 ---
 
-*Integration audit: 2026-10-14*
+*Integration audit: 2026-10-24*

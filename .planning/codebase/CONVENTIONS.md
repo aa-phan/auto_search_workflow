@@ -1,237 +1,192 @@
+---
+last_mapped_commit: aa1bab2d3c3e37ac119cd898b2e4f42a50f276fe
+last_mapped_at: 2026-10-24
+---
 # Coding Conventions
 
-**Analysis Date:** 2026-10-14
-
-## Scope of Analysis
-
-The active code is two Python files:
-- `hunter.py` (single-module application, about 1,440 lines)
-- `tests/test_hunter.py` (offline unit tests, about 640 lines)
-
-Supporting files: `requirements.txt`, `README.md`, `.github/workflows/job_hunter.yml`, `.gitignore`.
-The `legacy/` directory is an archived earlier version and is not a style reference.
-
-No formatter, linter, or type-checker config is present (no `pyproject.toml`, `setup.cfg`, `.flake8`, `ruff.toml`, `.pylintrc`, `mypy.ini`, `.pre-commit-config.yaml`). Conventions below are inferred from the code. The `# fmt: skip` markers (11 occurrences across both files) and the consistent black/ruff-style wrapping indicate an auto-formatter with a line length of about 120 was used at some point. Lines longer than 120 characters exist (21 lines; max 129), so the limit is not enforced.
+**Analysis Date:** 2026-10-24
 
 ## Naming Patterns
 
 **Files:**
-- Single lowercase module names: `hunter.py`, `tests/test_hunter.py` (`test_` prefix for tests).
-- Data files use `snake_case` or dotted names: `tracked_jobs.csv`, `tracked_jobs.gemini-scored.csv`, `seen_archive.csv` (created at runtime).
+- Flat, lowercase, single-word module names at the repo root: `hunter.py`, `boards.py`, `pools.py`, `pipeline.py`, `reporting.py`, `dashboard.py`, `ledger.py`, `freshness.py`, `eligibility.py`, `state.py`, `inventory.py`, `search.py`, `discovery.py`, `pilot.py`, `watchdog.py`, `storage_report.py`, `meter.py`.
+- No packages; `legacy/` is archived reference only and must not be imported or edited.
+- Tests: `tests/test_<module>.py` (e.g. `tests/test_pools.py`, `tests/test_reporting.py`). Cross-cutting suites use descriptive names: `tests/test_allocation_correctness.py`, `tests/test_pilot_corrections.py`, `tests/test_core.py`.
 
 **Functions:**
-- `snake_case` verbs: `build_queries()`, `search_ats()`, `parse_posted()`, `classify_url()`, `hydrate_posting()`, `pending_refs()`, `process()`, `send_alert()`.
-- Private helpers are prefixed with a single underscore: `_hydrate_greenhouse()`, `_hydrate_lever()`, `_http_get()`, `_html_to_text()`, `_split_list()`, `_safe_cell()`, `_now()`, `_posted_iso()`, `_page_date_posted()`, `_style()`, `_status_dropdown()`.
-- Per-ATS adapters follow `_hydrate_<ats>` naming (`greenhouse`, `lever`, `ashby_api`, `workable`, `smartrecruiters`, `page`). Dispatch lives in `_hydrate()` at `hunter.py` around line 694.
-- Store methods are verb-first: `load_settings()`, `seen_urls()`, `append_jobs()`, `append_archive()`, `bootstrap()`.
+- `snake_case`. Module-private helpers are prefixed with a single underscore: `_prune_outages` in `pools.py`, `_day` and `_leave_monitoring` in `pools.py`, `_stamp` and `_stats` in `reporting.py`, `_split_list` in `hunter.py`.
+- Public, cross-module helpers have no prefix: `parse_stamp` in `reporting.py`, `make_periods` in `reporting.py`, `title_gate` in `eligibility.py`.
+- Verb-first names for actions (`refresh_*`, `load_*`, `make_*`, `parse_*`, `classify`, `admission_order`).
 
 **Variables:**
-- `snake_case`. Short names are used for local, well-scoped values: `ref`, `ev`, `cfg`, `s` (Settings), `h` (module alias in tests), `ws` (worksheet), `sh` (spreadsheet), `resp`, `exc`, `m` (regex match).
-- Walrus operator is used for regex matches in conditions: `if m := _GH_PATH.match(path)` (`hunter.py` line 285).
+- `snake_case`. Short local names are common for datetimes and records: `now`, `rec`, `ident`, `st`, `dt`, `prec`.
+- Abbreviated module aliases at import: `import freshness as fr`, `import ledger as lg`, `import eligibility as el`, `import pipeline as pl`, `import state as st_mod`, `import boards as bd`, `import hunter as h`, `import discovery as dsc`.
 
 **Constants:**
-- `UPPER_SNAKE_CASE` at module level: `TRACKER_COLUMNS`, `ATS_SITES`, `SERPER_URL`, `HTTP_TIMEOUT`, `MIN_JD_CHARS`, `DEFAULT_SEARCH_TBS`, `GROQ_ATTEMPTS`.
-- Status strings are named constants, never inline literals: `STATUS_APPLY`, `STATUS_STRETCH`, `STATUS_FILTERED`, `STATUS_CLOSED`, `STATUS_ERROR` (`hunter.py` lines 69-74).
-- Sheet tab names are constants: `SETTINGS_TAB`, `TRACKER_TAB`, `ARCHIVE_TAB`.
-- Column indexes derived from names, not hard-coded: `URL_COLUMN = TRACKER_COLUMNS.index("Apply_URL") + 1`.
-- Private module regexes are `_UPPER_SNAKE` with a leading underscore: `_GH_PATH`, `_UUID_PATH`, `_WORKABLE_PATH`, `_SMARTRECRUITERS_PATH`.
+- `UPPER_SNAKE_CASE` at module top: `ACTIVITY_MIN_DAYS`, `MIN_OBSERVED_DAYS`, `T0` (tests), `SETTING_DEFAULTS` and `DEFAULT_SETTINGS` in `hunter.py`.
+- Status and pool values are named string constants defined once in `boards.py` and imported by name: `STATUS_ACTIVE`, `STATUS_NEW`, `STATUS_VALIDATED`, `STATUS_DEFERRED`, `STATUS_DISABLED`, `POOL_ESTABLISHED`, `POOL_EXPLORATION`, `MONITORED`, `V_DEFERRED`, `GREENHOUSE`. Compare against the constant, never a retyped literal.
 
-**Types and Classes:**
-- `PascalCase` classes: `Settings`, `Config`, `AtsRef`, `Posting`, `SearchHit`, `Evaluation`, `TokenBudget`, `GroqClient`, `JobRow`, `SheetStore`, `CsvStore`.
-- Exceptions end in `Error` or name a state: `TransientError`, `GroqAuthError`, `ClosedPosting`.
-- Sheet column names in the tracker use `Underscore_Separated_Title_Case` (`Date_Found`, `AI_Score`, `Apply_URL`). These are user-facing and must not be renamed casually; `CsvStore.LEGACY` maps old names to new ones.
+**Types and classes:**
+- `PascalCase` classes: `BoardId`, `BoardRecord`, `ListedJob`, `JobIdentity` (`boards.py`), `EvalOutcome` (`pipeline.py`), `Settings` (`hunter.py`), `CsvState` (`state.py`), `Harness` and `HarnessCase` (`tests/test_core.py`).
+- Records are `@dataclass` (about 40 uses across the package, e.g. `boards.py` 6, `pools.py` 6, `hunter.py` 6, `reporting.py` 3). Prefer a dataclass over a dict or tuple for any structured record that crosses a function boundary.
 
 ## Code Style
 
 **Formatting:**
-- Four-space indentation, double quotes for strings by default. Single quotes appear only inside f-strings or where the literal contains double quotes.
-- Trailing commas on multi-line literals and call arguments.
-- Wrapping: multi-line calls put each argument on its own line with a closing paren on its own line (see `requests.post(...)` in `search_ats`, `hunter.py` lines 388-393).
-- Explicit `# fmt: skip` is used to keep aligned dict or request blocks on one line (`hunter.py` lines 1091-1095, 1103-1110; tests lines 34-35, 121-123).
+- No formatter config is committed (no `pyproject.toml`, `ruff.toml`, `setup.cfg` or `.flake8` at the root). Follow the existing hand style.
+- Lines are long, commonly 120 characters or more; wrap only when a line becomes hard to read. Multi-line calls put several arguments per line rather than one per line.
+- Four-space indentation, double-quoted strings are the common choice in code, single quotes appear in some places; match the surrounding file.
+- `# fmt: skip` is used deliberately on multi-line `from ... import (...)` blocks and on dense tables so a formatter would not reflow them. It appears in about 20 files (e.g. `pools.py` 4, `pipeline.py` 12, `hunter.py` 19, `reporting.py` 21). Keep using it on such blocks rather than reflowing them.
 
 **Linting:**
-- Not configured. No `# noqa` in `hunter.py`; tests use `# noqa: E402` for the `sys.path` insert before `import hunter` and `# noqa: BLE001` for a broad except in a test helper.
-- `# type: ignore[...]` is used sparingly in tests where the fake is intentionally wrong (`tests/test_hunter.py` lines 37, 226, 245, 273).
+- No linter is configured in the repository. Escape hatches are written inline when needed:
+  - `# noqa: E402` on imports that follow a `sys.path.insert(...)` (every test module and `tests/test_core.py`).
+  - Other `# noqa` markers appear in `reporting.py` (3), `inventory.py` (2), `watchdog.py` (4), and `tests/test_reporting.py` (13).
 
-**Imports:**
-- Every module begins with `from __future__ import annotations`. This allows PEP 604 unions (`str | None`) and builtin generics (`list[str]`, `dict[str, str]`) in annotations on Python 3.12 (the version pinned in `.github/workflows/job_hunter.yml`).
-- Import order (stdlib, third-party, local), each group separated by a blank line:
-  1. Standard library, alphabetized within the import section (`argparse`, `csv`, `html`, `json`, ...).
-  2. Third-party: `requests`, `from bs4 import BeautifulSoup`.
-  3. Optional third-party inside `try`/`except ImportError`: `from dotenv import load_dotenv` (`hunter.py` lines 34-39).
-- `from x import y` is used for names from `datetime`, `collections`, `dataclasses`, `typing`, `pathlib`, `urllib.parse`.
-- Heavy or optional imports are deferred: `import gspread` happens inside `SheetStore.__init__` (`hunter.py` line 1038), so the module imports without the Google dependency.
-- No path aliases. All imports are absolute from the top-level directory. The test file inserts the repo root into `sys.path` explicitly.
+**Type hints:**
+- Every module starts with `from __future__ import annotations` (17 files), then uses PEP 604 unions and builtin generics: `str | None`, `list[str]`, `dict[str, Any]`.
+- `typing` is used for `Any`, `Callable`, `Iterable` and `Optional`-free signatures. Annotate public function parameters and return values.
 
-**Section Dividers:**
-- Long `# ---...--- name` comment bars divide logical sections in `hunter.py`: `# --- settings`, `# --- URLs`, `# --- search`, `# --- dates`, `# --- hydration`, `# --- Groq scoring`, `# --- tracker`, `# --- alerts`, `# --- pipeline`. Tests use the same style, with `# --- Layer 1` and `# --- Layer 2` to group test classes by pipeline layer.
-- Within `SheetStore`, method groups are marked with `# -- bootstrap`, `# -- reads`, `# -- writes`.
+## Import Organization
 
-## Type Annotations
+**Order (observed):**
+1. Module docstring (required, see Comments).
+2. `from __future__ import annotations`
+3. Standard library (`collections`, `copy`, `json`, `os`, `re`, `threading`, `time`, `logging`, `datetime`).
+4. `from dataclasses import dataclass, field`, `from typing import ...`.
+5. Local project modules, alphabetical-ish, as short aliases: `import eligibility as el`, `import freshness as fr`, `import ledger as lg`.
+6. Named imports from one module grouped in a parenthesised block, often wrapped with `# fmt: skip`:
+   ```python
+   from boards import (
+       MONITORED, POOL_ESTABLISHED, POOL_EXPLORATION, STAMP, STATUS_ACTIVE, ...
+   )  # fmt: skip
+   ```
 
-- Fully annotated function signatures, including return types (`-> None`, `-> list[str]`, `-> Settings`).
-- `dataclass(frozen=True)` for value objects: `Settings`, `Config`, `AtsRef`, `SearchHit`, `Posting`, `Evaluation`, `JobRow`. Use `dataclasses.replace()` to derive variants instead of mutation (`hunter.py` lines 733-740, 712, 1288).
-- `Any` is used for untrusted JSON payloads and gspread objects (`ws: Any`, `data: Any`).
-- `TYPE_CHECKING` is not used; no type-checker is configured.
-- Class-level annotated attributes with defaults are used for dataclasses: `hint_title: str = ""`.
+**Path aliases:** None. The project runs flat from the repo root (or `tests/` via `sys.path.insert`).
+
+**Circular imports:** avoided by keeping pure modules (`boards.py`, `freshness.py`, `ledger.py`, `eligibility.py`, `pools.py`) free of imports from the orchestrators (`hunter.py`, `pipeline.py`). Do not add an import from a lower module back up into `hunter.py`.
+
+## Module Docstrings
+
+Every module opens with a docstring that states its role and cites the governing rule by ID:
+
+- `pools.py`: "Pure functions, no I/O ... Rules: SPEC.md 'Board registry' and DECISIONS.md D-23 (evidence), D-26 (pools), D-30 (open choices)."
+- `boards.py`: "Identity is ATS + board + posting ID (SPEC.md). URLs are only a way to *find* an identity."
+- `tests/test_core.py`: states what is mocked and what persists for real.
+
+Follow this pattern for any new module: one paragraph of purpose, then the SPEC/DECISIONS references it implements.
 
 ## Error Handling
 
-**Strategy: typed exceptions map to pipeline outcomes.** Network and parse errors are translated into one of three buckets, which determines whether a job is recorded or retried:
+**Classify failures as transient or permanent. This is a core rule.**
 
-| Exception | Meaning | Pipeline behavior |
-|-----------|---------|-------------------|
-| `ClosedPosting` | HTTP 404/410 | Recorded as `STATUS_CLOSED`, score 0 (`hunter.py` line 1298) |
-| `TransientError` | timeout, 5xx, 429, connection error | Not recorded; `process()` returns `None`; retried next run |
-| `GroqAuthError` | invalid API key | Re-raised; aborts the run with exit code 2 |
-| `ValueError` / other | permanent per-job failure | Recorded as `STATUS_ERROR` with the message in `AI_Verdict` |
+- `pipeline.py` `EvalOutcome.kind` takes one of three values, documented in the dataclass docstring:
+  - `"done"`: evaluated, record it.
+  - `"transient"`: temporary failure (timeout, 5xx, rate limit). Retry next run. Do not write a permanent record.
+  - `"failed"`: permanent-looking failure. Retry a bounded number of times, then abandon.
+- A failure must leave later stages undone and retryable (AGENTS.md rule 4). Do not turn a transient error into a permanent "seen" or "evaluated" record.
 
-Source of the translation: `hydrate_posting()` (`hunter.py` lines 717-740) and `GroqClient.evaluate()` (lines 900-956).
+**Exception hierarchy (define new ones beside the code that raises them):**
+- `boards.py`: `BoardError(Exception)`, `BoardRateLimited(BoardError)`, `BoardGone(Exception)`.
+- `hunter.py`: `TransientError(Exception)`, `ClosedPosting(Exception)`, `GroqAuthError(RuntimeError)`, `TrackerLayoutError(RuntimeError)`, `WriterBusy(Exception)`.
+- `pipeline.py`: `FatalRunError(Exception)` (stops the run), `RetryableHydration(Exception)`.
+- `search.py`: `SearchError` with subclasses `SearchAuthError` and `SearchLimitReached`.
+- `inventory.py`: `InventoryError(Exception)`. `watchdog.py`: `UnreadableHealth(Exception)`.
 
-**Patterns:**
-- Raise specific exceptions from low-level helpers; catch broadly only at the job boundary. `process()` and the main loop (`hunter.py` lines 1292-1331, 1406-1426) catch `Exception`, log, and continue so that "a failure on one job never aborts the run".
-- Re-raise the fatal exception before the broad catch: `except GroqAuthError: raise` precedes `except Exception` (lines 1327-1329, 1411-1412).
-- Startup failures return an exit code instead of raising: `main()` returns `2` on configuration or startup errors (`hunter.py` lines 1370-1372).
-- Cosmetic operations never fail a run. Sheet formatting and dropdowns are wrapped in `try/except Exception` and logged as warnings (`_style`, `_status_dropdown`, hiding the archive tab).
-- Notifications are fire-and-log: `counts["alerts"] += send_alert(...)` is inside a `try` that logs `"Alert failed for %s"` (lines 1400-1404).
-- `raise_for_status()` is used on every outbound HTTP call; `_http_get()` implements up to 3 attempts with linear backoff for 429/5xx and aborts immediately on other 4xx (lines 490-506).
-- Use `raise ... from exc` or `from None` when translating exceptions (`hunter.py` lines 725, 730, 709).
-- Validation errors use `RuntimeError` for configuration problems ("GOOGLE_SHEET_ID is set but GOOGLE_SERVICE_ACCOUNT_JSON is empty") and `ValueError` for bad data.
-- `assert` is used only for internal invariants, not user input (`hunter.py` line 505).
+**Best-effort blocks:** non-essential side work catches broadly and continues, with a comment saying so:
 
-**Tolerant parsing:**
-- External JSON is parsed defensively with `.get()` chains and `or ""` defaults (`data.get("title") or ""`). Parsing functions return an empty string or `None` instead of raising where a missing field is acceptable (`parse_posted()` returns `None`).
-- `parse_evaluation()` strips code fences and falls back to slicing the first `{` to the last `}` before raising.
+```python
+except Exception as exc:  # best effort: the local ledger still applies
+except Exception as exc:  # discovery is best-effort; polling must still happen
+```
+
+Use a broad `except Exception` only for these best-effort or top-level boundaries, and always say why in the comment. Otherwise catch the specific class.
+
+**Crash marker:** `pipeline.py` sets `crashed = True` before a run body and clears it only when the body completes, so an exception or fatal stop leaves the flag set for the next run to see.
+
+**Validation:** parsing functions return `None` for unusable input rather than raising in pure helpers (`parse_stamp` in `reporting.py`, `parse_instant` in `freshness.py`). Callers decide whether `None` is an error.
 
 ## Logging
 
-**Framework:** standard library `logging`.
+**Framework:** standard library `logging`, module logger named after the module.
+- `hunter.py`: `log = logging.getLogger("hunter")` (line 60).
 
-- Module logger: `log = logging.getLogger("hunter")` (`hunter.py` line 41). Use `log`, never `print`, inside library code.
-- Configured only in `main()` with `logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")`.
-- `log.info` for normal progress and per-job outcome. `log.warning` for recoverable failures that will be retried or skipped. `log.error` for fatal startup/auth failures. `log.exception` for unexpected errors inside the job loop, which includes the traceback.
-- Use `%`-style lazy arguments, not f-strings, in log calls: `log.info("Search: %s", query)`.
-- Log the URL with each per-job message so failures can be traced: `log.warning("Hydration failed for %s: %s", ref.url, exc)`.
-- The pipeline's final summary uses a named-placeholder format string with a counts dict (`hunter.py` lines 1428-1432).
-- Do not log secrets. Keys are read from the environment and sent in headers only; they never appear in log messages.
+**Operational output:** the CLI writes human reports and JSON with `print(...)`. `hunter.py` uses about 58 `print` or `log` calls, mostly for run summaries and `--report`/`--dashboard` output (e.g. `print(json.dumps({...}))` for one-off fixtures). Keep report text stable: the pilot and watchdog tooling read it.
+
+**Never log secrets:** no keys, tokens or resume text. Settings are referenced by name only.
 
 ## Comments
 
-**When to Comment:**
-- Comments explain *why* a non-obvious choice exists, usually with a concrete external constraint. Examples:
-  - `# Serper's free tier rejects num > 10; 0 = omit and use pages instead.`
-  - `# Google ignores terms past ~32 words; keep a margin`
-  - `# free tier tokens-per-minute budgets; a 429 from Groq still wins over these.`
-  - `# Rows first, so a failed alert can never cause a duplicate row on the next run.`
-- Inline trailing comments are common on config constants and dict entries (`MIN_JD_CHARS = 200`-style lines, `"tbs"` notes).
-- Do not restate what the code does.
+**When to comment:**
+- Explain *why* a rule exists and cite it: `# D-47: a pass over the ~21,000 validated boards`, `# AGENTS rule 4`-style references are used in docs and occasionally in code.
+- Mark deliberate exceptions to a general rule. Example from `.github/workflows/inventory.yml`: `ALLOW_SMARTRECRUITERS_BULK: "1" # explicit user decision for the pilot (DECISIONS D-38)`.
+- Mark time-sensitive or safety-relevant constants with their rationale (e.g. the one-hour slack on `ACTIVITY_MIN_DAYS`).
 
-**Docstrings:**
-- Triple-double-quoted docstrings on modules, public classes, and most public functions. Format is a short imperative or descriptive first line; longer detail follows after a blank line.
-- Module docstring describes the pipeline stages with `->` arrows (`hunter.py` lines 2-11). Keep that pattern when extending the pipeline.
-- Tests have a one-line module docstring stating how to run them (`tests/test_hunter.py` line 1).
-- No JSDoc/Sphinx-style `:param:` or `Args:` blocks are used.
+**Section banners:** long test modules use dashed banner comments to separate groups:
 
-**Inline Markers:**
-- No `TODO`/`FIXME` comments were found in either file.
+```python
+
+# --------------------------------------------------------------------------- freshness
+
+```
+
+**Docstrings:** triple-quoted, describing behaviour and the contract. Test classes and helper functions usually carry a one-line docstring when the name alone is not enough.
 
 ## Function Design
 
-**Size:** Most functions are under 40 lines. `main()` (about 90 lines) and `build_queries()` are the largest; `main()` is organized as numbered phases (startup, search, pending, process loop, flush).
+**Size:** most helpers are short pure functions; orchestration lives in `hunter.py` (about 1,980 lines) and `pipeline.py` (about 630 lines). Prefer adding a pure function to `pools.py`, `reporting.py`, `freshness.py` or `eligibility.py` over growing the orchestrator.
 
 **Parameters:**
-- Keyword-only arguments are used to make boolean flags explicit: `build_queries(s, *, limit=..., max_queries=...)`, `_http_get(url, *, accept=...)`, `Config` built via `from_env()`.
-- Pass dependencies explicitly rather than reaching for globals: `process(s, groq, ref, excluded)`, `send_alert(cfg, row, sheet_url)`.
-- Default parameters for paths enable tests to inject temporary files: `CsvStore(path=TRACKER_PATH, archive=ARCHIVE_PATH)`.
+- Keyword-only arguments for flags and time: `classify(dt, prec, *, now, board_gap, board_baselined, baseline_pass, ...)`.
+- Time is always passed in (`now: datetime`), never read from the clock inside pure logic. Tests pin `T0` and advance it.
 
-**Return Values:**
-- Return `None` to mean "skip, do not record" (`process()` for transient failures) and a populated object otherwise. Callers check `if row is None` explicitly.
-- Factory classmethods for configuration: `Settings.from_values(raw, resume_fallback=...)` and `Config.from_env()`.
-- Collections are returned as concrete types (`list`, `set`, `dict`), and dedupe preserves order with `dict.fromkeys(...)` (`_split_list`, `_join_places`).
-
-**Local helpers:**
-- Inner functions for scoped logic are normal: `core()` and `with_exclusions()` inside `build_queries()`, `row()` inside `process()`, `flush()` inside `main()`, `pick()` inside `Settings.from_values()`, `env()` inside `Config.from_env()`.
+**Return values:**
+- Structured results are dataclasses (`classify(...).cls` in tests), not bare tuples, when more than two values are returned.
+- Pure evaluators return a new value; `pools.py` copies records with `copy` before modifying rather than mutating inputs.
 
 ## Module Design
 
-**Exports:**
-- Single-module design. No `__all__`. Everything public is importable as `hunter.<name>`; tests rely on this (`import hunter as h`).
-- Entry point is `if __name__ == "__main__": sys.exit(main())`.
-- CLI flags are declared with `argparse` inside `main()`, with `help=` strings for each flag (`--url`, `--dry-run`, `--no-tbs`).
+**Purity boundary:**
+- `pools.py` and `reporting.py` are pure: "Pure functions, no I/O", no network, no LLM, no search. `reporting.py` is read-only with respect to operational state.
+- `dashboard.py` is read-only toward operational state; it renders and publishes the Dashboard tab only.
+- I/O lives in `state.py` (CSV and Sheets adapters), `boards.py` adapters, `search.py`, and `hunter.py`.
 
-**Barrel Files:** Not applicable. No package `__init__.py`.
+**Exports:** no `__all__`. Modules are imported whole and accessed with their alias.
 
-**Layering inside the module (by section comment, not by package):**
-1. Settings and config dataclasses
-2. URL classification and normalization
-3. Search (Serper)
-4. Date parsing
-5. Hydration (one function per ATS)
-6. Groq scoring (`GroqClient`, `TokenBudget`, prompt)
-7. Tracker stores (`SheetStore` for Google Sheets, `CsvStore` for local fallback)
-8. Alerts
-9. Pipeline and `main()`
+**Barrel files:** none. `hunter.py` re-exports nothing; tests import the module they test.
 
-Keep new code within the matching section. Adding a new ATS means a new `_hydrate_<name>` function, a regex in the URL section, an entry in `ATS_SITES`, and a case in `_hydrate()`.
+**Settings:** runtime knobs live in the Google Sheet Settings tab with defaults in `hunter.py` (`DEFAULT_SETTINGS`, `SETTING_DEFAULTS`). Add a new knob by adding a default there and a `Settings.from_values` read, and document it in `SPEC.md`.
 
-**Dual backends:** Every store operation exists on both `SheetStore` and `CsvStore` with the same signature. Any new persistence method must be implemented on both.
+## Change Discipline (project rules)
 
-## Data Handling Rules
+Sourced from `AGENTS.md` and `CLAUDE.md`. These are enforced by convention and review, not by tooling.
 
-- **Append-only tracker:** the script never calls update/clear on the tracker sheet. The test `FakeWorksheet.__getattr__` raises `AssertionError` if `update`, `clear`, `delete_rows`, `update_cell`, or `batch_clear` is called. Preserve this so user edits to `My_Status` and `User_Notes` survive.
-- **Formula injection:** all user-visible text cells go through `_safe_cell()`, which prefixes `=`, `+`, `-`, `@`, tab, or CR with `'`.
-- **Untrusted content:** job descriptions and resumes are treated as data. The system prompt explicitly tells the model not to follow instructions inside them (`SYSTEM_PROMPT`, `hunter.py` line 780). Wrap such content in XML-like tags as `build_messages()` does (`<resume>`, `<job>`).
-- **HTML escaping:** Telegram messages escape every interpolated value with `html.escape` (`send_alert`, `hunter.py` lines 1215-1230). Values from the ATS are also unescaped with `html.unescape` before stripping tags.
-- **Secrets:** read only via `os.getenv` in `Config.from_env()`. `.env` is loaded by `python-dotenv` when present (`hunter.py` lines 34-39). Never print or log values.
+1. **Read first.** Before changing behaviour, read `SPEC.md` (contract), `DECISIONS.md` (why), `STATUS.md` (verified vs blocked).
+2. **Flag conflicts before coding.** If a change conflicts with `SPEC.md` or `DECISIONS.md`, stop and say so.
+3. **Docs in the same change.** When behaviour changes deliberately, update the affected `SPEC.md`, `DECISIONS.md` and `STATUS.md` entries in the same commit.
+4. **Identity is ATS + board + posting ID.** Never dedupe on URL strings. Preserve identity-bearing URL parameters; drop tracking parameters.
+5. **Keep seen / evaluated / alerted separate.** A failure leaves later stages undone and retryable.
+6. **Freshness uses source publication time.** Never substitute update time, crawl time or search-engine dates. Keep publication, first observation, update and republication as separate fields.
+7. **No score tuning or new features** until freshness and delivery are proven (`STATUS.md`).
+8. **Tests stay offline** and must pass with `python -m unittest discover -s tests`.
+9. **Secrets:** never read, print or commit `.env`, `Resume.pdf`, `resume.txt` or service-account JSON. Do not edit `.env`.
 
-## Example: Canonical Shapes
+## Examples to Copy
 
-Settings-style dataclass with derived variant:
+**Pure helper with explicit time and a rule citation** (`pools.py` style):
+
 ```python
-@dataclass(frozen=True)
-class Settings:
-    resume: str
-    roles: list[str]
+def _day(now: datetime) -> str:
     ...
-
-    @property
-    def stale_status(self) -> str:
-        return f"Stale (>{self.max_age_days}d old)"
 ```
 
-Per-ATS adapter returning a normalized value object:
-```python
-def _hydrate_lever(ref: AtsRef) -> Posting:
-    data = _http_get(LEVER_API.format(company=ref.company, posting_id=ref.job_id), accept="application/json").json()
-    return Posting(
-        url=ref.url,
-        ats="lever",
-        title=data.get("text") or "",
-        ...
-    )
-```
+**Record type** (`boards.py` style): frozen-by-convention dataclass with typed fields and defaults; construct with keywords.
 
-Error translation at the boundary:
+**Fail-safe side effect:**
+
 ```python
 try:
-    posting = hydrate_posting(ref)
-except ClosedPosting:
-    log.info("Closed (404/410): %s", ref.url)
-    return JobRow(STATUS_CLOSED, 0, ref.company, ref.hint_title, "", "Posting is closed or removed.", "", ref.url)
-except TransientError as exc:
-    log.warning("Transient hydration failure (will retry next run) for %s: %s", ref.url, exc)
-    return None
+    ledger_update(...)
+except Exception as exc:  # best effort: the local ledger still applies
+    run.notes += f"..."
 ```
-
-## Guidance for New Code
-
-- Put new constants at module level in the matching section, in `UPPER_SNAKE_CASE`, with a trailing comment for units or external limits.
-- Use the existing exception types; do not introduce bare `except:`.
-- Use `log` with `%`-style arguments; do not add `print`.
-- Keep the dataclass style: `frozen=True`, typed fields, defaults only for optional values.
-- Add type annotations to every new function.
-- Run the offline test suite after changes (see `TESTING.md`).
-
----
-
-*Convention analysis: 2026-10-14*

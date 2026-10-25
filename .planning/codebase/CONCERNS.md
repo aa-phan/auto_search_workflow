@@ -1,323 +1,260 @@
+---
+last_mapped_commit: aa1bab2d3c3e37ac119cd898b2e4f42a50f276fe
+last_mapped_at: 2026-10-24
+---
 # Codebase Concerns
 
-**Analysis Date:** 2026-10-14
+**Analysis Date:** 2026-10-24
 
-Scope: `hunter.py` (1437 lines, the only live code path), `tests/test_hunter.py`, `.github/workflows/job_hunter.yml`, `README.md`, `.gitignore`, `requirements.txt`, and the CSV artifacts at the repo root. `legacy/` is an archived earlier version and is only noted where it creates debt. `.env`, `resume.txt` and `Resume.pdf` were intentionally not read.
+Scope: full repository (`/Users/aphan/auto_search_workflow`); `legacy/` is archived reference only. Starting points were `STATUS.md` ("Known gaps / risks", "Next milestone"), `DECISIONS.md` (D-01..D-47), `PILOT_LOG.md`, `SPEC.md` and `AGENTS.md`; each item below was then checked in code. Items are marked **verified in code** (read in the named file) or **from docs** (stated in STATUS/DECISIONS/SPEC and not re-measured here). `.env`, `Resume.pdf`, `resume.txt` and service-account JSON were not read; only their existence and git status were checked.
 
-Line numbers refer to `hunter.py` unless stated otherwise.
+## Priority Summary
 
-## Summary of Highest-Impact Issues
-
-1. **Permanent archiving of transient or misconfigured failures.** Any non-transient error during hydration or scoring is written to the hidden `Seen_Archive` tab, which makes the URL permanently "seen". This contradicts the README promise that unscored jobs are retried on the next run. A single bad Groq model name or HTTP 403 from an ATS can silently archive every job it touches.
-2. **CI backup of the CSV tracker is incomplete.** The workflow commits only `tracked_jobs.csv`. `seen_archive.csv` is neither committed nor gitignored, so in CSV mode the dedupe memory of rejected/closed/stale jobs is lost between runs.
-3. **Freshness gate can be defeated.** Dates fall back from creation date to last-updated date to the search engine's date, and undated jobs pass the stale gate. Old postings that were recently edited or re-crawled are treated as fresh.
-4. **Duplicate detection is URL-string based.** The same posting reached through different hostnames or slugs produces multiple tracker rows and multiple Telegram alerts.
-5. **Silent failure.** Persistent outages (Groq, ATS, Serper) produce exit code 0 and log lines only. No alert reaches the user.
-
----
-
-## Seen / Evaluated / Alerted State
-
-### Three stores, one dedupe key, no transactions
-- **Issue:** The "seen" set is rebuilt at startup from two columns: `Job Tracker` column I (`Apply_URL`, `URL_COLUMN` at line 61) and `Seen_Archive` column C (`ARCHIVE_URL_COLUMN`, line 65). See `SheetStore.seen_urls` (line 1119) and `CsvStore.seen_urls` (line 1186). A URL is "handled" if it appears in either place. Scored rows, archived rows and error rows all share this one set, so a transient state can never be distinguished from a final one.
-- **Files:** `hunter.py` lines 61, 65, 1119-1123, 1186-1192.
-- **Impact:** Any decision to re-process a job requires manual deletion from the sheet (README line 84).
-- **Fix approach:** Store an explicit `status` plus `last_attempt` per URL in one place and make retry eligibility a function of status, not presence.
-
-### Failures are archived as final (contradicts README retry promise)
-- **Issue:** `process()` converts several non-transient failures into `STATUS_ERROR` rows with `score=None`. `flush()` (line 1392-1395) sends every row with `is_visible` false to `append_archive`. `archive_cells` (line 1005) keeps the URL forever. The affected paths are:
-  - Hydration, generic exception: `process` line 1302-1304. This includes any `requests.HTTPError` that is not 404/410/429/5xx, such as 401/403 from bot protection (`hydrate_posting` re-raises at line 728).
-  - Hydration, `ValueError("description too short")` at line 731-732. A JavaScript-only page or a temporarily thin response is archived permanently.
-  - Groq HTTP 4xx other than `json_validate_failed`: `GroqClient.evaluate` raises `ValueError` at line 946, which `process` turns into `STATUS_ERROR` (line 1329-1331).
-  - Groq exhausting parse retries: line 954-955.
-- **Impact:** A decommissioned or misspelled `GROQ_MODEL` returns HTTP 400 or 404 on every call. Every job is archived as "Unjudged / Error" on that run and never re-evaluated after the model is fixed. Same outcome for any ATS that returns 403 to GitHub Actions IP ranges. The README (line 97) states "Jobs it couldn't score this run are retried on the next run," which is false for these paths.
-- **Files:** `hunter.py` lines 722-732, 942-946, 1302-1304, 1329-1331, 1392-1397.
-- **Fix approach:** Classify errors into `permanent` (404/410, closed, confirmed bad payload) and `retryable` (everything else, including config errors). Fail fast and do not archive when the Groq response is 4xx other than 429. Only archive after N consecutive failures for the same URL, and keep an attempt counter.
-
-### Alerts are sent after the row is recorded, with no retry
-- **Issue:** `flush()` appends rows first (line 1395-1396), then sends Telegram or webhook alerts (line 1399-1404). The comment says this prevents duplicate rows. The trade-off is that a failed alert is logged as a warning and never retried, and the job is never re-alerted because it is now "seen".
-- **Files:** `hunter.py` lines 1385-1404, 1215-1261.
-- **Impact:** A transient Telegram outage (or an invalid token) silently drops a "To Apply" alert. The user sees the row in the sheet only if they look.
-- **Fix approach:** Add an `alerted` column or status flag written after successful send, and have the next run re-send alerts for `To Apply` rows where the flag is empty.
-
-### Partial-batch loss on kill
-- **Issue:** `pending` rows are only written every `FLUSH_EVERY = 10` jobs (line 1341, 1421-1422). The `finally` flush (line 1426-1427) does not run on SIGKILL or GitHub Actions timeout (`timeout-minutes: 30`, workflow line 12). Up to nine scored rows are lost per timeout and are re-scored (and re-billed in Groq tokens) on the next run.
-- **Files:** `hunter.py` lines 1341, 1382, 1421-1427; `.github/workflows/job_hunter.yml` line 12.
-- **Fix approach:** Flush after every row, or add a wall-clock budget that stops the loop before the Actions timeout.
-
-### Data-dependent column positions
-- **Issue:** Dedupe reads column I of the tracker and column C of the archive by position. The README says "don't delete this column" (line 81), but the user is allowed to reorder or insert columns in the sheet. Doing so silently breaks dedupe, so every job is re-scored and re-appended. The tracker itself is append-only, so duplicates accumulate.
-- **Files:** `hunter.py` lines 49-65, 1121-1122.
-- **Fix approach:** Locate columns by header name at startup and fail loudly if the header is missing.
-
-### Settings fallback hides user errors
-- **Issue:** `Settings.from_values` silently replaces blank or invalid values with environment variables and then defaults (`pick`, line 161-162). `_int_or` (line 140-144) silently returns the default for values like `"seventy"`. There is no way to intentionally set `Max_Job_Age_Days` to a blank value, and no warning is logged.
-- **Files:** `hunter.py` lines 140-144, 158-172.
-- **Fix approach:** Log a warning whenever a value is ignored or replaced, and validate the Settings tab at startup.
-
-### Bootstrap does not migrate new settings
-- **Issue:** `bootstrap` (line 1044) creates the Settings tab only if it is missing. Settings added to `DEFAULT_SETTINGS` in future releases are never written to an existing sheet, so they silently fall back to env or defaults.
-- **Files:** `hunter.py` lines 107-132, 1048-1057.
+| # | Concern | Severity | Area |
+|---|---------|----------|------|
+| 1 | Alert path marks a job `alerted` even when no channel delivered it | Medium (contract; not live: production has Telegram configured) | Known bugs |
+| 2 | Non-HTTP alert exceptions retry forever with no bound | High | Known bugs |
+| 3 | Events ledger growth toward the 10M-cell limit; storage fix (D-43) unbuilt | High | Scaling |
+| 4 | SmartRecruiters polling enabled against `robots.txt` `Disallow: /` (D-38) | High (owner-accepted) | Security / compliance |
+| 5 | Unproven operating choices now acting live (floor 2.0, D-47 early release) | Medium | Fragile areas |
+| 6 | `hunter.py` monolith (1,981 lines) and long functions | Medium | Tech debt |
+| 7 | Sheet lease is not atomic; relies on the GitHub concurrency group | Medium | Fragile areas |
+| 8 | Validation and re-check backlog; waiting-list freshness | Medium | Performance / coverage |
+| 9 | Resume text sent to Groq on every scoring call; no recorded decision | Medium | Security / privacy |
+| 10 | Telegram text truncated after HTML is built | Low | Known bugs |
+| 11 | Watchdog and hourly cadence depend on external triggers outside the repo | Medium | Fragile areas |
+| 12 | Coverage limits (search, title gate, relevance snapshot) | Medium (by design) | Known bugs / coverage |
 
 ---
 
-## Duplicate Detection
+## Tech Debt
 
-### URL normalization misses same-job variants
-- **Issue:** `normalize_url` (line 254) and `dedupe_key` (line 273) only strip query, fragment, trailing slash and a few suffixes. They do not unify:
-  - `boards.greenhouse.io/<board>/jobs/<id>` and `job-boards.greenhouse.io/<board>/jobs/<id>`, which both appear in `ATS_SITES` (line 76-77) and `classify_url` (line 285). These produce two different keys for one posting.
-  - SmartRecruiters slugs. `_SMARTRECRUITERS_PATH` (line 251) accepts an optional `-slug` suffix, but the slug is kept in the normalized URL. `/Co/743999-title` and `/Co/743999` are both valid and produce different keys.
-  - Company-hosted career pages that link to an ATS board (no dedupe at all across hosts).
-- **Impact:** Duplicate rows and duplicate Telegram alerts. The `ref.job_id` already identifies the posting, but it is not used for deduplication.
-- **Files:** `hunter.py` lines 248-295, 1275-1289.
-- **Fix approach:** Build the dedupe key from `(ats, company, job_id)` instead of the URL string, and keep the URL only for display.
+**`hunter.py` is a single 1,981-line module:**
+- Issue: entry point, configuration, Sheet store, Groq client, Telegram/webhook delivery, inventory and discovery glue and the CLI all live in one file. The largest units are `SheetStore` (182 lines, `hunter.py` ~L1190-1380), `main()` (170 lines), `GroqClient` (136 lines), `hydrate_posting` (75 lines), `Settings` (68 lines) and `send_alert` (57 lines, `hunter.py` L1427).
+- Files: `hunter.py`, with the other large modules `pools.py` (792 lines), `reporting.py` (938), `inventory.py` (896), `boards.py` (680), `pipeline.py` (633), `state.py` (615), `dashboard.py` (523).
+- Impact: review and mutation testing of one behaviour touch a file that every subsystem shares; a regression in delivery code is hard to isolate. `AGENTS.md` pins `hunter.py` as the entry/orchestration file, so any split must keep that role.
+- Fix approach: move pure pieces out without behaviour change first: Groq client to its own module, Sheet store to `sheets.py`, alert delivery to `delivery.py`. Keep `hunter.py` as the CLI. Cover the move with the existing 527 test functions in `tests/` before and after.
 
-### Cross-run duplicates are possible on concurrent writes
-- **Issue:** `seen` is read once at startup (line 1369). The concurrency group in the workflow (`.github/workflows/job_hunter.yml` lines 9-11) prevents overlapping CI runs, but a local `python hunter.py` run against the same sheet, or a manual `workflow_dispatch` that waits for the previous run, can still race. Nothing re-reads `seen` before append.
-- **Files:** `hunter.py` lines 1369, 1126-1136; `.github/workflows/job_hunter.yml` lines 9-11.
+**Broad exception handlers in the state path:**
+- Issue: 13 `except Exception` in `hunter.py`, 8 in `pipeline.py`, 4 in `inventory.py`, 3 in `state.py`, 1 each in `boards.py` and `dashboard.py`. Several are intentional containment (dashboard refresh, lease release), but the alert path (below, Known Bugs #2) classifies failures from the exception shape.
+- Files: `hunter.py`, `pipeline.py` (around L586-600), `inventory.py`, `state.py`.
+- Impact: a programming error is indistinguishable from a transient outage unless the handler checks the exception type.
+- Fix approach: narrow handlers to the request and parse errors each stage expects, and let programming errors fail the run loudly (the run then shows as `failed` in `Runs`).
 
-### `--url` mode bypasses dedupe entirely
-- **Issue:** When `--url` is given, `seen` is set to an empty set (line 1369). Any URL passed is appended to the tracker even if it already exists.
-- **Files:** `hunter.py` lines 1365-1369.
-- **Fix approach:** Keep `--url` dedupe on by default and add an explicit `--force` flag.
+**Long functions with many responsibilities:**
+- `main()` in `hunter.py` (170 lines) selects modes, takes the writer lease and runs the poll; `make_evaluator` (57 lines) builds the scorer closure.
+- Fix approach: split CLI modes into functions with one entry each; keep `writer_lease` wrapping behaviour identical.
 
 ---
 
-## Freshness and Publication Dates
+## Known Bugs
 
-### Date fallback chain can make old postings look new
-- **Issue:** The posting date is taken from the first available source:
-  1. Greenhouse: `first_published`, else `updated_at` (line 532-533). `updated_at` is the last-edit date, so an old posting that was recently edited is treated as new.
-  2. Lever `createdAt`, Ashby `publishedAt`, Workable `published`, SmartRecruiters `releasedDate`: these are reasonable.
-  3. Search-result date (`hint_date`), used only when the posting gives no date (line 733-737). Serper's `date` is frequently the crawl or edit date, not the publication date.
-  4. If there is still no date, `posted` is empty. `job_age_days` returns `None` (line 456-458), and the stale gate (line 1314) only fires when `age is not None`. Undated jobs always pass.
-- **Impact:** The stale gate, described in the README as the "authoritative freshness check," is weakened by three fallbacks that are not publication dates.
-- **Files:** `hunter.py` lines 521-534, 733-737, 1311-1317.
-- **Fix approach:** Treat `updated_at` and `search_result` dates as advisory only. Archive undated postings as `Unknown date` with a visible flag, or require a confirmed publication date before scoring.
+**1. A job is recorded as `alerted` when no delivery channel accepted it (contract conflict):**
+- Symptoms: with neither Telegram nor the webhook configured, `send_alert` returns `False` (`hunter.py` ~L1427-1484) and the poller still records the job as `alerted` with `channel: "none"`, then sets `st.alerted = True`, so no retry is scheduled.
+- Files: `pipeline.py` (around L594-600: `sent = d.send_alert(...)`, `pending_events.append(lg.Event(... lg.ALERTED ...))`, `st.alerted = True`); `hunter.py` (`send_alert`, `ALERT_WEBHOOK_URL`, `TELEGRAM_*`).
+- Trigger: a run with the Telegram secrets missing or empty. Not reproduced live; the code path is verified by reading.
+- Contract: `AGENTS.md` rule 4 (seen / evaluated / alerted kept separate; a failure leaves later stages undone and retryable) and `SPEC.md` "Delivery" (a failed alert is retried; "delivered alert = an alerted event whose channel accepted the message", `SPEC.md` ~L135). The dashboard's definition already excludes `channel: "none"`, but the ledger state does not.
+- Orchestrator check (2026-10-24): confirmed in code, but scope is narrow. `send_alert` returns `False` only when NO channel is configured; a real Telegram or webhook failure raises (`raise_for_status`) and is retried. Production has Telegram configured (20 of 20 pilot alerts sent), so no live alert has been lost this way. It matters only for a deployment without any channel.
+- Workaround: the workflow's configuration check names missing secrets (`STATUS.md` line 74); whether that check blocks the run before the poll was not verified in this pass.
+- Recommendation (finding, not a fix): record `alerted` only when `sent` is `True`; otherwise write a failure event and leave the job retryable. Owner to confirm, because it changes SPEC-visible retry behaviour.
 
-### Ashby fetches the page twice and swallows errors
-- **Issue:** When the Ashby API gives no `publishedAt`, `_page_date_posted` (line 677-691) re-downloads the posting page. It catches `Exception` broadly and returns `""`, so network errors are indistinguishable from "no date". The page is also fetched a second time for the same description.
-- **Files:** `hunter.py` lines 556-575, 677-691, 711-712.
+**2. Non-HTTP alert exceptions retry without limit:**
+- Symptoms: the alert `except` branch (`pipeline.py` ~L586-596) decides whether to bound a failure with `getattr(getattr(exc, "response", None), "status_code", 500) < 500`. For any exception without an HTTP response (a `ValueError` from formatting a malformed row, a `KeyError`, a JSON encode error) the default is 500, so the condition is false and the failure is not recorded. The job is retried on every run and never reaches the 5-attempt bound in SPEC "Failures".
+- Files: `pipeline.py` L593; `hunter.py` `send_alert`.
+- Impact: one deterministic bug in alert formatting keeps one job failing forever, with a warning in the log and `alerts_failed` counted each run; the run may show `degraded` without a clear cause.
+- Fix approach: treat exceptions without a response as bounded permanent failures after N attempts, or classify them explicitly (network errors transient, everything else bounded). Add a mutation test on the classifier.
 
-### Relative and fuzzy date parsing is approximate
-- **Issue:** `parse_posted` (line 416-448) maps "N months ago" to `30 * N` days and treats "N hours ago" as today. `datetime.fromisoformat(...).astimezone(timezone.utc)` (line 436) interprets naive timestamps as the local machine's timezone, so results differ between a developer laptop and the UTC GitHub runner.
-- **Files:** `hunter.py` lines 416-448.
-- **Impact:** Boundary-day misclassification around `Max_Job_Age_Days`. Low severity but non-deterministic across machines.
+**3. Telegram text cut after HTML is built:**
+- Symptoms: `send_alert` joins HTML lines and truncates with `"\n".join(lines)[:4096]` (`hunter.py` ~L1452). A cut inside a tag such as `<a href=...>` or an entity makes Telegram return 400 "can't parse entities". The rejection is a 4xx and is bounded to 5 attempts, after which the alert is abandoned.
+- Likelihood: low. The verdict length cap upstream was not confirmed in this pass.
+- Fix approach: cap each free-text field (`verdict`, `gaps`, title) before escaping, and never cut the joined HTML.
 
-### Date_Found is a naive UTC string
-- **Issue:** `_now()` (line 1013-1014) writes `YYYY-MM-DD HH:MM` without a timezone marker. The sheet's USER_ENTERED parsing may interpret it in the sheet's locale timezone.
-- **Files:** `hunter.py` lines 1013-1014, 1126-1129.
+**4. Alerts are at-least-once (documented, still open):**
+- Symptoms: a crash between `send_alert` and the Sheets/Events write produces a duplicate alert on the next run. `SPEC.md` "Failures" says so; `STATUS.md` pilot week 1 measured 0 duplicates in 20 alerts.
+- Fix approach: none planned; the risk is accepted in the contract. The tracker's duplicate protection (`tracked_keys`) limits duplicate rows but not duplicate messages.
 
----
-
-## Failure and Retry Behavior
-
-### Search failures can silently reduce coverage
-- **Issue:** `search_ats` (line 367-410) breaks out of a query's pages on the first `RequestException` and logs a warning. A query with failing page 2 silently contributes only page 1. The run only aborts if every request failed.
-- **Files:** `hunter.py` lines 367-410.
-- **Also:** `resp.json()` on line 399 is not guarded. A non-JSON 200 response raises an uncaught `ValueError` inside the loop, which aborts startup with exit code 2 instead of skipping that page.
-
-### Groq retry budget can exceed the Actions timeout
-- **Issue:** `GroqClient.evaluate` allows `GROQ_ATTEMPTS = 6` attempts (line 748, 906). 429s on the fallback model sleep `min(60, retry_after or 5 * 2**attempt)` seconds (line 933-935), which can total roughly 195 seconds per job. There is no global deadline. Under a daily-quota 429, 30 jobs can take over 90 minutes, which exceeds the 30-minute `timeout-minutes` (workflow line 12).
-- **Files:** `hunter.py` lines 745-749, 900-956; `.github/workflows/job_hunter.yml` line 12.
-- **Fix approach:** Distinguish per-minute limits (short wait) from daily-quota limits (stop the run, return a non-zero exit, and alert).
-
-### Mixed failure modes collapse into "permanent"
-- **Issue:** If any attempt produced a parse failure, the final result is `ValueError` (line 954-955), even if the other attempts were rate-limits. That `ValueError` is then archived permanently by `process`.
-- **Files:** `hunter.py` lines 954-956, 1329-1331.
-
-### Silent successful exit on persistent outage
-- **Issue:** `main` returns 0 at line 1433 after a run where every job hit `TransientError` (counted as "will retry next run"). Only logs record that nothing was scored. `ALERT_WEBHOOK_URL` and Telegram are used only for matches, so there is no operational alert.
-- **Files:** `hunter.py` lines 1406-1433.
-- **Fix approach:** Return a non-zero code, or send an operational alert, when the number of retryable failures reaches a threshold.
-
-### Uncaught exceptions during flush
-- **Issue:** `flush()` has no try/except around `store.append_archive` and `store.append_jobs` (line 1395-1397). A Sheets API quota error (HTTP 429 from Google) propagates out of the `finally` clause and crashes the run with a traceback. Rows in `batch` are dropped; they are not recorded, so they will be retried, but the crash hides the cause.
-- **Files:** `hunter.py` lines 1385-1404, 1426-1427.
+**5. Coverage limits by design (documented in SPEC/STATUS):**
+- Search cannot promise full coverage of the 12-hour window (`STATUS.md` ~L173); live, most search slots return 0 results (`STATUS.md` ~L174).
+- A board's relevance is a snapshot: a waiting board that posts a relevant job is re-checked only on the validation cycle (`STATUS.md` ~L179). At the pilot, 12,460 validated boards were overdue (`STATUS.md` line 17).
+- Title-gate leaks: "Community Associate" (often front desk) passes the broadened Settings; the exclusion list does not cover it (`STATUS.md` ~L198).
+- Baseline jobs are never scored (`SPEC.md` baselining). This is intended, but it means a relevant job posted before a board's first read is never alerted.
 
 ---
 
 ## Security Considerations
 
-### Telegram bot token can leak into error messages and logs
-- **Risk:** The bot token is embedded in the request URL (`hunter.py` line 1232). `resp.raise_for_status()` (line 1241) raises an `HTTPError` whose message includes the full URL, and `send_alert` is called inside `flush` with `except Exception` (line 1402-1404), which logs `exc`. The token is then written to the console.
-- **Files:** `hunter.py` lines 1231-1241, 1402-1404.
-- **Current mitigation:** GitHub Actions masks registered secrets in logs, so the CI risk is low. Local runs (`python hunter.py`) print the token.
-- **Recommendations:** Catch `requests.RequestException` in `send_alert` and log only the status code.
+**SmartRecruiters polling against `robots.txt` (owner-accepted, D-38):**
+- Risk: `api.smartrecruiters.com/robots.txt` says `User-agent: *` / `Disallow: /` (per D-38, fetched 2026-10-15). Polling is enabled in production by `ALLOW_SMARTRECRUITERS_BULK: "1"` in `.github/workflows/job_hunter.yml` (line 74) and `.github/workflows/inventory.yml` (line 76). `SPEC.md` ~L41 says bulk validation is off by default and that the override is opt-in.
+- Files: `.github/workflows/job_hunter.yml`, `.github/workflows/inventory.yml`, `boards.py` (parking logic), `SPEC.md` ~L41, `DECISIONS.md` D-38.
+- Current mitigation: only monitored boards are polled hourly; validation spacing for SmartRecruiters is raised to 1.0 s; the override is written to `Runs.Notes`; a 429 triggers provider backoff.
+- Recommendations: this is a recorded decision, so it is flagged, not changed. Owner to reconfirm the D-38 risk acceptance, and set the reversal (remove the two lines) as the pre-agreed response if SmartRecruiters objects. Note that `SPEC.md` ~L41 still describes the default, not the deployed override.
 
-### Prompt injection can influence alerts
-- **Risk:** Job descriptions and the resume are inserted directly into the Groq prompt (`build_messages`, line 830-839). The system prompt tells the model to ignore instructions in them (line 780), but the output `score` directly controls whether a job is marked `To Apply` and sent to Telegram (line 1332-1338). A posting containing instructions to score 100 would trigger an alert.
-- **Files:** `hunter.py` lines 751-788, 830-839, 1332-1338.
-- **Recommendations:** Validate the score against deterministic gates (experience years extracted by regex, location match) before setting `To Apply`. Log scores that disagree with the gates.
+**Personal data sent to a third-party LLM:**
+- Risk: the resume text (stored in the Sheet's `Settings > Resume_Text`) is sent to Groq in each scoring prompt (`hunter.py` `GroqClient`, around L895-940). `DECISIONS.md` D-09 covers storage and git ignores only; it records no decision on sending the resume to a third-party model.
+- Current mitigation: the Groq key is a secret; the endpoint is `https://api.groq.com/openai/v1/chat/completions` (`hunter.py` L125); the Sheet is private.
+- Recommendations: record an explicit decision on Groq's data handling for the account in use; confirm the Groq account's retention settings.
 
-### Resume stored in the sheet and in CI
-- **Risk:** The resume (personal data) is stored in the Google Sheet's Settings tab (`hunter.py` line 108). Anyone with edit access to that sheet sees it. The README (line 48) recommends a private repository, but the repository's tracked CSVs contain job data and verdicts, which are committed to git on every CI run.
-- **Files:** `hunter.py` lines 107-108, 1044-1057; `.github/workflows/job_hunter.yml` lines 45-58; `README.md` line 48.
-- **Current mitigation:** `.gitignore` excludes `Resume.pdf` and `resume.txt` (lines 10-12) and secret-like filenames (lines 4-6).
+**Webhook payload:**
+- Risk: `ALERT_WEBHOOK_URL` receives the title, company, score, verdict, gaps, location and apply URL of every alert (`hunter.py` `send_alert`, `cfg.webhook_url`). There is no allowlist or signature, and the URL is a secret whose value is not in the repository.
+- Recommendation: keep the URL in secrets only (already the case in `job_hunter.yml` line 67); if the webhook is ever shared, rotate it.
 
-### Spreadsheet formula injection is partially mitigated
-- **Mitigation in place:** `_safe_cell` (line 1017-1019) prefixes `=`, `+`, `-`, `@`, tab and CR with an apostrophe. It is applied to the label, location, verdict and gaps (line 987-991), but not to `self.posted` or `self.url`. Those are generated by the script or constrained to `https` by `normalize_url`, so the risk is low.
-- **Files:** `hunter.py` lines 980-993, 1017-1019.
+**Repository visibility:**
+- Risk: `STATUS.md` line 68 describes the repository as "private-then-public". Workflows run on `main`; secrets are not exposed to forks, but the public schedule and the workflow files are visible.
+- Recommendation: confirm the intended visibility. No secret values were found in tracked files.
 
-### Non-ATS URLs are allowed to reach the sheet only through ATS classification
-- **Mitigation in place:** `classify_url` (line 278-295) restricts hydration to six ATS hosts. `_hydrate_page` (line 644) fetches arbitrary pages only after classification. This is sound but depends on the host allowlist remaining correct.
+**Positive checks (verified in code):**
+- Secrets are environment variables and GitHub secrets only. `git ls-files` lists no `.env`, `Resume.pdf`, `resume.txt`, service-account JSON or `tracked_jobs*.csv`; `.gitignore` covers all of them (`.env`, `.env.*`, `*service-account*.json`, `*credentials*.json`, `Resume.pdf`, `resume.txt`, `tracked_jobs*.csv`, `state/`).
+- Local files that do exist and are ignored: `.env` (contents not read), `Resume.pdf`, `resume.txt`, `tracked_jobs.csv` (mode 600), `state/*.csv` (local copies of the registry and ledger, job data).
+- Telegram HTML is escaped with `html.escape` before it is sent (`hunter.py` `send_alert`).
+- No `shell=True`, `verify=False`, `eval(`, `pickle` or `yaml.load(` was found in the Python files.
+- Workflows declare `permissions: contents: read` (`job_hunter.yml` L46, `inventory.yml` L25, `watchdog.yml` L26).
 
-### Service account JSON accepted as a file path
-- **Risk:** `load_service_account` (line 1022-1030) accepts either raw JSON or a filesystem path. A misconfigured environment could read an unintended file.
-- **Files:** `hunter.py` lines 1022-1030.
-- **Impact:** Low, since the variable is set by the operator.
+**Supply chain:**
+- Actions are pinned by tag (`actions/checkout@v4`, `actions/setup-python@v5`, `actions/cache@v4`), not by commit SHA (`.github/workflows/*.yml`). Dependencies are in `requirements.txt` (147 bytes) ; no lockfile appears in the repository listing.
+- Fix approach: pin actions by SHA; add a lockfile or pinned versions for `requests`, `gspread` and the Google auth packages.
 
 ---
 
 ## Performance Bottlenecks
 
-### Ashby board re-downloaded per job
-- **Problem:** `_hydrate_ashby_api` (line 556-561) fetches the entire company job board JSON for every posting. Ten postings from one company cause ten identical full-board requests.
-- **Files:** `hunter.py` lines 556-561.
-- **Improvement path:** Cache board responses per company within a run (a dict keyed by company).
+**Events ledger growth (the largest structural risk):**
+- Problem: the `Events` tab is append-only and holds every observed job ID, including the baselines of admitted boards. Pilot week 1: 140,668 rows, about 2,900 rows a day (`STATUS.md` line 17). Storage measurements (`DECISIONS.md` D-43, 2026-10-17): 122,003 rows = 854,021 cells, about 7 cells per row; 93% of rows are baselines and 6.6% are identity-only rows (title-gated or stale postings), 0.4% operational.
+- Files: `state.py` (ledger, `replay`), `hunter.py` (the Events write path), `storage_report.py`, `reporting.py`, `dashboard.py`.
+- Cause: every run replays the whole ledger to rebuild `seen`; `Load_S` rose from 7.5 s at fewer than 118k rows to 8.0 s at 121k (no per-row slope yet).
+- Projection: the 10,000,000-cell limit is about 1.4M rows at 7 cells per row. Admission waves are large: the first refill runs added 5,273 and 6,919 job IDs (`STATUS.md` ~L200), and D-43 estimates +200 boards would add about 29,300 rows at admission. The dashboard and the pilot report read the whole Events tab after each run.
+- Status: the fix in D-43 (an `Identity` tab with ID chunks, a `Daily` counter tab, archiving terminal rows) is proposed and **not implemented**; `DECISIONS.md` D-43 says the review is "after the pilot", and the pilot ended 2026-10-22 without a recorded decision.
+- Fix approach: follow the D-43 migration order (write the new tabs in parallel, compare derived `seen` sets for several days, delete only with an exported copy kept). Schedule the decision now that the pilot has ended; `STATUS.md` names Events growth as a watch item.
 
-### Groq pacing is fixed and conservative
-- **Problem:** `_pace` enforces `llm_interval = 2.2` seconds between every call (line 894-898, 219), and `TokenBudget` reserves 90% of TPM (line 861). A 30-job run therefore takes at least about 66 seconds of pacing plus hydration time.
-- **Files:** `hunter.py` lines 219, 846-866, 894-898.
-- **Impact:** Acceptable at current volumes; becomes the bottleneck if `MAX_JOBS_PER_RUN` is raised.
+**Run duration and quota headroom:**
+- Problem: run median 113 s, max 770 s against the 25-minute poll timeout (51%) (`STATUS.md` line 17). The inventory validation run took 1,121 s for 5,000 re-checks, inside its 1,500 s `--max-seconds` budget and the 40-minute job timeout (`STATUS.md` ~L200).
+- Limits: Google Sheets reads peak at 12.4 per minute against a quota of about 60 (`STATUS.md` line 17); `quota_retrying` waits 20, 40 and 65 seconds (`hunter.py` ~L1149). Growing to 700 boards raises per-run reads and writes.
+- Fix approach: keep `Runs` timing columns under review after each capacity change (`Duration_S`, `Sheets_Reads`, `Sheets_429`); the existing pilot report already measures them.
 
-### Full-column reads each run
-- **Problem:** `seen_urls` reads entire tracker and archive columns on every run (line 1121-1122). `bootstrap` also calls `worksheets()` and `get_all_values()` on each run (line 1046, 1081).
-- **Files:** `hunter.py` lines 1046, 1081, 1119-1123.
-- **Impact:** Adds Sheets read calls (per-minute quota). Grows linearly with the Seen_Archive size, which is unbounded.
-
-### Input truncation drops requirement text
-- **Problem:** The job description is truncated to 7000 characters (`JD_CHARS`, line 745; used at line 837) and the resume to 7000 characters (`RESUME_CHARS`, line 746; used at line 834). Many postings place "Requirements" after long "About us" sections, so the experience gate can be silently dropped. Long resumes lose their final sections (often skills or projects).
-- **Files:** `hunter.py` lines 745-746, 830-839.
-- **Fix approach:** Extract the requirements section, or truncate from the middle with a logged warning, and log when truncation occurs.
+**Validation backlog:**
+- Problem: about 21,000 validated boards must be re-checked; the 5,000-board daily budget is about two days per full pass after D-47 (`DECISIONS.md` D-47). Lever's `Crawl-delay: 1` limits validation to about 44 minutes per full pass (`STATUS.md` ~L178).
+- Impact: a waiting board's relevance can be up to one pass old when it is admitted (`STATUS.md` ~L179).
+- Fix approach: measure re-check flip rates (`revalidation_stats` in the Discovery tab, already recorded) before raising budgets further.
 
 ---
 
 ## Fragile Areas
 
-### Hydration relies on ATS-specific JSON shapes
-- **Files:** `hunter.py` lines 521-627 (Greenhouse, Lever, Ashby, Workable, SmartRecruiters).
-- **Why fragile:** Field names such as `first_published`, `descriptionPlain`, `publishedAt` and `sections.jobDescription.text` are undocumented or semi-public. A rename degrades to empty fields without an exception, so `hydrate_posting` may pass through a posting with no date or an empty location. The only guard is the 200-character description minimum.
-- **Safe modification:** Add a per-ATS fixture test that asserts the required fields are non-empty.
-- **Test coverage:** `tests/test_hunter.py` contains `HydrationErrorTests` (line 239) and `ParseTests` (line 424). Live API behavior is not tested.
+**Unproven operating choices now act on live data:**
+- Files: `pools.py` (`GRADUATION_FLOOR` = 2.0, weekly rebalance, `early_releases`, `apply_releases`), `DECISIONS.md` D-30, D-45, D-47.
+- Why fragile: `D-30` lists 80/20 pools, 7-day trials, 20 replacements, the score weights, margin 1.0, two weak cycles and 84 complete polls as unproven. `D-45` sets the floor at 2.0. `D-47` moved the floor from the weekly cycle into every poll run, so 221 trials were released on 2026-10-24 before the first weekly cycle had produced evidence (`STATUS.md` ~L200). `AGENTS.md` rule 7 forbids tuning scores or adding features until freshness and delivery are proven; the pilot criteria were met (`STATUS.md` line 17), but the pool rules have not been tested by a real weekly cycle.
+- Safe modification: keep `Rebalance_Mode` and `Max_Active_Boards` as Settings changes, not code edits. Read the first real `rebalance_report` (due about 2026-10-29 01:00 UTC; about 274 graduations expected) before changing any threshold.
+- Test coverage: 3 unit tests (`EarlyReleaseTests`) and 2 pipeline tests for D-47; the weekly cycle at 700 boards has no live run yet.
 
-### Ashby "not on board" fallback can accept closed pages
-- **Files:** `hunter.py` lines 703-713.
-- **Why fragile:** If the Ashby board API returns no matching job, the code scrapes the posting page and treats any page with more than 200 characters of text as open. Closed-job pages with boilerplate can exceed this threshold.
-- **Safe modification:** Check for the ATS's known closed-job markers, or require a `JobPosting` JSON-LD block.
+**Sheet lease is not atomic:**
+- Files: `state.py` (`SheetState.acquire_lease`, `holds_lease`, `release_lease`, L303-335), `hunter.py` (`LEASE_TTL`, `writer_lease`, L1588-1648).
+- Why fragile: the Sheet has no conditional write, so acquisition is write-then-verify and two writers starting within about 3 seconds could both proceed (`SPEC.md` ~L39). A run that outlives its TTL (30 min poller, 45 min inventory) logs an error (`hunter.py` ~L1641-1644).
+- Current mitigation: the shared GitHub concurrency group `job-hunter-state` (`job_hunter.yml` L52-54, `inventory.yml` L35-37, `cancel-in-progress: false`); local writes to a production Sheet are refused (exit 4, `hunter.py` ~L1601-1609); the file lease is a real `flock` (`state.py` ~L551-591).
+- Safe modification: never run a writing command against the production Sheet from a laptop. Keep the concurrency group identical in every workflow that writes the registry.
+- Residual window (from docs): the inventory importer re-reads a row's status just before writing, so a promotion in those milliseconds can be overwritten; job state is unaffected because it lives in `Events` (`STATUS.md` ~L170).
 
-### Single global Groq fallback flag
-- **Files:** `hunter.py` lines 749, 887, 889-892, 929-932.
-- **Why fragile:** `_fallback_until` is set on any 429 from the primary model and holds for 90 seconds across all jobs. If `GROQ_MODEL` equals `GROQ_FALLBACK_MODEL` (misconfiguration), `self.budgets` collapses into one entry (line 882-885) and the fallback logic silently has no effect.
-- **Safe modification:** Validate that the two model names differ at startup.
+**GitHub drops waiting runs in a shared group:**
+- Why fragile: GitHub keeps only the newest waiting run per concurrency group. A long inventory import can cause one hourly poll to be replaced by the next (`SPEC.md` ~L39). Gaps are detected by the watchdog and `Runs`, not prevented.
+- Fix approach: keep the inventory run short (already bounded by `--max-seconds 1500`) and keep the watchdog's threshold (`WATCHDOG_WARN_HOURS`) visible.
 
-### Regex-based title exclusion has edge cases
-- **Files:** `hunter.py` lines 179-184.
-- **Why fragile:** Whole-word matching with `(?<![A-Za-z0-9])` excludes words adjacent to underscores or hyphens differently from the search query builder, which uses `-intitle:` and does not match the same boundaries. A title such as "Senior-Marketing" is excluded locally but may appear in search results.
-- **Test coverage:** `QueryTests` (line 50) and `ProcessTests` (line 267) cover some cases. Hyphenated and punctuation-adjacent titles are not evident.
+**Header-name dependence in the tracker and Settings:**
+- Files: `hunter.py` (`append_jobs`, `tracked_keys`, `tracker_rows`, `_tracker_header`), `SPEC.md` ~L105.
+- Why fragile: renaming `Apply_URL`, `My_Status` or a Settings row breaks lookups. Since D-46, a missing `Apply_URL` stops the run before evaluation and alerts (`D-46` trade-off: no alert is sent while the header is missing). `STATUS.md` line 17 records the 2026-10-22 header clearing that caused this.
+- Safe modification: never rename headers; the user may reorder columns. A second header-protection rule in the Sheet (owner action) would prevent a repeat.
 
-### Legacy file diverges from live code
-- **Files:** `legacy/hunter_local_scoring.py` (1292 lines), `legacy/tracked_jobs.local-scoring.csv`.
-- **Why fragile:** The archived script is a separate implementation with the older CSV schema (`Date_Found_UTC`, `Score`, `Status`, ...). Nothing imports it, but future changes could be applied to the wrong copy.
-- **Recommendation:** Keep `legacy/` out of any search or refactor scope, or move it to a git tag.
+**Dependence on external triggers outside the repository:**
+- Files: `.github/workflows/job_hunter.yml` (`cron: "17 * * * *"`, `workflow_dispatch` with `trigger_source`), `.github/workflows/watchdog.yml` (`cron: "7,22,37,52 * * * *"`), `DEPLOY.md`.
+- Why fragile: the hourly cadence comes from an external trigger (documented as cron-job.org in the workflow input description), not from GitHub's schedule. GitHub's own scheduled runs fired about every 4.7 hours (`DECISIONS.md` D-42). The watchdog runs on the same GitHub Actions platform and sends alerts through the same Telegram bot, so one platform outage can stop both.
+- Status (from docs): a second, external trigger for `watchdog.yml` is recommended and **not set up** (`STATUS.md` line 49). The watchdog's Telegram delivery, incident tab and a real outage were **not verified live** (`STATUS.md` ~L44).
+- Fix approach: owner to configure the external watchdog trigger on a different scheduler from the hunter's trigger, and to send one real test notification.
+
+**Groq model names and behaviour:**
+- Files: `hunter.py` L333-337 (defaults `openai/gpt-oss-120b` and `openai/gpt-oss-20b`), `GroqClient` (L861-940), `GROQ_ATTEMPTS = 6`, `FALLBACK_HOLD_SECONDS = 90`.
+- Why fragile: the requested models returned 404 `model_not_found` for this key (`DECISIONS.md` D-16, which still says "needs your OK"). Reasoning models need a 1,000-token output cap (D-16). The 429 fallback and `model_not_found` handling are mocked only (`STATUS.md` ~L152).
+- Fix approach: record the owner's OK on D-16; add a live smoke check to the configuration step.
+
+**Single 1,981-line module shared by every writer:** see Tech Debt above; a bad commit to `hunter.py` can break polling, delivery and reporting together. The watchdog avoids this by importing nothing from the hunter (`DECISIONS.md` D-42; asserted by a test).
+
+---
+
+## Scaling Limits
+
+**Google Sheets as the database:**
+- Current capacity: 10,000,000 cells per spreadsheet. Measured 854,021 cells for 122,003 Events rows (`DECISIONS.md` D-43), plus the `Boards` registry (about 22,000 rows of candidates).
+- Limit: about 1.4M Events rows at 7 cells per row, before the `Boards` and tracker tabs.
+- Scaling path: the D-43 proposal (identity chunks, daily counters, archive of terminal rows), then a real database if the Sheet becomes the bottleneck. The Sheets API quota (about 60 reads per minute per user) is the other limit (`STATUS.md` line 17).
+
+**Monitored boards:**
+- Current capacity: `Max_Active_Boards` = 700 (set by the user, `Rebalance_Mode` on; `STATUS.md` ~L193). Admission is 50 boards per run (`Max_New_Boards_Per_Run`).
+- Limit: coverage is 53% of relevant boards after the 2026-10-24 refill (`STATUS.md` ~L200), and per-run ATS requests and Events growth grow with the monitored set.
+- Scaling path: raise the cap only after the first weekly cycle and a run-duration check against the 25-minute timeout.
+
+**Search budget:**
+- Current capacity: 1,000 Tavily credits a month, 800 for scheduled runs (`SPEC.md` ~L46); 10 credits a run; a full rotation of 42 slots takes about 2.1 days (`DECISIONS.md` D-36). At 6 sites by 36 roles, the rotation is longer (`PILOT_LOG.md` 2026-10-23 21:21).
+- Limit: search adds only a trickle of boards; "140 credits in 7 days, 20 a day, at the stop threshold" (`STATUS.md` line 15).
+- Scaling path: none planned; the credit cap is a deliberate cost control.
 
 ---
 
 ## Dependencies at Risk
 
-### Groq model defaults
-- **Risk:** Defaults are `llama-3.3-70b-versatile` and `llama-3.1-8b-instant` (`hunter.py` lines 214-215). Model names are retired by providers over time, and a retired name currently causes permanent archiving (see Failure and Retry Behavior).
-- **Impact:** All scoring fails and rows are archived as errors.
-- **Migration plan:** Pin the model in the sheet or env, validate it at startup with a single test call, and fail fast with a non-archiving error.
+**Google Sheets API via `gspread`:**
+- Risk: no conditional write (see Fragile Areas); quotas per minute; request shapes for charts and the dashboard were checked against the discovery schema but not against the real API (`STATUS.md` ~L59-60).
+- Impact: a Sheets API change breaks reads and writes in every workflow.
+- Migration plan: none; keep the store behind `SheetStore` / `CsvStore` so a database backend can replace it.
 
-### Python version and unpinned transitive dependencies
-- **Risk:** CI uses Python 3.12 (`.github/workflows/job_hunter.yml` line 22). `requirements.txt` uses ranges (`requests>=2.32,<3`, `gspread>=6.0,<7`, etc.) with no lockfile and no hashes.
-- **Impact:** Upstream releases within the ranges can change behavior silently (for example, `gspread` 6.x changes to `append_rows` or `batch_update`).
-- **Migration plan:** Commit a lockfile (`pip-compile` or `uv lock`) and pin the CI install to it.
+**Groq free tier:**
+- Risk: tokens-per-minute budgets (`GROQ_TPM` default 8000, `hunter.py` L336); model names change (D-16).
+- Impact: scoring falls back or stops; a transient failure is retried, but a stopped model is a configuration problem.
+- Migration plan: keep the model names as settings (already environment variables) and the fallback model.
 
-### Google Sheets as the only database
-- **Risk:** Sheets API quotas (read and write requests per minute) and the 2000-row limit on the status dropdown (line 1104) make the sheet a scaling bottleneck. The dropdown silently stops covering rows beyond 2000.
-- **Migration plan:** Keep the sheet as a view, and move the seen-state into a small local store committed to the repo or into a persistent cache keyed by `(ats, company, job_id)`.
+**Tavily search:**
+- Risk: the account counter lagged (still 0 after about 55 credits, `STATUS.md` ~L100); cost is read from each response; a 432/433 blocks all spending until the month rolls over.
+- Impact: credit accounting is local and can undercount usage made outside the app.
 
 ---
 
 ## Missing Critical Features
 
-### No operational alerting
-- **Problem:** The only outbound notifications are job matches. Startup failures (exit 2), persistent Groq or ATS outages and daily-quota exhaustion produce no notification. The user has to open the Actions tab to discover a silent failure.
-- **Blocks:** Reliable unattended operation.
+**Verified delivery on the real channel is not in place for the watchdog:**
+- Problem: the watchdog's Telegram message, incident tab and a real outage/recovery have not been exercised live (`STATUS.md` ~L44).
+- Blocks: trusting the "no outage for 2 hours" monitor during a real outage.
 
-### No retry state for failed jobs
-- **Problem:** There is no column or store that records an attempt count or last error, so a job cannot be retried after a fix without manually deleting its archive row.
-- **Blocks:** The retry behavior described in the README.
+**No daily digest or structured operator alert (documented as not built):**
+- Problem: `STATUS.md` line 64 lists the daily Telegram digest as "documented in SPEC and not built".
+- Blocks: a daily check of delivery without opening the dashboard.
 
-### No re-evaluation when the resume or settings change
-- **Problem:** Archived jobs (scores under 50, stale, closed, errors) are never revisited. Editing `Resume_Text` or `Target_Roles` does not re-score them.
-- **Blocks:** Benefiting from resume improvements on jobs already seen.
-
-### No alert retry or "alerted" state
-- **Problem:** See Seen / Evaluated / Alerted State above.
-- **Blocks:** Trustworthy notifications.
+**Schedule for the storage decision:**
+- Problem: D-43 has no decision date and the pilot is over.
+- Blocks: safe growth past roughly 1.4M Events rows.
 
 ---
 
 ## Test Coverage Gaps
 
-### Test suite was not executed for this analysis
-- **What's not tested here:** The suite in `tests/test_hunter.py` (46 test methods across 13 classes) was read but not run. Pass or fail status is unknown.
-- **Files:** `tests/test_hunter.py`.
-- **Risk:** Any of the gaps below may already be partially covered; verify before writing new tests.
-- **Priority:** High (run before refactoring).
+**Live integrations are mocked:**
+- What's not tested live: Sheets writes beyond the one-off pilot runs (fake gspread worksheet in `tests/test_inventory.py` and `tests/test_hunter.py`); Telegram delivery of an alert from a real run (only the labelled delivery test); the Groq 429 fallback and `model_not_found` path; the watchdog's Telegram message, incident tab and real outage/recovery; the weekly rebalance at 700 boards (no real run yet).
+- Files: `tests/test_hunter.py`, `tests/test_inventory.py`, `tests/test_watchdog.py`, `tests/test_pools.py`, `tests/test_core.py` and `tests/test_pools.py` (pipeline behaviour).
+- Risk: the alert-classification defects (Known Bugs #1 and #2) would not be caught by live runs because they only fire when delivery fails.
+- Priority: High for alert classification; Medium for the rest.
 
-### Permanent-archive paths
-- **What's not tested (to verify):** That a Groq HTTP 400 that is not `json_validate_failed` archives the job permanently; that an HTTP 403 from an ATS archives the job permanently; that a short description archives the job permanently.
-- **Files:** `hunter.py` lines 722-732, 942-946, 1302-1304, 1329-1331.
-- **Risk:** Silent loss of every job during a misconfiguration.
-- **Priority:** High.
+**Tests do not cover the alert-recording branch with no channel:**
+- What's not tested: `send_alert` returning `False` and `pipeline.py` marking the job `alerted`.
+- Risk: a silent drop when configuration is incomplete.
+- Priority: High.
 
-### Alert failure path
-- **What's not tested (to verify):** That a Telegram failure after `append_jobs` leaves the row recorded and sends no retry.
-- **Files:** `hunter.py` lines 1399-1404.
-- **Priority:** High.
+**Non-HTTP alert exceptions:**
+- What's not tested: exceptions without a `response` attribute in the alert `except` branch (`pipeline.py` ~L593).
+- Risk: unbounded retries (Known Bugs #2).
+- Priority: High.
 
-### Duplicate variants
-- **What's not tested (to verify):** `boards.greenhouse.io` vs `job-boards.greenhouse.io` for one job; SmartRecruiters with and without slug.
-- **Files:** `hunter.py` lines 248-295.
-- **Priority:** Medium.
+**Telegram length and entity limits:**
+- What's not tested: messages near 4,096 characters containing HTML entities.
+- Priority: Low.
 
-### Date fallback behavior
-- **What's not tested (to verify):** An old Greenhouse posting with a recent `updated_at` and no `first_published`; an undated posting passing the stale gate; naive timestamp handling in `parse_posted`.
-- **Files:** `hunter.py` lines 416-448, 521-534, 1311-1317.
-- **Priority:** Medium.
-
-### CSV mode across CI runs
-- **What's not tested:** That `seen_archive.csv` survives a CI run in CSV mode. The workflow does not commit it (see below), so this would have caught the loss.
-- **Files:** `.github/workflows/job_hunter.yml` lines 46-59, `hunter.py` lines 1139-1200.
-- **Priority:** High.
+**Event volume and load time:**
+- What's not tested: replay and dashboard time at 100k+ Events rows with the 700-board mix (measured only at 121k rows, single point).
+- Priority: Medium.
 
 ---
 
-## Workflow and Repository Hygiene
-
-### Seen_Archive is not persisted in CSV mode
-- **Issue:** In CSV mode (`GOOGLE_SHEET_ID` unset), `CsvStore` writes rejected and closed URLs to `seen_archive.csv` (`ARCHIVE_PATH`, `hunter.py` line 66). The workflow runs `git add tracked_jobs.csv` only (`.github/workflows/job_hunter.yml` line 54). `seen_archive.csv` is not in `.gitignore`, so it is also not ignored. The result is that every CI run starts with no archive, re-fetches and re-scores previously rejected jobs, and spends Groq tokens on them. The `legacy` migration path (`hunter.py` lines 1162-1181) also moves rows into this file, so migrated low scorers are lost in the same way.
-- **Files:** `.github/workflows/job_hunter.yml` line 54; `.gitignore`; `hunter.py` lines 66, 1139-1200.
-- **Fix approach:** Add `seen_archive.csv` to the `git add` line in the workflow, or make the CSV-mode CI path rely on the sheet only and fail fast when `GOOGLE_SHEET_ID` is absent.
-
-### Tracked CSV uses an outdated schema
-- **Issue:** The committed `tracked_jobs.csv` header is `Date_Found_UTC,Score,Status,Company_or_Title,Verdict,Missing_Gaps,URL,Date_Posted`, which differs from `TRACKER_COLUMNS` (`hunter.py` lines 49-60). Every CSV-mode run triggers the migration branch (`CsvStore.bootstrap`, line 1162). The `tracked_jobs.gemini-scored.csv` file is not referenced anywhere in the code.
-- **Files:** `tracked_jobs.csv`, `tracked_jobs.gemini-scored.csv`, `hunter.py` lines 1162-1181.
-- **Fix approach:** Migrate the committed CSV once, commit the result, and delete unreferenced artifacts.
-
-### Stray and duplicated artifacts
-- **Issue:** `tracked_jobs.gemini-scored.csv` (root) and `legacy/tracked_jobs.local-scoring.csv` contain job data that is committed to git. `legacy/hunter_local_scoring.py` duplicates much of the pipeline logic.
-- **Files:** `tracked_jobs.gemini-scored.csv`, `legacy/`.
-- **Fix approach:** Remove or archive to a tag.
-
-### Workflow runs the CSV commit step even in Sheet mode
-- **Issue:** The "Commit CSV backup" step runs on every execution (`if: always()`, line 47). In Sheet mode it is a no-op because the CSV is not modified, but it still performs a `git pull --rebase` only when there is a diff. This is low risk; the comment in the workflow states the intent.
-- **Files:** `.github/workflows/job_hunter.yml` lines 47-59.
-
----
-
-*Concerns audit: 2026-10-14*
+*Concerns audit: 2026-10-24*
