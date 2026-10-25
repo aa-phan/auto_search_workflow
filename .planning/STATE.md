@@ -1,20 +1,33 @@
+---
+gsd_state_version: "1.0"
+milestone: v2.0
+milestone_name: Search-substitute volume
+status: planning
+last_updated: "2026-10-25T06:00:54.475Z"
+last_activity: 2026-10-25
+progress:
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
 # Project State
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-24)
+See: `.planning/PROJECT.md` (updated 2026-10-25)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Between milestones: v1.0 shipped; v2 not yet defined.
+**Current focus:** v2.0 Search-substitute volume: defining requirements
 
 ## Current Position
 
-Milestone: v1.0 Board-polling alerts — complete (2026-10-24)
-Phase: none active
-Status: Ready to define v2 (`/gsd-new-milestone`)
-Last activity: 2026-10-24 — codebase map refreshed; repo docs ingested into REQUIREMENTS / PROJECT / ROADMAP
-
-Progress: v1.0 ██████████ 100%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-10-25 — Milestone v2.0 started
 
 ## Accumulated Context
 

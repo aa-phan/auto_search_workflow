@@ -6,6 +6,21 @@ Fresh-job alerts for one non-technical job seeker (entry-level marketing, conten
 
 Contract and rationale live outside `.planning/` and win over anything here: `SPEC.md` (contract), `DECISIONS.md` (why, D-01..D-47), `STATUS.md` (what is verified live vs mocked), `AGENTS.md` (agent rules), `PILOT_LOG.md` (deployments that affect measurements). Code map: `.planning/codebase/`.
 
+## Current Milestone: v2.0 Search-substitute volume
+
+**Goal:** 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker every day, enough to replace manual searching, while Telegram alerts stay verified-fresh within 12 hours.
+
+**Target features:**
+- Recent backfill: a newly admitted board's jobs posted within 72 h (with a source publication time) are scored and labelled with their real age instead of silently baselined (changes D-05)
+- 72-hour tracker window for relevant jobs, age always shown; alerts unchanged
+- Scale monitored boards past 700 within measured limits, enabled by the Events storage migration (D-43)
+- Faster board cycling from recent relevant posting activity and the user's feedback (lifts the rule-7 gate for board-cycling scores only)
+- New ATS adapters for big-employer job sites (Workday, iCIMS, ...; research picks which)
+- Wider web search (more roles, fuller use of the credit budget) for jobs on unmonitored boards
+- Measurement: tracker rows per day, their age, and My_Feedback evaluation prove the target
+
+**Principle (user, 2026-10-25):** volume over precision as long as every job is recent: skimming a pile of recent jobs is easy, finding recent jobs manually is the hard part.
+
 ## Core Value
 
 A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
@@ -29,19 +44,21 @@ Full list with verification state: `.planning/REQUIREMENTS.md`.
 
 ### Active
 
-<!-- v2 candidates; the milestone scope is chosen by /gsd-new-milestone. -->
+<!-- v2.0 scope; REQ-IDs in .planning/REQUIREMENTS.md once defined. -->
 
-- [ ] Read the evidence first: weekly rebalance, limits at 700, effect of the broadened Settings, D-47 follow-up, My_Feedback vs score, re-check interval (EVID-01..06)
-- [ ] Contract and reliability fixes on the alert path, watchdog trigger, live-test gaps (REL-01..05)
-- [ ] Events storage decision and migration (STOR-01)
-- [ ] Daily digest and title-gate leaks (FEAT-01, FILT-03) — gated by AGENTS.md rule 7
-- [ ] Split `hunter.py`, pin dependencies (MAINT-01..02)
-- [ ] Record open owner decisions (GOV-01)
+- [ ] 20-30 recent (<= 72 h) relevant jobs per day in the tracker
+- [ ] Recent backfill on board admission (D-05 change)
+- [ ] More boards (past 700) with storage that scales
+- [ ] Faster, feedback-informed board cycling
+- [ ] New ATS adapters
+- [ ] Wider web search
+- [ ] Measured outcome: rows per day, age, feedback
 
 ### Out of Scope
 
-- Tuning scores — gated by AGENTS.md rule 7 and SPEC "Out of scope for now"; needs EVID-05 and an owner decision
-- Additional ATSs, non-US markets — SPEC scope; no adapters, non-US excluded by design (D-08)
+- Tuning the job scorer (Groq score, Min_Alert_Score) — still gated by AGENTS.md rule 7 unless My_Feedback evidence (EVID-05) supports a change; board-cycling scores are in v2.0 scope
+- Non-US markets — excluded by design (D-08)
+- Alerting on anything not verified fresh within 12 h — the core value
 - Email / SMS, web UI — the Sheet and Telegram are the only interfaces
 - Parity with job boards — only polled boards have the hourly guarantee (SPEC "Honest limits")
 
@@ -79,5 +96,22 @@ All 47 decisions are in `DECISIONS.md` (locked; later entries amend earlier ones
 | D-46 tracker without header is refused | Prevent writes by position | ✓ Good (verified live) |
 | D-47 early release + 5,000 re-checks per run | Free slots held by failed trials | ✓ Good so far (220 released, refilled to 679/700) |
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-10-24 after /gsd-ingest-docs (merge) and codebase map refresh*
+*Last updated: 2026-10-25 after starting milestone v2.0*
