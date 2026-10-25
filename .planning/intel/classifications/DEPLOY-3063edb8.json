@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/DEPLOY.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Deployment and seven-day pilot",
+  "summary": "Runbook for deploying the job hunter: private repository, Google Sheet and service account, Telegram bot, secrets, configuration and delivery checks, scheduled runs, watchdog, and the seven-day pilot.",
+  "scope": ["GitHub private repository", "Google Sheet", "Google service account", "Telegram bot", "GitHub Actions secrets", "Job Hunter workflow", "Watchdog workflow", "seven-day pilot", "pilot report"],
+  "cross_refs": [".github/workflows/watchdog.yml"],
+  "locked": false,
+  "precedence": 4,
+  "notes": ""
+}

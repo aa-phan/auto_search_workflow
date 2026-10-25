@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/SPEC.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "SPEC: Fresh-job alerts for a non-technical user",
+  "summary": "Project contract for surfacing jobs within 12 hours of publication via ATS polling, Google Sheets tracker and Telegram alerts.",
+  "scope": ["fresh-job alerts", "ATS board polling", "Greenhouse", "Lever", "Ashby", "Workable", "SmartRecruiters", "board registry", "discovery via Tavily search", "freshness classes", "job identity and dedupe", "Google Sheets tracker", "Telegram alerts", "Groq scoring", "polling budget and pools", "operational dashboard", "missed-run watchdog", "pilot measurements"],
+  "cross_refs": ["DEPLOY.md"],
+  "locked": false,
+  "precedence": 1,
+  "notes": ""
+}

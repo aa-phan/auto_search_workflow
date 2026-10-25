@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/README.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Job Hunter",
+  "summary": "User-facing guide to the Job Hunter app: what it watches, freshness labels, setup, Sheet settings, tracker columns, and troubleshooting.",
+  "scope": ["Job Hunter", "Google Sheets", "Tavily", "Groq", "Telegram", "GitHub Actions", "company job boards", "Greenhouse", "Lever", "Ashby", "Workable", "SmartRecruiters", "Job Tracker tab", "Settings tab", "Dashboard tab"],
+  "cross_refs": ["DEPLOY.md", "SPEC.md", "DECISIONS.md", "STATUS.md", "AGENTS.md", "NOTICE.md", "requirements.txt", "legacy/"],
+  "locked": false,
+  "precedence": 6,
+  "notes": ""
+}

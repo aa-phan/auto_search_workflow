@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/STATUS.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "STATUS",
+  "summary": "Current verified-vs-blocked status, pilot week 1 results, post-pilot changes, known gaps and next milestone for the job search workflow.",
+  "scope": ["pilot week 1 results", "board polling", "board slot allocation", "graduation floor", "rebalancing", "board inventory", "Tavily search provider", "Google Sheets tracker", "Dashboard tab", "watchdog", "Telegram delivery", "verification status"],
+  "cross_refs": ["SPEC.md", "DECISIONS.md", "DEPLOY.md", "PILOT_LOG.md", "AGENTS.md"],
+  "locked": false,
+  "precedence": 3,
+  "notes": "Manifest declared DOC with precedence 3; applied as authoritative. Content is a status and progress log (verification tables, pilot metrics, next milestone) rather than prose documentation; it records decisions only by reference (D-xx) and states no normative requirements. Synthesizer should treat it as context only. Output filename uses no source-hash suffix because this agent has no shell or hashing tool available; the orchestrator should rename to {slug}-{sha256(path)[:8]}.json."
+}

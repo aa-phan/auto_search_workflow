@@ -1,0 +1,24 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/DECISIONS.md",
+  "type": "ADR",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "DECISIONS",
+  "summary": "Project decision log D-01 to D-47 covering refactor scope, module layout, ledger state, freshness classes, polling and retry semantics.",
+  "scope": [
+    "ATS adapters",
+    "identity and dedupe",
+    "event ledger in Google Sheet",
+    "freshness classes",
+    "discovery loops",
+    "polling cadence",
+    "retry semantics",
+    "filtering order"
+  ],
+  "cross_refs": [
+    ".planning/codebase/CONCERNS.md"
+  ],
+  "locked": true,
+  "precedence": 0,
+  "notes": "Type set by MANIFEST_TYPE=ADR. Source is a multi-decision log, not a single ADR, and has no status field, so locked is false per the Accepted-status rule; the manifest states all entries are LOCKED, so the synthesizer should treat that as a manifest-level assertion. Only lines 1-50 were read (sufficient for title and scope). Output filename uses a placeholder because no shell was available to compute the SHA-256 path hash; rename to DECISIONS-{first 8 hex of sha256(path)}.json. Orchestrator: every entry D-01..D-47 is a locked project decision (manifest); full file is 289 lines, classifier read lines 1-50 only."
+}

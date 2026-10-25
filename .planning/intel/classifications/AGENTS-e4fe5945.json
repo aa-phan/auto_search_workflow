@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/AGENTS.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Agent instructions",
+  "summary": "Operating rules for agents in this repo: read SPEC, DECISIONS, STATUS first; flag conflicts; freshness, identity, dedupe, secrets, and test rules; code layout.",
+  "scope": ["agent workflow", "SPEC.md", "DECISIONS.md", "STATUS.md", "freshness", "identity (ATS + board + posting ID)", "seen/evaluated/alerted state", "secrets handling", "test suite", "module layout"],
+  "cross_refs": ["SPEC.md", "DECISIONS.md", "STATUS.md", ".planning/codebase/"],
+  "locked": false,
+  "precedence": 2,
+  "notes": "Manifest-declared DOC (authoritative, manifest_override true). Filename is not hash-named: the classifier had no SHA-256 tool, so the output file is named AGENTS-hashpending.json instead of AGENTS-{8-hex-sha256-of-path}.json. Rename to the hash-based name before synthesis. Content is operational rules rather than requirements, which fits DOC context-only status."
+}

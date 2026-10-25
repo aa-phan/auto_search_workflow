@@ -1,0 +1,23 @@
+# Repo docs are authoritative; .planning only references them (AGENTS.md).
+docs:
+  - path: DECISIONS.md
+    type: ADR
+    precedence: 0
+  - path: SPEC.md
+    type: SPEC
+    precedence: 1
+  - path: AGENTS.md
+    type: DOC
+    precedence: 2
+  - path: STATUS.md
+    type: DOC
+    precedence: 3
+  - path: DEPLOY.md
+    type: DOC
+    precedence: 4
+  - path: PILOT_LOG.md
+    type: DOC
+    precedence: 5
+  - path: README.md
+    type: DOC
+    precedence: 6

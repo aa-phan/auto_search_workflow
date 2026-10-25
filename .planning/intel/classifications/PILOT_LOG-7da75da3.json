@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/aphan/auto_search_workflow/PILOT_LOG.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "PILOT LOG",
+  "summary": "Deployment timeline and measurement corrections for the seven-day pilot, naming the periods each change affects.",
+  "scope": ["pilot deployments", "measurement corrections", "Job Tracker", "Pilot report", "Watchdog workflow", "Dashboard tab", "Runs tab", "SmartRecruiters", "Settings", "Max_Active_Boards"],
+  "cross_refs": ["DEPLOY.md", "STATUS.md"],
+  "locked": false,
+  "precedence": 5,
+  "notes": ""
+}
