@@ -43,7 +43,7 @@ Hourly (`17 * * * *`, off-peak minute), 24/7. Serper runs inside the discovery c
 
 ## D-07 Retry semantics
 
-Transient failures write an `error` event and leave later stages undone. After 5 attempts a job is `abandoned` (recorded, not retried). Tracker append happens before the `evaluated` event and is guarded by a tracker-key check, so a retry cannot duplicate rows. Alerts are at-least-once.
+Transient failures write an `error` event and leave later stages undone. After 5 attempts a job is `abandoned` (recorded, not retried). Tracker append happens before the `evaluated` event and is guarded by a tracker-key check, so a retry cannot duplicate rows. Alerts are at-least-once. (Amended by D-49 for the alert stage: an alert send that fails without an HTTP response is bounded at 5, and an alert is recorded only when a channel accepted it.)
 
 ## D-08 Filtering order
 
@@ -106,7 +106,7 @@ Board path: every result with a parsable board is submitted to admission, even i
 
 ## D-21 Pending deliveries are never discarded for age (reverses part of D-07)
 
-D-07/ledger abandoned a retried alert once the job was more than 12 h past evaluation ("no longer fresh news"). That silently dropped alerts after any outage longer than half a day. Now a pending alert is retried until it is accepted (or, as before, rejected 5 times by Telegram); one delivered after the window carries "delivered late: published about N h ago (verified fresh when first seen)" in Telegram and the webhook. Scoring retries were never age-limited and still are not. The freshness class itself is not re-judged later.
+D-07/ledger abandoned a retried alert once the job was more than 12 h past evaluation ("no longer fresh news"). That silently dropped alerts after any outage longer than half a day. Now a pending alert is retried until it is accepted (or, as before, rejected 5 times by Telegram); one delivered after the window carries "delivered late: published about N h ago (verified fresh when first seen)" in Telegram and the webhook. Scoring retries were never age-limited and still are not. The freshness class itself is not re-judged later. (Amended by D-49: an alert send that fails without an HTTP response is also bounded at 5.)
 
 ## D-22 Open items to confirm
 
@@ -307,3 +307,18 @@ This entry is the single list of owner decisions the v2.0 milestone needs. Decid
 | 11. Groq data handling (the resume text is sent to Groq on every scoring call; CONCERNS "Personal data") | Pending | With the Groq plan decision (D-53) | Keep as is and record the account's data-retention setting | CONCERNS "Personal data" |
 
 **Consequences.** Nothing in code changes with this entry. The decided SmartRecruiters parking is deployed by plan 02-09. The ROADMAP Owner Decisions table now points here, and its Phase 4 entry gate refers to the D-05 amendment under its own D-number once the owner decides it.
+
+
+## D-49 An alert is recorded only when a channel accepted it; alert sends without an HTTP response are bounded at 5 (changes SPEC "State model"; owner decision 2026-10-26)
+
+**What happened.** CONCERNS bug 1: with no Telegram or webhook configured `send_alert` returned False and the pipeline still wrote an `alerted` event (channel `none`), so a qualifying job was recorded as delivered when nothing was sent. CONCERNS bug 2: an exception without an HTTP response (connection error, timeout, a malformed row, a code error) was retried on every run without bound. A third defect: `send_alert` sliced the finished HTML to 4,096 characters, which could cut a tag or an entity and make Telegram reject the message.
+
+**What changed.** Stage 4 of `pipeline.run_cycle` writes `alerted` (channel `telegram`, the label reporting counts as delivered) only when `send_alert` returned True. When no channel accepted the message, nothing is written, no attempt is used (a missing channel is configuration, not a send failure), `Runs.Alerts_Failed` counts it, the run is `degraded` with the note "no alert channel configured or accepted the message", and the next run with a working channel delivers it once. `classify_alert_failure` keeps an HTTP 5xx or 429 answer transient (no `error` event, no attempt) and bounds everything else: a rejected request (other 4xx) and every send without an HTTP response write an `error` event with stage `alert`, use one attempt, and write `abandoned` after `MAX_ATTEMPTS` (5). The text stored and logged goes through `redact`: the bot token, chat id and webhook URL (`Deps.secrets`, passed by `hunter.main`) become `***`, a `bot<digits>:<token>` pattern is removed even if not passed in, and an empty exception text is recorded as the exception type name. `send_alert` caps each free-text field (`ALERT_FIELD_CHARS`) before escaping and no longer slices the joined HTML. Legacy `alerted` events with channel `none` stay readable as "recorded but not delivered" (reporting counts a delivery only for channel `telegram`).
+
+**Owner decision (P2-18, network errors, 2026-10-26).** The research default kept transport errors transient (retried without bound). The owner chose to bound them at 5 like rejected requests. Amends D-07 and D-21 for the alert stage: D-07 listed Telegram trouble as retried, and D-21 retried a pending alert until accepted or rejected 5 times.
+
+**Accepted risk.** An alert-channel outage lasting 5 runs abandons the alerts pending during it, with a recorded reason. Five runs are about 5 hours at the intended hourly cadence and longer in practice (GitHub's schedule fires about every 4.4 h, so about 22 h). Alerts abandoned this way are not re-sent after the outage ends; their rows stay in the tracker.
+
+**Recorded exception to AGENTS rule 4.** AGENTS rule 4 says not to turn transient errors into permanent records. For the alert stage only, a send that fails without an HTTP response is now bounded and can end as `abandoned`; the owner approved this. AGENTS.md itself is not edited; this entry is the record of the exception. HTTP 5xx and 429 answers and a missing channel configuration still leave the job retryable.
+
+**Verification.** Offline, mocked (no live Telegram call; the live check is the `delivery_test` in plan 02-07): `AlertRecordingTests` in `tests/test_core.py` and the `alert_message` tests in `tests/test_hunter.py`. Mutation checks each fail the suite: writing `alerted` for an unaccepted send, treating no-response exceptions as transient, skipping `redact`, treating 503 as bounded.
