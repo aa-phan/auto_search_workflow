@@ -319,6 +319,53 @@ class DiagnosticsTests(unittest.TestCase):
         for needle in ("LIMITS AUDIT", "of the 1500 s timeout", "median seconds by phase", "Google Sheets requests per run", "quota about 60 per minute", "state size: Events rows", "not a measurement at that size"):
             self.assertIn(needle, text)
 
+    M120 = "openai/gpt-oss-120b"
+
+    def groq_runs(self) -> list[st_mod.RunRecord]:
+        older = json.dumps({self.M120: {"x-ratelimit-reset-requests": "9m0s", "x-ratelimit-remaining-tokens": "100"}})
+        newer = json.dumps({self.M120: {"x-ratelimit-reset-requests": "2m59.56s", "x-ratelimit-remaining-tokens": "6000", "Authorization": "Bearer sk-leak"}, "Bearer": {"x-ratelimit-limit-tokens": "8000"}})
+        return [
+            st_mod.RunRecord(ts(days=2), duration_s=100, groq_calls=2, groq_tokens_primary=3000, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1,
+                             eval_budget_skipped=2, eval_cut=True, boards_skipped_deadline=3, alerts_deferred=1, groq_limits=older),
+            st_mod.RunRecord(ts(days=1), duration_s=200, groq_calls=2, groq_tokens_primary=500, groq_tokens_fallback=500, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1,
+                             eval_deadline_skipped=4, groq_limits=newer),
+            st_mod.RunRecord(ts(hours=2), duration_s=300, groq_calls=5),  # a run from before the token columns: not a zero-token run, and no limits
+        ]
+
+    def groq_report(self, runs: list[st_mod.RunRecord]) -> dict:
+        return pilot.build_report(now=NOW, days=7, runs=runs, events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200)
+
+    def test_limits_audit_groq_tokens_per_call_cached_share_and_cuts(self) -> None:
+        m = self.groq_report(self.groq_runs())["limits"]
+        self.assertEqual((m["groq_tokens_primary"], m["groq_tokens_fallback"], m["groq_prompt_tokens"], m["groq_cached_tokens"], m["groq_completions"]), (3500, 500, 2000, 400, 2))
+        self.assertEqual(m["groq_token_runs"], 2)  # the third run recorded no tokens: unknown, not zero
+        self.assertEqual(m["groq_tokens_per_completion"], {"value": 2000.0, "n": 2})
+        self.assertEqual(m["groq_cached_share_pct"], 20)
+        self.assertAlmostEqual(m["groq_completions_per_day"], 2 / (2 - 2 / 24), places=1)
+        self.assertEqual(m["groq_tokens_by_utc_day"], {"2026-10-19": {"primary": 3000, "fallback": 0}, "2026-10-20": {"primary": 500, "fallback": 500}})
+        self.assertEqual((m["eval_budget_skipped"], m["eval_deadline_skipped"], m["runs_with_eval_cut"], m["boards_skipped_deadline"], m["alerts_deferred"]), (2, 4, 1, 3, 1))
+        self.assertEqual(m["duration_p95_s"], 300.0)
+        self.assertEqual(m["groq_limits_latest"]["models"][self.M120]["x-ratelimit-reset-requests"], "2m59.56s")  # the newest run that recorded any
+        self.assertEqual(m["groq_limits_latest"]["run_at"], ts(days=1))
+
+    def test_limits_audit_groq_lines_print_counts_only(self) -> None:
+        text = pilot.format_report(self.groq_report(self.groq_runs()))
+        for needle in ("tokens per scoring call 2000", "(n=2)", "cached 20% of prompt tokens", "x-ratelimit-reset-requests=2m59.56s", "2026-10-19 primary 3000 / fallback 0",
+                       "budget skips 2", "deadline skips 4", "boards cut by the poll deadline 3", "alerts deferred 1", "run duration p95 300"):
+            self.assertIn(needle, text)
+        for secret in ("Bearer", "Authorization", "sk-leak"):  # a poisoned record never reaches the public log: only x-ratelimit-* values are printed (T-02-16)
+            self.assertNotIn(secret, text)
+
+    def test_limits_audit_groq_is_unknown_when_no_run_recorded_tokens(self) -> None:
+        old = [st_mod.RunRecord(ts(hours=h_), duration_s=100, groq_calls=3, groq_limits="not json") for h_ in (3, 2, 1)]
+        rep = self.groq_report(old)
+        m = rep["limits"]
+        self.assertEqual((m["groq_token_runs"], m["groq_tokens_per_completion"], m["groq_cached_share_pct"], m["groq_limits_latest"]), (0, None, None, None))
+        self.assertEqual(m["groq_tokens_by_utc_day"], {})
+        text = pilot.format_report(rep)
+        self.assertIn("tokens per scoring call n/a", text)
+        self.assertNotIn("tokens per scoring call 0", text)
+
     def test_without_timed_runs_the_report_says_so(self) -> None:
         text = pilot.format_report(pilot.build_report(now=NOW, days=1, runs=[], events=[], boards={}, discovery={}, tracker=[], fresh_window=timedelta(hours=12), search_cap=1000, search_reserve=200))
         self.assertIn("no timed runs yet", text)
