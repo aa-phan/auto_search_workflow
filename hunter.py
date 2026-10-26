@@ -1931,6 +1931,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluate=evaluate,
         send_alert=alert,
         title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
+        secrets=tuple(v for v in (cfg.telegram_token, cfg.telegram_chat_id, cfg.webhook_url) if v),
         discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.tavily_api_key else None,
         search_sync=make_search_sync(cfg),
         search_monthly_credits=settings.search_monthly_credits,

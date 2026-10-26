@@ -87,7 +87,7 @@ jobs:
       # Names only, never values. A production run needs the Sheet; without it the app would fall back to local
       # files that this workflow does not keep, so it refuses to run instead of silently losing state.
       # Telegram is required for any run that can deliver (the schedule, a poll, the delivery test): a poll without
-      # it would mark qualifying jobs as "alerted" although nothing was sent. The read-only reports (pilot,
+      # it would leave qualifying alerts waiting and report the run degraded (D-49). The read-only reports (pilot,
       # rebalance) do not deliver, so they may run before Telegram is configured.
       - name: Check configuration
         env:

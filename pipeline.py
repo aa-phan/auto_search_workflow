@@ -14,11 +14,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import discovery as dsc
 import freshness as fr
@@ -114,6 +115,28 @@ class Deps:
     code_version: str = ""  # commit that ran (GITHUB_SHA, 8 characters); recorded in Runs so reports can mark deployment periods
     run_kind: str = KIND_PRODUCTION  # `rehearsal` for a local run: its run record says so and reports leave it out
     pool_policy: pools.PoolPolicy = field(default_factory=pools.PoolPolicy)  # max_active is always max_monitored_boards
+    secrets: tuple[str, ...] = ()  # values that must never reach the Events ledger, Runs.Notes or the log (bot token, chat id, webhook URL)
+
+
+_BOT_TOKEN_IN_URL = re.compile(r"bot[0-9]{5,}:[A-Za-z0-9_-]{20,}")
+
+
+def classify_alert_failure(exc: BaseException) -> str:
+    """`transient` for an alert-channel answer that is the channel's own trouble (HTTP 5xx or 429): retried on every later run
+    without using attempts. `bounded` for everything else: a rejected request (other 4xx) and every send that failed without
+    an HTTP response (connection error, timeout, malformed row, code error), which is bounded at MAX_ATTEMPTS (D-49, owner
+    decision P2-18). Duck-typed on `.response.status_code` so this module does not import requests."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and (status >= 500 or status == 429):
+        return "transient"
+    return "bounded"
+
+
+def redact(text: str, secrets: Iterable[str]) -> str:
+    """Replace each secret (4+ characters) with `***`, then any Telegram bot token still in a URL with `bot***`."""
+    for secret in sorted((s for s in secrets if s and len(s) >= 4), key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return _BOT_TOKEN_IN_URL.sub("bot***", text)
 
 
 def _parse_stamp(value: str, tz: Any) -> datetime | None:
@@ -586,12 +609,17 @@ def run_cycle(d: Deps) -> RunRecord:
                 late = lg.alert_delay_note(st, now, d.fresh_window)  # retried past the window: still delivered, labelled
                 sent = d.send_alert(dict(st.evaluated or {}, late=late) if late else (st.evaluated or {}))
             except Exception as exc:
-                # Telegram/network trouble is retried on later runs without using up attempts;
-                # only a rejected request (a 4xx that will never succeed) is bounded.
+                # Only an HTTP 5xx/429 answer is the channel's own trouble and retried without using attempts; a rejected
+                # request and any send that failed without an HTTP response are bounded at MAX_ATTEMPTS (D-49, P2-18).
+                # Nothing raw (exception object, str(exc)) reaches the ledger, the notes or the log: the text can carry the bot token.
+                message = redact(str(exc) or type(exc).__name__, d.secrets)
                 run.alerts_failed += 1
-                log.warning("Alert failed for %s (will retry): %s", st.key, exc)
-                if getattr(getattr(exc, "response", None), "status_code", 500) < 500 and getattr(getattr(exc, "response", None), "status_code", 429) != 429:
-                    pending_events += lg.failure_events(st.key, lg.STAGE_ALERT, str(exc), st, now, run.run_id)
+                if classify_alert_failure(exc) == "bounded":
+                    pending_events += lg.failure_events(st.key, lg.STAGE_ALERT, message, st, now, run.run_id)
+                    st.errors[lg.STAGE_ALERT] = st.errors.get(lg.STAGE_ALERT, 0) + 1
+                    log.warning("Alert failed for %s (attempt %d of %d): %s", st.key, st.errors[lg.STAGE_ALERT], lg.MAX_ATTEMPTS, message)
+                else:
+                    log.warning("Alert failed for %s (will retry, no attempt used): %s", st.key, message)
                 continue
             if sent is not True:
                 # No channel accepted the message (none configured): that is configuration, not a send failure,
