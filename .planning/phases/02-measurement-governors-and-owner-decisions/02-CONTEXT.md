@@ -42,6 +42,7 @@ Decision IDs below are local to this phase (`P2-xx`) so they do not collide with
 
 ### Alert recording (MEAS-05), as the success criteria define it
 - `alerted` is recorded only when a channel accepted the message (`send_alert` returned `True`). A send failure with no HTTP response is retried and stops after `ledger.MAX_ATTEMPTS` (5). The details are Claude's discretion (below).
+- **P2-18:** **Network errors are bounded too** (owner, during plan-phase, 2026-10-26). Every alert send that fails without an HTTP response, including `requests.ConnectionError` and `requests.Timeout` as well as malformed-row or code errors, records a failure event, uses one attempt, and is abandoned after `ledger.MAX_ATTEMPTS` (5). This deliberately amends SPEC.md L93 ("Sheets/Telegram errors" listed as transient) for the alert stage; SPEC.md and DECISIONS.md are updated in the same change (AGENTS rule 1). Accepted risk: a Telegram outage lasting 5 runs abandons those alerts.
 
 ### Owner decisions (GOV-01)
 - **P2-13:** **Groq plan: measure first, then decide.** Phase 2 reads the account limits page (owner action, or with credentials) and measures real tokens per scoring call. The owner then picks free or paid before the phase closes, and the choice is recorded in `DECISIONS.md` with its source. Until then the 20-30 target is conditional (about 7-20 kept rows a day), and STATUS.md says so.

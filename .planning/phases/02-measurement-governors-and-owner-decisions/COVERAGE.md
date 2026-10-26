@@ -1,0 +1,1 @@
+No external API integration: this phase only extends the three existing integrations (it reads the `usage` fields and `x-ratelimit-*` headers that Groq's chat-completions API already returns, changes the text the existing Telegram sendMessage call sends, and adds a COMBO chart to the existing Google Sheets batchUpdate); no new external API, endpoint or SDK is integrated.

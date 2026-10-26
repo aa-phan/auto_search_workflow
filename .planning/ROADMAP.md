@@ -44,6 +44,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
 ## Phase Details
 
 ### Phase 2: Measurement, governors and owner decisions
+
 **Goal**: The owner can see how many recent relevant jobs reach the tracker each day and what Groq can really evaluate, and the evaluation and alert paths stay inside the Groq budget, the run timeout and the delivery contract before any change adds load.
 **Depends on**: Nothing (first v2.0 phase; v1.0 shipped)
 **Requirements**: MEAS-01, MEAS-02, MEAS-03, MEAS-04, MEAS-05, GOV-01
@@ -55,9 +56,39 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   3. Every run records the Groq tokens it used and stops evaluating at a daily token budget below the Groq limit; polling and evaluation stop before the 25-minute timeout, verified-fresh jobs are scored first, and every unscored job stays pending and is picked up by the next run (shown with a forced-limit test, and with figures from a live run).
   4. A job is recorded `alerted` only after a channel accepted the message; a send that fails without an HTTP response leaves the job unalerted, is retried, and stops after 5 attempts.
   5. Every owner decision the milestone needs is either recorded in DECISIONS.md or listed with its needed-by phase and its default if unanswered: Groq plan, D-05 amendment (before Phase 4), rule-7 lift for board-cycling scores only (before CYC-02 goes live), per-ATS policy (Paycom skipped, iCIMS deferred; before each adapter), SmartRecruiters after the pilot, repository public or private, date-only alerts (user decision 2026-10-25); the storage design approval that closes the D-03 review (before Phase 3 executes) is surfaced with them.
-**Plans**: TBD
+
+**Plans**: 9 plans (waves 1-9, sequential: every plan edits the contract documents)
+
+Plans:
+**Wave 1**
+- [ ] 02-01-PLAN.md — GOV-01: owner-decision inventory D-48 and public-repository doc corrections
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02-PLAN.md — MEAS-05: alerted only when a channel accepted; no-response sends bounded at 5 (P2-18); secret redaction; Telegram caps (D-49)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-03-PLAN.md — MEAS-03: per-model Groq daily token budget with verified-fresh reserve and fallback; token Runs columns (D-50)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-04-PLAN.md — MEAS-04: process-anchored poll / evaluation / alert cutoffs, longest-unpolled-first polling, Groq client deadline (D-51)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 02-05-PLAN.md — MEAS-01: Dashboard yield view (tracker rows per day by cohort with 20-30 band, age when found, feedback per cohort, reconciliation) (D-52)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 02-06-PLAN.md — MEAS-02/03: Groq read-outs on the Dashboard and in the pilot report; STATUS offline-verification section
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 02-07-PLAN.md — Deploy with the owner's consent and record live evidence (Runs columns, Dashboard render, reconciliation, delivery test)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 02-08-PLAN.md — MEAS-02 / GOV-01: measured Groq usage, account limits read by the owner, Groq plan decision D-53, measured budget default
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 02-09-PLAN.md — GOV-01: deploy SmartRecruiters parking after the first weekly rebalance read
 
 ### Phase 3: Compact storage
+
 **Goal**: The Events ledger stops growing toward its limit: baseline and identity-only postings live in compact Identity and Tally tabs with parity proven against the old rows, so board growth and new adapters can be admitted safely.
 **Depends on**: Phase 2
 **Requirements**: STOR-01
@@ -68,9 +99,11 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   2. A read-only `--storage-parity` check reports zero differences between the seen set, state counts and Dashboard figures derived from the old Events rows and from Identity and Tally, on every run for several consecutive days of dual writing.
   3. Only after parity: baseline and identity-only rows are retired by swapping the old tab to `Events_Legacy` (kept and restorable), Events is back well below the D-03 review point, and the storage report shows rows, allocated cells and load time before and after with the daily growth in cells falling by an order of magnitude (D-43 estimate: about 26,200 to about 1,300 cells a day).
   4. A run interrupted in the middle of a board's baseline never makes that board's old postings look new on the next run (a board counts as baselined only after its last chunk is written).
+
 **Plans**: TBD
 
 ### Phase 4: 72-hour window and recent backfill
+
 **Goal**: A relevant job published within the last 72 hours reaches the tracker with its real age, including the recent jobs of a newly admitted or re-entering board, without being presented as verified-fresh and without delaying any real alert.
 **Depends on**: Phase 2, Phase 3
 **Requirements**: WIN-01, WIN-02, WIN-03, WIN-04, WIN-05
@@ -82,9 +115,11 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   3. When a board is first admitted or re-enters, its postings with a source publication time within 72 hours are scored newest first and labelled with their real age instead of being baselined silently; older postings are still baselined; none of them alerts, and a verified-fresh job detected during the same run is still scored first and alerted inside 12 hours.
   4. A recent job that leaves the 72-hour window before it is scored is closed as `aged_out` with no Groq call and is not counted as abandoned or failed.
   5. Reposted and evergreen postings (repost key, talent-pool titles) are labelled in the tracker and never alerted.
+
 **Plans**: TBD
 
 ### Phase 5: Evidence-led board growth
+
 **Goal**: More of the boards that actually post recent relevant jobs are polled, chosen by their recent activity and the user's feedback, at a monitored-set size that run duration, the Sheet and Groq can carry.
 **Depends on**: Phase 2, Phase 3, Phase 4
 **Requirements**: EVID-01, EVID-05, CYC-01, CYC-02, CYC-03, SCALE-01
@@ -96,9 +131,11 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   3. The feedback-influenced board score runs in shadow beside the current score with a bounded weight and a minimum label count, the report shows which boards each score would admit or release, and it goes live only after that comparison is read.
   4. Trials end sooner and boards cycle faster, while the 20% exploration floor still admits new boards every cycle (a report and a feedback-dominated test show the exploration slots filled).
   5. `Max_Active_Boards` rises 700 to 1,000 to 1,400 one step at a time; each step records p95 run duration, load time, Sheets reads per minute, Groq tokens and transient errors, and the next step starts only when they are inside their limits (a step that is not is rolled back).
+
 **Plans**: TBD
 
 ### Phase 6: Adapter registry and first-wave adapters
+
 **Goal**: Jobs from Breezy, Gem and Oracle Recruiting Cloud boards reach the tracker under the same identity, freshness and retry rules as the five existing providers, with date-only sources admitted by the agreed rule.
 **Depends on**: Phase 3, Phase 4
 **Requirements**: ADPT-01, ADPT-02, ADPT-03, ADPT-04, ADPT-07
@@ -110,9 +147,11 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   3. Breezy and Gem boards are polled hourly, and their time-precise postings enter the tracker with exact precision and alert only when verified fresh within 12 hours.
   4. Oracle Recruiting Cloud boards are polled, and their postings carry a date only.
   5. A date-only job enters the tracker when its date falls within 72 hours, labelled "date only", and alerts only when it was posted today or yesterday on a board polled within 12 hours (the D-04c rule).
+
 **Plans**: TBD
 
 ### Phase 7: Large-employer adapters and wider search
+
 **Goal**: The biggest employer sites (Workday), the detail-fetch providers (Rippling, BambooHR) and the boards the poller does not monitor (web search) contribute recent jobs to the tracker, bounded by recorded policy and by what the free tiers allow.
 **Depends on**: Phase 5, Phase 6
 **Requirements**: ADPT-05, ADPT-06, SRCH-01
@@ -122,6 +161,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   1. Workday boards are polled with a stable requisition-ID identity, "Posted Today", "Yesterday" and "N Days Ago" read as a date range, "30+ Days Ago" never treated as fresh, and paging bounded by the 2,000 cap; its rows are labelled "date only" and alert only under the D-04c rule.
   2. Rippling and BambooHR boards are polled, the per-job detail is fetched only for unseen postings that pass the title gate, and a posting whose date is missing or unparsable stays unverified and is never shown as fresh.
   3. The search rotation covers its role and site slots, weights slots by their past yield, stays inside the Tavily credit budget and the 72-hour window (or states the partial coverage), and includes the new ATS hosts.
+
 **Plans**: TBD
 
 ## Sequencing Rules (every phase inherits these)
@@ -169,7 +209,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
-| 2. Measurement, governors and owner decisions | v2.0 | 0/TBD | Not started | - |
+| 2. Measurement, governors and owner decisions | v2.0 | 0/9 | Planned | - |
 | 3. Compact storage | v2.0 | 0/TBD | Not started | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
