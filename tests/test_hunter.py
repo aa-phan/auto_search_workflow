@@ -637,6 +637,94 @@ class GroqBudgetTests(unittest.TestCase):
         self.assertEqual(ev.model, c.cfg.groq_fallback_model)
 
 
+class GroqSettingsTests(unittest.TestCase):
+    """Settings rows and entry-point wiring for the daily Groq token budget (D-50)."""
+
+    def parse(self, raw: dict[str, str], env: dict[str, str] | None = None) -> h.Settings:
+        with mock.patch.dict(os.environ):
+            for key in h.SETTING_DEFAULTS:
+                os.environ.pop(key.upper(), None)
+            os.environ.update(env or {})
+            return h.Settings.from_values(dict(raw, Resume_Text="r" * 300))
+
+    def test_groq_budget_settings_default_parse_and_fallback_blank_means_same(self) -> None:
+        def pair(raw: dict[str, str], env: dict[str, str] | None = None) -> tuple[int, int]:
+            s = self.parse(raw, env)
+            return s.groq_daily_token_budget, s.groq_fallback_daily_token_budget
+
+        self.assertEqual(pair({}), (170000, 170000))
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "200000", "Groq_Fallback_Daily_Token_Budget": ""}), (200000, 200000))
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "200000", "Groq_Fallback_Daily_Token_Budget": "500000"}), (200000, 500000))
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "-5"}), (0, 0))  # a negative value never spends
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "1.9e5"}), (190000, 190000))  # a float string truncates through _int_or
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "0", "Groq_Fallback_Daily_Token_Budget": "300"}), (0, 300))
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "abc"}), (170000, 170000))  # unreadable: the default, never a crash
+        self.assertEqual(pair({"Groq_Fallback_Daily_Token_Budget": "xyz"}), (170000, 170000))
+        self.assertEqual(pair({}, {"GROQ_DAILY_TOKEN_BUDGET": "90000", "GROQ_FALLBACK_DAILY_TOKEN_BUDGET": "40000"}), (90000, 40000))
+
+    def test_groq_budget_rows_exist_and_say_what_they_limit_and_where_the_figure_came_from(self) -> None:
+        rows = {key: (default, note) for key, default, note in h.DEFAULT_SETTINGS}
+        self.assertEqual(h.SETTING_DEFAULTS["Groq_Daily_Token_Budget"], "170000")
+        self.assertEqual(h.SETTING_DEFAULTS["Groq_Fallback_Daily_Token_Budget"], "")
+        primary, fallback = rows["Groq_Daily_Token_Budget"][1], rows["Groq_Fallback_Daily_Token_Budget"][1]
+        for text in ("per model per UTC day", "85%", "200,000", "provisional"):
+            self.assertIn(text, primary)
+        self.assertIn("Blank = same", fallback)
+        keys = [k for k, _, _ in h.DEFAULT_SETTINGS]
+        self.assertEqual(keys[keys.index("Max_New_Boards_Per_Run") + 1 : keys.index("Max_New_Boards_Per_Run") + 3], ["Groq_Daily_Token_Budget", "Groq_Fallback_Daily_Token_Budget"])
+
+    def test_groq_budget_source_note_names_settings_environment_or_default(self) -> None:
+        def note(raw: dict[str, str], env: dict[str, str] | None = None) -> str:
+            s = self.parse(raw, env)
+            with mock.patch.dict(os.environ, env or {}):
+                if not env:
+                    os.environ.pop("GROQ_DAILY_TOKEN_BUDGET", None)
+                return h.groq_budget_note(raw, s)
+
+        self.assertEqual(note({"Groq_Daily_Token_Budget": "200000"}), "Groq daily token budget 200000 / 200000 per UTC day from Settings tab")
+        self.assertEqual(note({}, {"GROQ_DAILY_TOKEN_BUDGET": "90000"}), "Groq daily token budget 90000 / 90000 per UTC day from environment")
+        self.assertEqual(
+            note({}), "Groq daily token budget 170000 / 170000 per UTC day from default (provisional: 85% of the public 200,000 tokens/day figure)"
+        )
+        self.assertIn("from Settings tab", note({"Groq_Daily_Token_Budget": " 5 "}, {"GROQ_DAILY_TOKEN_BUDGET": "90000"}))  # the Sheet wins over the environment
+        self.assertIn("from default", note({"Groq_Daily_Token_Budget": "   "}))  # a blank cell is not a setting
+
+    def test_main_runs_with_a_per_model_budget_wired_into_client_and_pipeline(self) -> None:
+        fake = mock.Mock()
+        fake.state = mock.Mock()
+        fake.load_settings.return_value = {"Groq_Daily_Token_Budget": "5000", "Groq_Fallback_Daily_Token_Budget": "3000"}
+        fake.sheet_timezone.return_value = None
+        fake.state.acquire_lease.return_value = mock.Mock(ok=True, token="t")
+        fake.state.holds_lease.return_value = True
+        env = {"GOOGLE_SHEET_ID": "sheet", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}", "GROQ_API_KEY": "k", "GITHUB_ACTIONS": "true", "TAVILY_API_KEY": ""}
+        made: list[h.GroqClient] = []
+
+        class Spy(h.GroqClient):
+            def __init__(self, *a: Any, **k: Any) -> None:
+                super().__init__(*a, **k)
+                made.append(self)
+
+        with mock.patch.dict("os.environ", env), mock.patch.object(h, "make_store", return_value=fake), mock.patch.object(h, "load_resume_file", return_value="r" * 300), \
+                mock.patch.object(h, "GroqClient", Spy), mock.patch.object(h.dashboard, "refresh"), mock.patch.object(h.pl, "run_cycle") as run_cycle:  # fmt: skip
+            run_cycle.return_value = mock.Mock(boards_ok=0, boards_failed=0, boards_total=0, boards_added=0, new_jobs=0, verified_fresh=0, evaluated=0, alerts_sent=0, alerts_failed=0, gap_since_prev_run_min=None, max_board_gap_min=None)
+            self.assertEqual(h.main([]), 0)
+        deps = run_cycle.call_args.args[0]
+        client = made[0]
+        self.assertIsNotNone(deps.groq_budget)
+        self.assertIs(client.daily, deps.groq_budget)  # one shared object: the client charges what the pipeline persists
+        self.assertEqual(deps.groq_budget.budgets, {client.cfg.groq_model: 5000, client.cfg.groq_fallback_model: 3000})
+        self.assertEqual(deps.groq_limits(), "{}")
+        fresh = lg.JobState("k", seen=True, freshness=fr.VERIFIED_FRESH)
+        recent = lg.JobState("k2", seen=True, freshness=fr.RECENT)
+        self.assertTrue(deps.can_score(fresh) and deps.can_score(recent))
+        deps.groq_budget.used.update({client.cfg.groq_model: 4000, client.cfg.groq_fallback_model: 2400})  # both at 80%: only the reserve is left
+        self.assertTrue(deps.can_score(fresh))
+        self.assertFalse(deps.can_score(recent))
+        deps.groq_budget.used.update({client.cfg.groq_model: 5000, client.cfg.groq_fallback_model: 3000})
+        self.assertFalse(deps.can_score(fresh))
+        self.assertIn("Groq daily token budget 5000 / 3000 per UTC day from Settings tab", deps.config_notes)
+
+
 # --------------------------------------------------------------------------- stores
 
 
