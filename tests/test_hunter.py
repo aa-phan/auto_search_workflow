@@ -429,6 +429,97 @@ class GroqTests(unittest.TestCase):
             c.evaluate(settings(), posting())
 
 
+class GroqDeadlineTests(unittest.TestCase):
+    """A Groq call cannot outlive the run's evaluation cutoff (D-51): every wait stops at the deadline."""
+
+    def client(self, responses: list[FakeResponse], deadline: float | None) -> tuple[h.GroqClient, mock.Mock]:
+        cfg = h.replace(h.Config.from_env(), groq_api_key="k", llm_interval=0.0, groq_tpm=10**9, groq_fallback_tpm=10**9)
+        c = h.GroqClient(cfg)
+        c.deadline = deadline
+        c.http = mock.Mock()
+        c.http.post.side_effect = responses
+        return c, c.http.post
+
+    def test_deadline_before_any_request_raises_deferred(self) -> None:
+        c, post = self.client([groq_ok()], deadline=500.0)
+        with mock.patch.object(h.time, "monotonic", return_value=1000.0), mock.patch.object(h.time, "sleep") as sleep:
+            with self.assertRaises(h.GroqDeferred) as ctx:
+                c.evaluate(settings(), posting())
+        self.assertEqual(ctx.exception.reason, "deadline")
+        post.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_deadline_stops_token_wait_loop(self) -> None:
+        c, post = self.client([groq_ok()], deadline=None)
+        clock = {"t": 1000.0}
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) > 50:  # a regression must fail here instead of hanging the suite
+                raise AssertionError("token wait loop ignored the deadline")
+            clock["t"] += seconds
+
+        with mock.patch.object(h.time, "monotonic", side_effect=lambda: clock["t"]), mock.patch.object(h.time, "sleep", side_effect=fake_sleep):
+            c.budgets[c.cfg.groq_model].tpm = 10**6
+            c.budgets[c.cfg.groq_model].add(10**6)  # the per-minute window is full for the next 60 s
+            c.deadline = clock["t"] + 25
+            with self.assertRaises(h.GroqDeferred) as ctx:
+                c.evaluate(settings(), posting())
+        self.assertEqual(ctx.exception.reason, "deadline")
+        self.assertLessEqual(len(sleeps), 5)
+        post.assert_not_called()
+
+    def test_token_budget_wait_without_deadline_waits_for_the_window(self) -> None:
+        clock = {"t": 0.0}
+        tb = h.TokenBudget(1000)
+        with mock.patch.object(h.time, "monotonic", side_effect=lambda: clock["t"]), mock.patch.object(
+            h.time, "sleep", side_effect=lambda s: clock.__setitem__("t", clock["t"] + s)
+        ):
+            tb.add(1000)
+            tb.wait(100)  # no deadline: returns once the 60 s window has passed
+        self.assertGreaterEqual(clock["t"], 60)
+
+    def test_deadline_stops_429_backoff_sleep(self) -> None:
+        c, post = self.client([FakeResponse(429), FakeResponse(429, headers={"retry-after": "30"}), groq_ok()], deadline=110.0)
+        with mock.patch.object(h.time, "monotonic", return_value=100.0), mock.patch.object(h.time, "sleep") as sleep:
+            with self.assertRaises(h.GroqDeferred) as ctx:
+                c.evaluate(settings(), posting())
+        self.assertEqual(ctx.exception.reason, "deadline")
+        self.assertNotIn(mock.call(30.0), sleep.call_args_list)
+        self.assertEqual(post.call_count, 2)  # the third attempt never started
+
+    def test_deadline_stops_5xx_backoff_sleep(self) -> None:
+        c, post = self.client([FakeResponse(503), groq_ok()], deadline=102.0)
+        with mock.patch.object(h.time, "monotonic", return_value=100.0), mock.patch.object(h.time, "sleep") as sleep:
+            with self.assertRaises(h.GroqDeferred):
+                c.evaluate(settings(), posting())  # the 3 s backoff would pass the deadline
+        sleep.assert_not_called()
+        self.assertEqual(post.call_count, 1)
+
+    def test_deadline_stops_request_error_backoff_sleep(self) -> None:
+        c, post = self.client([requests.ConnectionError("boom"), groq_ok()], deadline=102.0)
+        with mock.patch.object(h.time, "monotonic", return_value=100.0), mock.patch.object(h.time, "sleep") as sleep:
+            with self.assertRaises(h.GroqDeferred):
+                c.evaluate(settings(), posting())
+        sleep.assert_not_called()
+        self.assertEqual(post.call_count, 1)
+
+    def test_no_deadline_keeps_old_behaviour(self) -> None:
+        c, _ = self.client([FakeResponse(429), FakeResponse(429, headers={"retry-after": "3"}), groq_ok(71)], deadline=None)
+        with mock.patch.object(h.time, "sleep") as sleep:
+            ev = c.evaluate(settings(), posting())
+        self.assertEqual(ev.score, 71)
+        self.assertIn(mock.call(3.0), sleep.call_args_list)
+
+    def test_a_deadline_with_time_left_does_not_change_the_result(self) -> None:
+        c, _ = self.client([FakeResponse(429), FakeResponse(429, headers={"retry-after": "3"}), groq_ok(72)], deadline=10_000.0)
+        with mock.patch.object(h.time, "sleep") as sleep:
+            ev = c.evaluate(settings(), posting())
+        self.assertEqual(ev.score, 72)
+        self.assertIn(mock.call(3.0), sleep.call_args_list)
+
+
 class GroqBudgetTests(unittest.TestCase):
     """The daily token governor inside the Groq client (D-50): per-model spending, metering, daily-limit 429s, limits headers."""
 

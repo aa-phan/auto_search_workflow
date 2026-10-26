@@ -403,5 +403,111 @@ class PollCutoffTests(HarnessCase):
         self.assertNotIn("poll cutoff", run.notes)
 
 
+class EvalCutoffTests(HarnessCase):
+    """Evaluation and alert cutoffs (D-51): measured from process start, nothing recorded against a job or alert that was cut."""
+
+    def add_fresh(self, *ids: str) -> list[str]:
+        self.baseline(job("acme", "1", published=ago(days=30)))
+        for jid in ids:
+            self.w.listings[self.board.key].append(job("acme", jid, published=ago(minutes=10, base=T0 + timedelta(minutes=60))))
+        return [self.key(jid) for jid in ids]
+
+    def advancing(self, clock: FakeClock, seconds: float, order: list[str] | None = None) -> None:
+        """Every evaluation takes `seconds` of the fake clock."""
+        original = self.w.evaluate
+
+        def evaluate(ident: Any, st: lg.JobState) -> pl.EvalOutcome:
+            if order is not None:
+                order.append(st.key)
+            out = original(ident, st)
+            clock.advance(seconds)
+            return out
+
+        self.w.evaluate = evaluate  # type: ignore[method-assign]
+
+    def test_outcome_eval_cutoff_leaves_run_ok_with_counter_and_note(self) -> None:
+        first, second = self.add_fresh("7", "8")
+        clock, order = FakeClock(), []
+        self.advancing(clock, 200, order)
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, eval_cutoff_s=100)
+        self.assertEqual((run.evaluated, run.eval_cut, run.eval_deadline_skipped, run.outcome), (1, True, 1, "ok"))
+        self.assertEqual(pl.degraded_reason(run), "")
+        self.assertIn("evaluation cutoff", run.notes)
+        self.assertEqual(run.eval_attempted, 1)
+        waiting = [k for k in (first, second) if k not in order][0]
+        self.assertEqual(self.w.events(waiting, lg.EVALUATED), [])
+        self.assertEqual(self.w.events(waiting, lg.ERROR), [])
+        self.assertEqual(self.w.states()[waiting].errors, {})
+        stored = [r for r in self.w.state.load_runs() if r.run_id == run.run_id][-1]
+        self.assertEqual((stored.eval_cut, stored.eval_deadline_skipped), (True, 1))
+        run2 = self.w.run(minutes_later=60)  # next run: no cutoff pressure, the cut job is scored
+        self.assertEqual((run2.evaluated, run2.eval_cut, run2.outcome), (1, False, "ok"))
+        self.assertEqual(len(self.w.events(waiting, lg.EVALUATED)), 1)
+
+    def test_eval_cutoff_scores_verified_fresh_first(self) -> None:
+        self.baseline(job("acme", "1", published=ago(days=30)))
+        self.w.listings[self.board.key] += [
+            job("acme", "8", published=ago(days=3, base=T0 + timedelta(minutes=60))),  # recent: not fresh
+            job("acme", "7", published=ago(minutes=10, base=T0 + timedelta(minutes=60))),
+        ]
+        clock, order = FakeClock(), []
+        self.advancing(clock, 200, order)
+        self.w.run(minutes_later=60, clock=clock, process_t0=0, eval_cutoff_s=100)
+        st = self.w.states()
+        self.assertEqual((st[self.key("7")].freshness, st[self.key("8")].freshness), (fr.VERIFIED_FRESH, fr.RECENT))
+        self.assertEqual(order, [self.key("7")])  # the one evaluation the cutoff allowed went to the verified-fresh job
+
+    def test_late_start_anchors_cutoffs_at_process_start(self) -> None:
+        self.add_fresh("7", "8", "9")
+        clock, order = FakeClock(600), []  # a 10-minute writer-lease wait happened before run_cycle
+        self.advancing(clock, 300, order)
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0)  # default 20-minute evaluation cutoff = 1,200 s
+        self.assertEqual(len(order), 2)  # 600 -> 900 -> 1200: the third job is cut at process minute 20, not run minute 20
+        self.assertEqual((run.eval_cut, run.eval_deadline_skipped, run.evaluated), (True, 1, 2))
+
+    def test_run_without_process_anchor_counts_from_its_own_start(self) -> None:
+        self.add_fresh("7", "8", "9")
+        clock, order = FakeClock(600), []
+        self.advancing(clock, 300, order)
+        run = self.w.run(minutes_later=60, clock=clock)  # no process_t0: anchored at run_cycle start (deadline 1,800 s)
+        self.assertEqual((len(order), run.eval_cut), (3, False))
+
+    def test_outcome_groq_deadline_deferral_is_not_transient(self) -> None:
+        first, second = self.add_fresh("7", "8")
+        for key in (first, second):
+            self.w.plan[key] = [pl.EvalOutcome("deferred", message="deadline")]
+        run = self.w.run(minutes_later=60)
+        self.assertEqual((run.eval_transient, run.eval_cut, run.outcome, run.eval_attempted, run.evaluated), (0, True, "ok", 0, 0))
+        self.assertEqual(sum(self.w.calls[k] for k in (first, second)), 1)  # the loop stopped at the first deferral
+        self.assertEqual(run.eval_deadline_skipped, 2)  # both jobs wait
+        self.assertEqual(run.eval_budget_skipped, 0)
+        for key in (first, second):
+            self.assertEqual(self.w.events(key, lg.EVALUATED) + self.w.events(key, lg.ERROR), [])
+        self.assertNotIn("transient", run.notes)
+        self.assertIn("evaluation cutoff", run.notes)
+
+    def test_alert_cutoff_leaves_alert_pending_with_no_attempt(self) -> None:
+        (key,) = self.add_fresh("7")
+        clock = FakeClock()
+        self.advancing(clock, 400)  # scoring ends past the 300 s alert cutoff but before the evaluation cutoff
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, alert_cutoff_s=300)
+        self.assertEqual(self.w.alert_calls, 0)
+        self.assertEqual((run.alerts_deferred, run.alerts_sent, run.alerts_failed), (1, 0, 0))
+        self.assertEqual(self.w.events(key, lg.ALERTED) + self.w.events(key, lg.ERROR), [])
+        self.assertEqual((run.outcome, pl.degraded_reason(run)), ("degraded", "alert cutoff"))
+        self.assertIn("alert cutoff after", run.notes)
+        self.assertEqual(self.w.states()[key].errors, {})
+        run2 = self.w.run(minutes_later=60)
+        self.assertEqual((self.w.alert_calls, run2.alerts_sent, run2.alerts_deferred, run2.outcome), (1, 1, 0, "ok"))
+        self.assertEqual(len(self.w.events(key, lg.ALERTED)), 1)
+
+    def test_alerts_still_run_after_the_evaluation_cutoff(self) -> None:
+        self.add_fresh("7", "8")
+        clock = FakeClock()
+        self.advancing(clock, 200)  # one job scored, then the 100 s evaluation cutoff; alerts run until the default 22 minutes
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, eval_cutoff_s=100)
+        self.assertEqual((run.eval_cut, run.alerts_sent, run.alerts_deferred, run.outcome), (True, 1, 0, "ok"))
+
+
 if __name__ == "__main__":
     unittest.main()
