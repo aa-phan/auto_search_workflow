@@ -8,9 +8,10 @@ never started, or requests made outside this application) the report says so ins
 
 from __future__ import annotations
 
+import re
 import statistics
 from collections import Counter as Counter_
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import freshness as fr
@@ -37,6 +38,36 @@ def _parse(value: str, tz: Any) -> datetime | None:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=tz)
     except (ValueError, TypeError):
         return None
+
+
+RATELIMIT_PREFIX = "x-ratelimit-"
+_SAFE_MODEL = re.compile(r"[A-Za-z0-9._/-]{1,60}")  # a model id; anything else in a damaged record is never printed
+_SAFE_VALUE = re.compile(r"[A-Za-z0-9._:+-]{1,40}")  # a rate-limit header value such as 6000 or 2m59.56s
+
+
+def _p95(values: list[float]) -> float | None:
+    """95th percentile with the same index rule as `_stats` (nearest rank on the sorted values)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return round(ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))], 1)
+
+
+def _groq_limits_latest(timed: list[RunRecord]) -> dict[str, Any] | None:
+    """The newest run's non-blank `groq_limits`, parsed tolerantly. The public log gets model ids and `x-ratelimit-*`
+    response header values only (40 characters at most): any other key in a hand-edited or damaged record is dropped (T-02-16)."""
+    for r in sorted(timed, key=lambda r: r.run_at, reverse=True):
+        if not r.groq_limits.strip():
+            continue
+        data = _json_dict(r.groq_limits)
+        models = {
+            str(m): {str(k).lower(): str(v) for k, v in h_.items() if str(k).lower().startswith(RATELIMIT_PREFIX) and isinstance(v, (str, int, float)) and not isinstance(v, bool) and _SAFE_VALUE.fullmatch(str(v))}
+            for m, h_ in data.items() if isinstance(h_, dict) and _SAFE_MODEL.fullmatch(str(m))
+        }
+        models = {m: h_ for m, h_ in models.items() if h_}
+        if models:
+            return {"run_at": r.run_at, "models": models}
+    return None
 
 
 def build_report(
@@ -216,6 +247,14 @@ def build_report(
     per_board = [r.poll_s / r.boards_total for r in timed if r.boards_total > 0]
     first_state, last_state = (timed[0], timed[-1]) if timed else (None, None)
     span_days = max(1e-9, (_parse(last_state.run_at, now.tzinfo) - _parse(first_state.run_at, now.tzinfo)).total_seconds() / 86400) if timed and len(timed) > 1 else None
+    token_runs = [r for r in timed if r.groq_tokens_primary + r.groq_tokens_fallback > 0]
+    token_completions = sum(r.groq_completions for r in token_runs)
+    tokens_by_day: dict[str, dict[str, int]] = {}
+    for r in sorted(token_runs, key=lambda r: r.run_at):  # by each run's UTC day (the Groq budget day)
+        if (t := _parse(r.run_at, now.tzinfo)) is not None:
+            d = tokens_by_day.setdefault(t.astimezone(timezone.utc).strftime("%Y-%m-%d"), {"primary": 0, "fallback": 0})
+            d["primary"] += r.groq_tokens_primary
+            d["fallback"] += r.groq_tokens_fallback
     limits = {
         "timed_runs": len(timed),
         "duration_s": _stats([float(r.duration_s) for r in timed]),
@@ -233,6 +272,19 @@ def build_report(
         "ats_429": sum(r.ats_429 for r in timed),
         "ats_request_seconds_per_run": _stats([float(r.ats_seconds) for r in timed]),
         "groq_calls": sum(r.groq_calls for r in timed), "groq_429": sum(r.groq_429 for r in timed),
+        # Groq consumption (D-49..D-51): runs recorded before the token columns existed carry 0 tokens and 0 completions, which is
+        # not a measurement, so tokens per call covers only the runs that recorded tokens (`groq_token_runs`).
+        "groq_tokens_primary": sum(r.groq_tokens_primary for r in timed), "groq_tokens_fallback": sum(r.groq_tokens_fallback for r in timed),
+        "groq_prompt_tokens": sum(r.groq_prompt_tokens for r in timed), "groq_cached_tokens": sum(r.groq_cached_tokens for r in timed),
+        "groq_completions": sum(r.groq_completions for r in timed), "groq_token_runs": len(token_runs),
+        "groq_tokens_per_completion": {"value": round(sum(r.groq_tokens_primary + r.groq_tokens_fallback for r in token_runs) / token_completions, 1), "n": token_completions} if token_completions else None,
+        "groq_completions_per_day": round(sum(r.groq_completions for r in timed) / span_days, 1) if span_days else None,
+        "groq_cached_share_pct": round(100 * sum(r.groq_cached_tokens for r in timed) / sum(r.groq_prompt_tokens for r in timed)) if sum(r.groq_prompt_tokens for r in timed) else None,
+        "groq_tokens_by_utc_day": tokens_by_day,
+        "eval_budget_skipped": sum(r.eval_budget_skipped for r in timed), "eval_deadline_skipped": sum(r.eval_deadline_skipped for r in timed),
+        "runs_with_eval_cut": sum(1 for r in timed if r.eval_cut), "boards_skipped_deadline": sum(r.boards_skipped_deadline for r in timed),
+        "alerts_deferred": sum(r.alerts_deferred for r in timed), "duration_p95_s": _p95([float(r.duration_s) for r in timed]),
+        "groq_limits_latest": _groq_limits_latest(timed),
         "events_rows": None if first_state is None else {"first": first_state.events_rows, "last": last_state.events_rows},
         "boards_rows": None if first_state is None else {"first": first_state.boards_rows, "last": last_state.boards_rows},
         "events_rows_per_day": round((last_state.events_rows - first_state.events_rows) / span_days) if span_days else None,
@@ -328,6 +380,22 @@ def _limits_lines(m: dict[str, Any]) -> list[str]:
         f"  ATS requests per run: {_fmt_stats(m['ats_requests_per_run'], '')}; request seconds per run: {_fmt_stats(m['ats_request_seconds_per_run'], 's')}; HTTP 429 from ATS providers: {m['ats_429']}",
         f"  Groq calls {m['groq_calls']} (HTTP 429: {m['groq_429']})",
     ]
+    per = m["groq_tokens_per_completion"]
+    lines += [
+        f"  Groq tokens: primary {m['groq_tokens_primary']}, fallback {m['groq_tokens_fallback']} over {m['groq_token_runs']} of {m['timed_runs']} timed runs that recorded tokens; "
+        + (f"tokens per scoring call {per['value']:g} (n={per['n']})" if per else "tokens per scoring call n/a (no run recorded tokens)")
+        + f"; completions per day {'n/a' if m['groq_completions_per_day'] is None else m['groq_completions_per_day']}"
+        + f"; cached {'n/a' if m['groq_cached_share_pct'] is None else str(m['groq_cached_share_pct']) + '%'} of prompt tokens",
+        "  Groq tokens per UTC day: "
+        + ("; ".join(f"{day} primary {v['primary']} / fallback {v['fallback']}" for day, v in list(m["groq_tokens_by_utc_day"].items())[-7:]) or "none recorded"),
+        f"  governors over {m['timed_runs']} timed runs (runs before these columns count 0): budget skips {m['eval_budget_skipped']}, deadline skips {m['eval_deadline_skipped']}, "
+        f"runs with an evaluation cut {m['runs_with_eval_cut']}, boards cut by the poll deadline {m['boards_skipped_deadline']}, alerts deferred {m['alerts_deferred']}; run duration p95 {m['duration_p95_s']} s",
+    ]
+    latest = m["groq_limits_latest"]
+    lines.append(
+        "  latest Groq rate-limit headers (run " + latest["run_at"] + "): " + "; ".join(f"{model}: " + ", ".join(f"{k}={v}" for k, v in hdr.items()) for model, hdr in latest["models"].items())
+        if latest else "  latest Groq rate-limit headers: none recorded"
+    )
     if m["events_rows"]:
         lines.append(
             f"  state size: Events rows {m['events_rows']['first']} -> {m['events_rows']['last']} (about {m['events_rows_per_day']} a day), "

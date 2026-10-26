@@ -323,7 +323,7 @@ class DiagnosticsTests(unittest.TestCase):
 
     def groq_runs(self) -> list[st_mod.RunRecord]:
         older = json.dumps({self.M120: {"x-ratelimit-reset-requests": "9m0s", "x-ratelimit-remaining-tokens": "100"}})
-        newer = json.dumps({self.M120: {"x-ratelimit-reset-requests": "2m59.56s", "x-ratelimit-remaining-tokens": "6000", "Authorization": "Bearer sk-leak"}, "Bearer": {"x-ratelimit-limit-tokens": "8000"}})
+        newer = json.dumps({self.M120: {"x-ratelimit-reset-requests": "2m59.56s", "x-ratelimit-remaining-tokens": "6000", "Authorization": "sk-leak"}, "Bearer sk-leak": {"x-ratelimit-limit-tokens": "8000"}, self.M120 + "x": {"x-ratelimit-limit-tokens": "Bearer sk-leak"}})
         return [
             st_mod.RunRecord(ts(days=2), duration_s=100, groq_calls=2, groq_tokens_primary=3000, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1,
                              eval_budget_skipped=2, eval_cut=True, boards_skipped_deadline=3, alerts_deferred=1, groq_limits=older),
