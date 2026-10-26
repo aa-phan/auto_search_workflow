@@ -5,17 +5,17 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-10-26T17:42:07.563Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-10-26T17:50:00.804Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: c641d3e6ba5c72533aee7707f458a9907c2250b0
+state_head: f2d99db22fa02d8d79187853fef4e27c15de2225
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 0
-  percent: 0
+  completed_plans: 2
+  percent: 17
 ---
 
 # Project State
@@ -30,11 +30,11 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 02 P01 | 3 min | 2 tasks | 8 files |
+| Phase 02 P02 | 7 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - The 20-30 a day target is conditional on the Groq plan decision (MEAS-02).
 - [Phase 02]: D-48 is one entry listing all eleven GOV-01 owner decisions with state, needed-by and default; pending items get their own D-number when decided — Keeps the list in one place and leaves undecided items labelled pending with their default (AGENTS rule 1, GOV-01)
 - [Phase 02]: Repository stays public; DEPLOY, README, D-37 note, STATUS, CONCERNS and INGEST-CONFLICTS corrected to say so (P2-15) — History check found no CSV, resume or PDF paths in any commit
+- [Phase 02]: D-49: an alert is recorded only when a channel accepted it; alert sends without an HTTP response are bounded at 5 (owner decision P2-18) — Amends D-07 and D-21 for the alert stage; recorded exception to AGENTS rule 4 (AGENTS.md not edited); accepted risk: a 5-run alert-channel outage abandons pending alerts
 
 ### Pending Todos
 
@@ -102,6 +104,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T17:42:07.549Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-10-26T17:50:00.784Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
