@@ -143,7 +143,7 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 | POLL-01..03, FRESH-01..02, DLVR-01..02, FILT-01..02, BRD-01..04, OPS-01, OPS-03, SEC-01 | Validated (live) |
 | STATE-01, STATE-02, BRD-05, OPS-02 | Validated (mocked only) |
 
-**Coverage:** v2.0 requirements: 29 total; mapped to phases: 0 (pending roadmap).
+**Coverage:** v2.0 requirements: 26 total; mapped to phases: 0 (pending roadmap).
 
 ---
 *Requirements defined: 2026-10-24 (v1.0); v2.0 scope 2026-10-25*
