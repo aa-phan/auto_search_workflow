@@ -57,7 +57,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   4. A job is recorded `alerted` only after a channel accepted the message; a send that fails without an HTTP response leaves the job unalerted, is retried, and stops after 5 attempts.
   5. Every owner decision the milestone needs is either recorded in DECISIONS.md or listed with its needed-by phase and its default if unanswered: Groq plan, D-05 amendment (before Phase 4), rule-7 lift for board-cycling scores only (before CYC-02 goes live), per-ATS policy (Paycom skipped, iCIMS deferred; before each adapter), SmartRecruiters after the pilot, repository public or private, date-only alerts (user decision 2026-10-25); the storage design approval that closes the D-03 review (before Phase 3 executes) is surfaced with them.
 
-**Plans**: 2/9 plans executed (waves 1-9, sequential: every plan edits the contract documents)
+**Plans**: 3/9 plans executed (waves 1-9, sequential: every plan edits the contract documents)
 
 Plans:
 **Wave 1**
@@ -67,7 +67,7 @@ Plans:
 - [x] 02-02-PLAN.md — MEAS-05: alerted only when a channel accepted; no-response sends bounded at 5 (P2-18); secret redaction; Telegram caps (D-49)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 02-03-PLAN.md — MEAS-03: per-model Groq daily token budget with verified-fresh reserve and fallback; token Runs columns (D-50)
+- [x] 02-03-PLAN.md — MEAS-03: per-model Groq daily token budget with verified-fresh reserve and fallback; token Runs columns (D-50)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 02-04-PLAN.md — MEAS-04: process-anchored poll / evaluation / alert cutoffs, longest-unpolled-first polling, Groq client deadline (D-51)
@@ -209,7 +209,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
-| 2. Measurement, governors and owner decisions | v2.0 | 2/9 | In Progress | - |
+| 2. Measurement, governors and owner decisions | v2.0 | 3/9 | In Progress | - |
 | 3. Compact storage | v2.0 | 0/TBD | Not started | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |

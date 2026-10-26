@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-10-26T17:50:00.804Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-10-26T17:59:53.471Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: f2d99db22fa02d8d79187853fef4e27c15de2225
+state_head: 1b9c5d208aec06d8c3665a97c4e407473d271d89
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 2
+  completed_plans: 3
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -56,6 +56,7 @@ Progress: [██░░░░░░░░] 17%
 |------|----------|-------|-------|
 | Phase 02 P01 | 3 min | 2 tasks | 8 files |
 | Phase 02 P02 | 7 min | 3 tasks | 8 files |
+| Phase 02 P03 | 7 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: D-48 is one entry listing all eleven GOV-01 owner decisions with state, needed-by and default; pending items get their own D-number when decided — Keeps the list in one place and leaves undecided items labelled pending with their default (AGENTS rule 1, GOV-01)
 - [Phase 02]: Repository stays public; DEPLOY, README, D-37 note, STATUS, CONCERNS and INGEST-CONFLICTS corrected to say so (P2-15) — History check found no CSV, resume or PDF paths in any commit
 - [Phase 02]: D-49: an alert is recorded only when a channel accepted it; alert sends without an HTTP response are bounded at 5 (owner decision P2-18) — Amends D-07 and D-21 for the alert stage; recorded exception to AGENTS rule 4 (AGENTS.md not edited); accepted risk: a 5-run alert-channel outage abandons pending alerts
+- [Phase 02]: D-50: per-model UTC-day Groq token budget (170000 default, provisional) with a 20% verified-fresh reserve; budget skips record nothing and use no attempt — Groq daily token limit is not in any header; budget-driven fallback accepted by the owner as the D-16 OK; scoring rule, prompt and Min_Alert_Score unchanged (AGENTS rule 7)
 
 ### Pending Todos
 
@@ -104,6 +106,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T17:50:00.784Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-10-26T17:59:53.455Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None
