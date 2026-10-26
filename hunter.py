@@ -354,6 +354,8 @@ class Config:
     webhook_url: str
     max_jobs: int
     search_window_days: int
+    poll_cutoff_s: float  # no new board poll starts this many seconds after the process started (D-51)
+    eval_cutoff_s: float  # no new Groq call starts this many seconds after the process started (D-51)
 
     @classmethod
     def from_env(cls) -> Config:
@@ -378,6 +380,9 @@ class Config:
             # Candidate retrieval window (days) passed to Tavily as `start_date`. Scheduled discovery is
             # always windowed; only the manual --backfill searches without one.
             search_window_days=max(1, _int_or(env("SEARCH_WINDOW_DAYS"), search.DEFAULT_WINDOW_DAYS)),
+            # Run deadlines in minutes from process start (the workflow timeout is 25 minutes, D-51); at least one minute.
+            poll_cutoff_s=max(60, _int_or(env("POLL_CUTOFF_MINUTES"), int(pl.POLL_CUTOFF_S // 60)) * 60),
+            eval_cutoff_s=max(60, _int_or(env("EVAL_CUTOFF_MINUTES"), int(pl.EVAL_CUTOFF_S // 60)) * 60),
         )
 
 
@@ -1957,6 +1962,7 @@ def _seed(value: str) -> BoardId:
 
 
 def main(argv: list[str] | None = None) -> int:
+    PROCESS_T0 = time.monotonic()  # the run deadlines count from here: before the Sheet connection and the writer-lease wait (D-51)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="evaluate one job URL (identity from the URL) and print the outcome; writes nothing")
     parser.add_argument("--dry-run", action="store_true", help="do not write any state, tracker rows or alerts")
@@ -2069,6 +2075,7 @@ def main(argv: list[str] | None = None) -> int:
     # unbudgeted and the 15% headroom of the default budget covers them.
     budget = eb.GroqBudget(day="", budgets={cfg.groq_fallback_model: settings.groq_fallback_daily_token_budget, cfg.groq_model: settings.groq_daily_token_budget})
     groq.daily = budget
+    groq.deadline = PROCESS_T0 + cfg.eval_cutoff_s  # no Groq call, wait or retry sleep outlives the evaluation cutoff (D-51)
     config_notes.append(groq_budget_note(store.load_settings(), settings))
 
     def append_tracker(payloads: list[dict[str, Any]]) -> None:
@@ -2088,6 +2095,10 @@ def main(argv: list[str] | None = None) -> int:
         groq_budget=budget,
         can_score=lambda st: budget.pick_model(groq.order(), fresh=st.freshness == fr.VERIFIED_FRESH, unavailable=groq.unavailable) is not None,
         groq_limits=groq.limits_json,
+        clock=time.monotonic,
+        process_t0=PROCESS_T0,
+        poll_cutoff_s=cfg.poll_cutoff_s,
+        eval_cutoff_s=cfg.eval_cutoff_s,
         discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.tavily_api_key else None,
         search_sync=make_search_sync(cfg),
         search_monthly_credits=settings.search_monthly_credits,
