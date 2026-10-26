@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import boards as bd  # noqa: E402
@@ -426,15 +428,6 @@ class RetryTests(HarnessCase):
             self.w.run(minutes_later=60)
         self.assertEqual((len(self.w.alerts), self.w.calls[k], len(self.w.tracker)), (1, 1, 1))  # no re-score, no duplicate row
 
-    def test_rejected_alert_requests_are_bounded_but_outages_are_not(self) -> None:
-        k = self.fresh_setup()
-        err = ValueError("400 chat not found")
-        err.response = mock.Mock(status_code=400)  # type: ignore[attr-defined]
-        self.w.alert_error = err
-        for _ in range(lg.MAX_ATTEMPTS + 2):
-            self.w.run(minutes_later=60)
-        self.assertEqual(len(self.w.events(k, lg.ABANDONED)), 1)
-
     def test_pending_alert_survives_aging_past_the_window_and_is_labelled_late(self) -> None:
         k = self.fresh_setup()
         self.w.alert_error = ConnectionError("down")
@@ -504,6 +497,11 @@ class RetryTests(HarnessCase):
 class AlertRecordingTests(HarnessCase):
     """`alerted` means a channel accepted the message (D-49); failures are recorded, bounded and redacted."""
 
+    def tearDown_harness(self) -> None:
+        """A fresh Harness (own state directory) for the next subTest."""
+        self._tmp.cleanup()
+        self.setUp()
+
     def test_alert_not_accepted_by_any_channel_is_not_recorded_alerted(self) -> None:
         k = self.fresh_setup()
         self.w.alert_result = False  # no channel configured or accepted the message
@@ -518,6 +516,78 @@ class AlertRecordingTests(HarnessCase):
         for _ in range(2):
             self.w.run(minutes_later=60)
         self.assertEqual((len(self.w.events(k, lg.ALERTED)), len(self.w.alerts)), (1, 1))
+
+    def test_rejected_alert_requests_are_bounded(self) -> None:
+        k = self.fresh_setup()
+        err = ValueError("400 chat not found")
+        err.response = mock.Mock(status_code=400)  # type: ignore[attr-defined]
+        self.w.alert_error = err
+        for _ in range(lg.MAX_ATTEMPTS + 2):
+            self.w.run(minutes_later=60)
+        self.assertEqual(len(self.w.events(k, lg.ABANDONED)), 1)
+
+    def test_alert_without_http_response_is_bounded_at_five_attempts(self) -> None:
+        errors: list[Exception] = [ConnectionError("down"), requests.ConnectionError("down"), requests.Timeout("slow"), ValueError("bad row")]
+        for err in errors:
+            with self.subTest(error=type(err).__module__ + "." + type(err).__name__):
+                self.tearDown_harness()
+                k = self.fresh_setup()
+                self.w.alert_error = err
+                for _ in range(lg.MAX_ATTEMPTS):
+                    self.w.run(minutes_later=60)
+                errs = self.w.events(k, lg.ERROR)
+                self.assertEqual([(e.detail["stage"], e.detail["attempt"]) for e in errs], [(lg.STAGE_ALERT, n) for n in range(1, lg.MAX_ATTEMPTS + 1)])
+                self.assertEqual(len(self.w.events(k, lg.ABANDONED)), 1)
+                calls = self.w.alert_calls
+                self.w.run(minutes_later=60)  # run 6 never tries again
+                self.assertEqual((self.w.alert_calls, self.w.alerts, self.w.events(k, lg.ALERTED)), (calls, [], []))
+
+    def test_alert_four_failures_then_success_delivers_once_without_abandoning(self) -> None:
+        k = self.fresh_setup()
+        self.w.alert_error = requests.ConnectionError("down")
+        for _ in range(lg.MAX_ATTEMPTS - 1):
+            self.w.run(minutes_later=60)
+        self.w.alert_error = None
+        self.w.run(minutes_later=60)
+        self.assertEqual((len(self.w.alerts), len(self.w.events(k, lg.ALERTED)), self.w.events(k, lg.ABANDONED), len(self.w.events(k, lg.ERROR))), (1, 1, [], lg.MAX_ATTEMPTS - 1))
+
+    def test_alert_http_5xx_and_429_stay_transient_and_use_no_attempt(self) -> None:
+        for status in (503, 429):
+            with self.subTest(status=status):
+                self.tearDown_harness()
+                k = self.fresh_setup()
+                err = requests.HTTPError(f"{status} error")
+                err.response = mock.Mock(status_code=status)
+                self.w.alert_error = err
+                for _ in range(7):
+                    run = self.w.run(minutes_later=60)
+                self.assertEqual((self.w.events(k, lg.ERROR), self.w.events(k, lg.ABANDONED), run.alerts_failed), ([], [], 1))
+                self.w.alert_error = None
+                self.w.run(minutes_later=60)
+                self.assertEqual((len(self.w.alerts), len(self.w.events(k, lg.ALERTED))), (1, 1))
+
+    def test_alert_failure_text_never_contains_the_bot_token(self) -> None:
+        token, chat = "123456:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789", "987654321"
+        k = self.fresh_setup()
+        self.w.alert_error = requests.ConnectionError(f"HTTPSConnectionPool(host='api.telegram.org'): Max retries exceeded with url: /bot{token}/sendMessage to chat {chat}")
+        with self.assertLogs("hunter", "WARNING") as logs:
+            run = self.w.run(minutes_later=60, secrets=(token, chat))
+        stored = self.w.events(k, lg.ERROR)[0].detail["message"]
+        self.assertIn("***", stored)
+        self.assertIn("***", "\n".join(logs.output))
+        for text in (stored, run.notes, "\n".join(logs.output)):
+            self.assertNotIn(token, text)
+            self.assertNotIn(chat, text)
+        # the pattern fallback also removes a token that was not passed in
+        self.w.alert_error = requests.ConnectionError(f"url: /bot{token}/sendMessage")
+        self.w.run(minutes_later=60)
+        self.assertNotIn(token, self.w.events(k, lg.ERROR)[-1].detail["message"])
+
+    def test_alert_failure_with_empty_message_records_the_exception_type(self) -> None:
+        k = self.fresh_setup()
+        self.w.alert_error = ConnectionError()
+        self.w.run(minutes_later=60)
+        self.assertEqual([e.detail["message"] for e in self.w.events(k, lg.ERROR)], ["ConnectionError"])
 
 
 class BoardHealthTests(HarnessCase):
