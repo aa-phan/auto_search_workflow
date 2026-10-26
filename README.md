@@ -129,8 +129,10 @@ The first runs mostly *learn* the boards (quietly recording what is already ther
 | `Rebalance_Every_Days` | How often boards that finished a trial are compared with the weakest proven boards (default 7). |
 | `Max_Replacements_Per_Rebalance` | Most proven boards replaced in one weekly comparison (default 20). |
 | `Rebalance_Mode` | `report` (default): the weekly comparison only writes a report. `on`: it replaces boards. |
+| `Groq_Daily_Token_Budget` | Most Groq AI tokens used per model per UTC day (default 170000, 85% of the 200,000 tokens/day in Groq's public free-tier table; provisional). When both models reach it, scoring stops and jobs wait for the next day; nothing is lost. |
+| `Groq_Fallback_Daily_Token_Budget` | The same limit for the backup model. Blank = same as `Groq_Daily_Token_Budget`. |
 
-Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defaults then apply (add the rows to change them). `Target_Levels` now defaults to `Coordinator, Associate, Specialist, Intern, Assistant, Junior, Entry Level, New Grad`; a Sheet that already has its own value keeps it, so add `Entry Level` and `New Grad` there if you want those titles. "Internship" matches `Intern`, "Jr"/"Jr." matches `Junior`, and "Entry-Level" matches `Entry Level`; seniority words such as Senior or Lead still exclude a title.
+Older Sheets may not have the five rows after `Max_New_Boards_Per_Run`; the defaults then apply (add the rows to change them). The same holds for the two `Groq_*` rows at the end of the table: without them the default budget applies, and every run's `Notes` say which budget is in force and where it came from. `Target_Levels` now defaults to `Coordinator, Associate, Specialist, Intern, Assistant, Junior, Entry Level, New Grad`; a Sheet that already has its own value keeps it, so add `Entry Level` and `New Grad` there if you want those titles. "Internship" matches `Intern`, "Jr"/"Jr." matches `Junior`, and "Entry-Level" matches `Entry Level`; seniority words such as Senior or Lead still exclude a title.
 
 **Job Tracker tab** shows jobs scoring 50 or higher. You can reorder its columns (for example put `My_Feedback` next to `My_Status`) and add your own; the app finds each column by its **header name**, so please do not rename the headers. The script only ever *adds* rows, so your edits are safe:
 

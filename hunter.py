@@ -182,6 +182,17 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ("Max_Active_Boards", "500", "Most company boards checked every hour. Imported boards join gradually, best matches first, up to this limit."),
     ("Max_New_Boards_Per_Run", "50", "Most new boards added to the hourly checks in a single run (each one is read once as a starting point)."),
     (
+        "Groq_Daily_Token_Budget",
+        "170000",
+        "Most Groq AI tokens the app uses per model per UTC day; when both models reach it, scoring stops and jobs wait for the next day (nothing is lost). "
+        "170000 = 85% of the 200,000 tokens/day in Groq's public free-tier table: provisional until this account's limits page is read (STATUS).",
+    ),
+    (
+        "Groq_Fallback_Daily_Token_Budget",
+        "",
+        "The same daily limit for the backup AI model (GROQ_FALLBACK_MODEL). Blank = same as Groq_Daily_Token_Budget. Groq counts each model's tokens separately.",
+    ),
+    (
         "Exploration_Share_Percent",
         "20",
         "Share (0-100) of Max_Active_Boards kept for newly added boards on a trial; the rest is for boards that proved themselves. "
@@ -198,6 +209,9 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
+
+
+DEFAULT_GROQ_DAILY_TOKENS = 170000  # 85% of the 200,000 tokens/day public free-tier figure; provisional until MEAS-02 reads the account's limits (D-50)
 
 
 def _split_list(value: str) -> list[str]:
@@ -229,6 +243,8 @@ class Settings:
     timezone: str = ""
     max_active_boards: int = 500
     max_new_boards_per_run: int = 50
+    groq_daily_token_budget: int = DEFAULT_GROQ_DAILY_TOKENS
+    groq_fallback_daily_token_budget: int = DEFAULT_GROQ_DAILY_TOKENS
     exploration_share_percent: int = 20
     exploration_days: int = 7
     rebalance_every_days: int = 7
@@ -249,6 +265,8 @@ class Settings:
         def pick(key: str) -> str:
             return (raw.get(key) or "").strip() or (os.getenv(key.upper()) or "").strip() or SETTING_DEFAULTS[key]
 
+        groq_budget = max(0, _int_or(pick("Groq_Daily_Token_Budget"), DEFAULT_GROQ_DAILY_TOKENS))
+        groq_fallback = pick("Groq_Fallback_Daily_Token_Budget")  # blank = same as the primary
         return cls(
             resume=(raw.get("Resume_Text") or "").strip() or resume_fallback,
             roles=_split_list(pick("Target_Roles")),
@@ -265,6 +283,8 @@ class Settings:
             timezone=pick("Timezone"),
             max_active_boards=max(1, _int_or(pick("Max_Active_Boards"), 500)),
             max_new_boards_per_run=max(1, _int_or(pick("Max_New_Boards_Per_Run"), 50)),
+            groq_daily_token_budget=groq_budget,
+            groq_fallback_daily_token_budget=max(0, _int_or(groq_fallback, groq_budget)) if groq_fallback else groq_budget,
             exploration_share_percent=min(100, max(0, _int_or(pick("Exploration_Share_Percent"), 20))),
             exploration_days=max(1, _int_or(pick("Exploration_Days"), 7)),
             rebalance_every_days=max(1, _int_or(pick("Rebalance_Every_Days"), 7)),
@@ -296,6 +316,18 @@ def settings_notes(raw: dict[str, str]) -> list[str]:
     if mode and mode.lower() not in REBALANCE_MODES:
         notes.append(f"Rebalance_Mode is '{mode}' (expected 'report' or 'on') - using 'report': the weekly rebalance only writes a report")
     return notes
+
+
+def groq_budget_note(raw: dict[str, str], s: Settings) -> str:
+    """Which daily Groq token budget applies and where it came from, for Runs.Notes. The live Settings tab is never widened
+    automatically, so a row that was never added there silently means the default: every run says which value is in force."""
+    if (raw.get("Groq_Daily_Token_Budget") or "").strip():
+        source = "Settings tab"
+    elif (os.getenv("GROQ_DAILY_TOKEN_BUDGET") or "").strip():
+        source = "environment"
+    else:
+        source = "default (provisional: 85% of the public 200,000 tokens/day figure)"
+    return f"Groq daily token budget {s.groq_daily_token_budget} / {s.groq_fallback_daily_token_budget} per UTC day from {source}"
 
 
 def excluded_title_regex(words: list[str]) -> re.Pattern[str] | None:
@@ -2021,6 +2053,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"kind": out.kind, "message": out.message, **(out.payload or {})}, indent=2, default=str))
         return 0
 
+    # The daily Groq token budget (D-50). --url and --delivery-test returned above: they persist nothing, so they stay
+    # unbudgeted and the 15% headroom of the default budget covers them.
+    budget = eb.GroqBudget(day="", budgets={cfg.groq_fallback_model: settings.groq_fallback_daily_token_budget, cfg.groq_model: settings.groq_daily_token_budget})
+    groq.daily = budget
+    config_notes.append(groq_budget_note(store.load_settings(), settings))
+
     def append_tracker(payloads: list[dict[str, Any]]) -> None:
         store.append_jobs([JobRow.from_payload(p) for p in payloads])
 
@@ -2035,6 +2073,9 @@ def main(argv: list[str] | None = None) -> int:
         send_alert=alert,
         title_gate=lambda t: eligibility.title_gate(t, settings.roles, settings.levels, excluded),
         secrets=tuple(v for v in (cfg.telegram_token, cfg.telegram_chat_id, cfg.webhook_url) if v),
+        groq_budget=budget,
+        can_score=lambda st: budget.pick_model(groq.order(), fresh=st.freshness == fr.VERIFIED_FRESH, unavailable=groq.unavailable) is not None,
+        groq_limits=groq.limits_json,
         discover=make_discovery(cfg, settings, backfill=args.backfill, backfill_credits=args.backfill_credits) if cfg.tavily_api_key else None,
         search_sync=make_search_sync(cfg),
         search_monthly_credits=settings.search_monthly_credits,
