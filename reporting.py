@@ -31,7 +31,7 @@ import discovery as dsc
 import freshness as fr
 import inventory
 import ledger as lg
-from boards import open_jobs, MONITORED, STATUS_CANDIDATE, STATUS_DISABLED, STATUS_INVALID, STATUS_VALIDATED, BoardRecord
+from boards import open_jobs, parse_job_url, MONITORED, STATUS_CANDIDATE, STATUS_DISABLED, STATUS_INVALID, STATUS_VALIDATED, BoardRecord
 from search import BUDGET_KEY, SearchBudget
 from state import CREDIT_UNRESOLVED, KIND_REHEARSAL, OUTCOME_DEGRADED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED, RunRecord
 
@@ -49,6 +49,11 @@ REJECT_LABELS = {
     "score": "Score (scored below the tracker threshold)",
 }  # fmt: skip
 MAX_FAILURE_ROWS = 15
+TARGET_ROWS_PER_DAY = (20, 30)  # the owner's target band for tracker rows per day (P2-11; conditional on the Groq plan decision)
+COHORTS = ("verified_fresh", "recent", "other")
+COHORT_OF_LABEL = {"Verified fresh": "verified_fresh", "Recent": "recent"}  # the tracker `Freshness` labels (hunter.FRESHNESS_LABELS); every other label is "other"
+YIELD_DAYS = 14
+DATE_FOUND_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")  # hunter.DISPLAY_FORMAT first; Sheets may re-render USER_ENTERED cells
 DEGRADED_BOARD_SHARE = 0.2  # a provider is "degraded" when this share (and at least 3) of its monitored boards failed their last poll
 _BACKOFF_RE = re.compile(r"provider backoff after HTTP 429: not polled this run: ([^;]+)")
 
@@ -124,6 +129,7 @@ class JobFacts:
     pass_kind: str = ""  # baseline | reentry | "" (ordinary observation)
     published: datetime | None = None
     precision: str = ""
+    url: str = ""  # the posting URL as the ledger stored it (seen detail, overridden by the evaluated payload); a diagnostic fallback for joins only, never identity
     eval_at: datetime | None = None
     eval_status: str = ""
     eval_score: int | None = None
@@ -197,9 +203,12 @@ def job_facts(events: list[lg.Event]) -> dict[str, JobFacts]:
             f.pass_kind = str(d.get("pass") or "")
             f.published, f.precision = fr.parse_instant(ev.published) if ev.published else (None, "")
             f.precision = str(d.get("precision") or f.precision)
+            f.url = str(d.get("url") or "")
         elif ev.event == lg.EVALUATED and f.eval_at is None:
             d = ev.detail
             f.eval_at, f.eval_status = t, str(d.get("status", ""))
+            if d.get("url"):
+                f.url = str(d["url"])
             f.eval_score = d.get("score") if isinstance(d.get("score"), int) else None
             f.eval_visible, f.eval_alert = bool(d.get("visible")), bool(d.get("alert"))
             if "reject" in d:
@@ -432,6 +441,8 @@ def build_summary(
     disc = _discovery(now, tz, periods, clean, finished, boards, facts, discovery, day, search_cap, search_reserve, per_period, local)
     # ---- board coverage
     coverage = _coverage(now, finished, boards, discovery, established_target, exploration_target)
+    # ---- tracker rows per found-day (MEAS-01)
+    yld = _yield(facts, clean.tracker, tz=tz, periods=periods, local=local)
     # ---- failures
     failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health)
     # ---- feedback
@@ -468,7 +479,7 @@ def build_summary(
             "tracker_fixture_rows": clean.excluded_fixture_rows, "duplicate_run_records_merged": clean.duplicate_run_records,
         },
         "periods": per_period, "health": health, "discovery": disc, "coverage": coverage, "failures": failures, "feedback": feedback,
-        "trend": trend, "checks": checks,
+        "yield": yld, "trend": trend, "checks": checks,
     }  # fmt: skip
     summary["headline"] = headline(summary)
     return summary
@@ -740,6 +751,104 @@ def _feedback(tracker: list[dict[str, str]], min_alert_score: int) -> dict[str, 
         "status_blank": status.get("(blank)", 0),
         "applied_or_further": sum(status.get(s, 0) for s in ("Applied", "Interviewing", "Offer", "Rejected")),
     }  # fmt: skip
+
+
+def tracker_join(facts: dict[str, JobFacts], tracker: list[dict[str, str]]) -> tuple[list[str | None], dict[str, int]]:
+    """The ledger key behind each tracker row (fixtures are already removed by `clean_inputs`), or None.
+
+    Identity first: `parse_job_url(Apply_URL).key` when that key is in the ledger. Diagnostic fallback only: the exact
+    stripped Apply_URL equal to the URL a ledger job was stored with (custom-domain postings that carry no parseable
+    identity). The fallback never defines identity or dedupe (AGENTS rule 3); it only explains a row the identity
+    join could not place."""
+    by_url: dict[str, str] = {}
+    for key in sorted(facts):
+        u = facts[key].url.strip()
+        if u:
+            by_url.setdefault(u, key)
+    keys: list[str | None] = []
+    counts = {"by_identity": 0, "by_stored_url": 0, "unmatched": 0}
+    for row in tracker:
+        url = (row.get("Apply_URL") or "").strip()
+        ident = parse_job_url(url)
+        if ident is not None and ident.key in facts:
+            keys.append(ident.key)
+            counts["by_identity"] += 1
+        elif url and url in by_url:
+            keys.append(by_url[url])
+            counts["by_stored_url"] += 1
+        else:
+            keys.append(None)
+            counts["unmatched"] += 1
+    return keys, counts
+
+
+def _cohort(row: dict[str, str], f: JobFacts | None) -> str:
+    label = (row.get("Freshness") or "").strip()
+    if label in COHORT_OF_LABEL:
+        return COHORT_OF_LABEL[label]
+    if not label and f is not None:  # a blank label on a matched row: the ledger's own class, never inferred from age
+        return {fr.VERIFIED_FRESH: "verified_fresh", fr.RECENT: "recent"}.get(f.freshness, "other")
+    return "other"
+
+
+def _found_day(row: dict[str, str], f: JobFacts | None, local: Any) -> date | None:
+    """P2-09: the display-time-zone day the job was found = its ledger `evaluated` instant (the moment `Date_Found` was
+    written). Publication time never buckets days. A row with no ledger match falls back to its `Date_Found` text."""
+    if f is not None:
+        t = f.eval_at or f.seen_at
+        if t is not None:
+            return local(t)
+    text = (row.get("Date_Found") or "").strip()
+    for fmt_ in DATE_FOUND_FORMATS:
+        try:
+            return datetime.strptime(text, fmt_).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzinfo, periods: list[Period], local: Any) -> dict[str, Any]:
+    """Tracker ROWS per found-day by cohort (verified fresh / Recent / other), joined to the ledger by identity.
+    Counts, keys and dates only: tracker free text is never copied (T-02-14)."""
+    keys, join = tracker_join(facts, tracker)
+    rows = []  # (day | None, cohort, key | None, row)
+    for row, key in zip(tracker, keys):
+        f = facts.get(key) if key else None
+        rows.append((_found_day(row, f, local), _cohort(row, f), key, row))
+    known_days = [d_ for d_, _, _, _ in rows if d_ is not None]
+    first_day = min(known_days) if known_days else None
+    per_day: dict[date, Counter[str]] = defaultdict(Counter)
+    for d_, cohort, _, _ in rows:
+        if d_ is not None:
+            per_day[d_][cohort] += 1
+    today = periods[-1].last_day
+    trend = []
+    for i in range(YIELD_DAYS - 1, -1, -1):
+        d_ = today - timedelta(days=i)
+        known = first_day is not None and d_ >= first_day
+        c = per_day.get(d_, Counter())
+        entry: dict[str, Any] = {"date": d_.isoformat()}
+        for cohort in COHORTS:
+            entry[cohort] = c[cohort] if known else None
+        entry["total"] = sum(c[cohort] for cohort in COHORTS) if known else None
+        trend.append(entry)
+    per_period: dict[str, dict[str, Any]] = {}
+    for p in periods:
+        inside = [(cohort, key) for d_, cohort, key, _ in rows if d_ is not None and p.contains(d_)]
+        per_period[p.key] = {"rows": len(inside), "by_cohort": {cohort: sum(1 for c_, _ in inside if c_ == cohort) for cohort in COHORTS}}
+    kept = {key: f for key, f in facts.items() if f.eval_visible}
+    in_tracker = {key for key in keys if key in kept}
+    missing = sorted(({"key": key, "evaluated": _stamp(f.eval_at)} for key, f in kept.items() if key not in in_tracker), key=lambda m: (m["evaluated"] or "", m["key"]))
+    seen_keys = Counter(key for key in keys if key)
+    return {
+        "trend": trend, "per_period": per_period, "join": join,
+        "day_unknown": sum(1 for d_, _, _, _ in rows if d_ is None),
+        "target": list(TARGET_ROWS_PER_DAY),
+        "reconcile": {
+            "ledger_kept": len(kept), "in_tracker": len(in_tracker), "missing_from_tracker": missing,
+            "tracker_rows_without_ledger_match": join["unmatched"], "duplicate_rows": sum(n - 1 for n in seen_keys.values() if n > 1),
+        },
+    }
 
 
 def _checks(per_period: dict[str, Any], facts: dict[str, JobFacts], clean: Clean, periods: list[Period]) -> list[str]:

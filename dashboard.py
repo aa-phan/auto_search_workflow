@@ -30,6 +30,7 @@ UNKNOWN = "n/a"  # unknown / not recorded: never shown as 0
 CHART_DAYS = 14
 FONT = "Inter"  # one family throughout; Google Sheets falls back to its default if a font is unavailable
 CHART_ID_BASE = 7100  # fixed chart ids, so a refresh deletes exactly its own charts and re-adds them
+BAND_LINES_STACK = False  # assumption A7 (unverified in a real Sheet): when True, Sheets stacks LINE series, so "Target 30" holds the 10-row difference
 
 PALETTE = {  # RGB 0-1
     "ink": (0.13, 0.13, 0.15), "muted": (0.45, 0.47, 0.51), "line": (0.86, 0.87, 0.89), "band": (0.95, 0.96, 0.98),
@@ -48,7 +49,7 @@ class Cell:
 
 @dataclass
 class Chart:
-    kind: str  # line | column | stacked_column | bar | donut
+    kind: str  # line | column | stacked_column | bar | donut | combo
     title: str
     domain: tuple[int, int, int]  # (column, first row, last row exclusive) of the labels
     series: list[tuple[int, str]]  # (column, colour name) per series; the header row (first row - 1) names the series
@@ -56,6 +57,8 @@ class Chart:
     anchor_col: int
     width: int
     height: int = 250
+    series_types: list[str] = field(default_factory=list)  # combo only: COLUMN | LINE per series
+    stacked: bool = False  # combo only: stackedType STACKED
 
 
 @dataclass
@@ -171,6 +174,21 @@ def render(sm: dict[str, Any]) -> Grid:
         put(rej_head + 1 + i, DATA_COL, Cell(name, "data"))
         put(rej_head + 1 + i, DATA_COL + 1, Cell(n, "data"))
 
+    # tracker rows per found-day (the first chart): blank = unknown day; the two target lines are blank on unknown days too
+    Y = sm["yield"]
+    yield_head = rej_head + len(rej_rows) + 3
+    for j, name in enumerate(["Date", "Verified fresh", "Recent", "Other", "Target 20", "Target 30"]):
+        put(yield_head, DATA_COL + j, Cell(name, "data_head"))
+    lo, hi = rp.TARGET_ROWS_PER_DAY
+    for i, d in enumerate(Y["trend"]):
+        mm, dd = d["date"][5:].split("-")
+        rec = d["total"] is not None
+        row_vals = [f"{int(mm)}/{int(dd)}" if i == 0 or int(dd) == 1 else str(int(dd))] + ["" if d[c] is None else d[c] for c in rp.COHORTS]
+        row_vals += [lo, (hi - lo) if BAND_LINES_STACK else hi] if rec else ["", ""]
+        for j, v in enumerate(row_vals):
+            put(yield_head + 1 + i, DATA_COL + j, Cell(v, "data"))
+    y0, y1 = yield_head + 1, yield_head + 1 + len(Y["trend"])
+
     def spark(col: int) -> Cell:
         rng = f"{col_letter(DATA_COL + col)}{d0 + 1}:{col_letter(DATA_COL + col)}{d1}"
         return Cell("", "card_spark", formula=f'=SPARKLINE({rng},{{"charttype","column";"color","#5f8df5";"empty","ignore"}})')
@@ -215,7 +233,8 @@ def render(sm: dict[str, Any]) -> Grid:
 
     a, b = chart_slot(), chart_slot()
     g.charts += [
-        Chart("line", "Relevant jobs per day", (0, d0, d1), [(2, "blue"), (3, "teal")], a, 0, 490, 258),
+        Chart("combo", "Tracker rows per day · target 20-30", (0, y0, y1), [(1, "teal"), (2, "blue"), (3, "slate"), (4, "amber"), (5, "amber")], a, 0, 490, 258,
+              series_types=["COLUMN", "COLUMN", "COLUMN", "LINE", "LINE"], stacked=True),
         Chart("column", "Alerts delivered and tracker additions", (0, d0, d1), [(4, "teal"), (5, "slate")], a, 4, 500, 258),
         Chart("stacked_column", "Runs per day", (0, d0, d1), [(6, "teal"), (7, "crimson")], b, 0, 490, 258),
         Chart("bar", "Why relevant-title jobs were dropped · 7d", (0, rej_head + 1, rej_head + 1 + len(rej_rows)), [(1, "blue")], b, 4, 500, 258),
@@ -406,7 +425,7 @@ def chart_request(ch: Chart, idx: int, sheet_id: int) -> dict[str, Any]:
         spec: dict[str, Any] = {"pieChart": {"legendPosition": "RIGHT_LEGEND", "domain": domain["domain"], "series": series[0]["series"], "pieHole": 0.55}}
     else:
         basic: dict[str, Any] = {
-            "chartType": {"line": "LINE", "column": "COLUMN", "stacked_column": "COLUMN", "bar": "BAR"}[ch.kind],
+            "chartType": {"line": "LINE", "column": "COLUMN", "stacked_column": "COLUMN", "bar": "BAR", "combo": "COMBO"}[ch.kind],
             "legendPosition": "NO_LEGEND" if len(series) == 1 else "BOTTOM_LEGEND",
             "axis": [{"position": "BOTTOM_AXIS" if ch.kind != "bar" else "LEFT_AXIS"}, {"position": "LEFT_AXIS" if ch.kind != "bar" else "BOTTOM_AXIS"}],
             "domains": [domain], "series": series, "headerCount": 1,
@@ -414,8 +433,13 @@ def chart_request(ch: Chart, idx: int, sheet_id: int) -> dict[str, Any]:
         if ch.kind == "line":
             for s_ in series:
                 s_["lineStyle"] = {"width": 2}
-        if ch.kind == "stacked_column":
+        if ch.kind == "stacked_column" or (ch.kind == "combo" and ch.stacked):
             basic["stackedType"] = "STACKED"
+        if ch.kind == "combo":
+            for s_, typ in zip(series, ch.series_types):
+                s_["type"] = typ
+                if typ == "LINE":
+                    s_["lineStyle"] = {"width": 2, "type": "MEDIUM_DASHED"}
         if ch.kind == "bar":
             for s_ in series:
                 s_["dataLabel"] = {"type": "DATA", "placement": "OUTSIDE_END", "textFormat": {"fontFamily": FONT, "fontSize": 9, "foregroundColor": _rgb("muted")}}

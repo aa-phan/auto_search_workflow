@@ -642,7 +642,7 @@ class DashboardTabTests(unittest.TestCase):
         newest = sm["trend"][0]
         self.assertEqual((col(1)[-1], col(4)[-1], col(6)[-1]), (newest["new_postings"], newest["alerts_delivered"], newest["runs_ok"]))
         self.assertEqual(col(1)[0], "")  # a day before anything was recorded is blank (unknown), not 0
-        line = grid.charts[0]
+        line = next(c for c in grid.charts if c.kind == "stacked_column")  # the first slot is now the tracker-rows combo (D-52); this chart still reads the trend block
         self.assertEqual((line.domain[1], line.domain[2]), (2, 2 + db.CHART_DAYS))
         self.assertTrue(all(c >= db.DATA_COL for c, _ in line.series))
         req = db.chart_request(line, 0, 9)["addChart"]["chart"]["spec"]["basicChart"]
@@ -713,6 +713,83 @@ class DashboardTabTests(unittest.TestCase):
         store = sheet_store(sh)
         store.publish_dashboard(db.render(self.sample()))
         self.assertEqual(len(sh.batches), 1)
+
+
+def gh_url(n: int, board: str = "acme") -> str:
+    return f"https://job-boards.greenhouse.io/{board}/jobs/{n}"
+
+
+def tracker_row(n: int, label: str = "Verified fresh", feedback: str = "", date_found: str = "", url: str | None = None) -> dict[str, str]:
+    return {"Apply_URL": gh_url(n) if url is None else url, "Freshness": label, "My_Feedback": feedback, "Date_Found": date_found}
+
+
+class YieldTests(unittest.TestCase):
+    """MEAS-01: tracker rows per found-day by cohort (P2-09..P2-12), computed from the ledger and the tracker only."""
+
+    NOW = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)  # 10:00 on 2026-10-26 in Chicago
+
+    def ledger(self, specs: list[tuple[int, datetime]]) -> list[lg.Event]:
+        ev: list[lg.Event] = []
+        for n, at in specs:
+            ev += [seen(k(n), at - timedelta(minutes=5), pub=at - timedelta(hours=2)), evaluated(k(n), at)]
+        return ev
+
+    def test_yield_counts_tracker_rows_per_local_day_by_cohort(self) -> None:
+        day1 = datetime(2026, 10, 24, 20, 0, tzinfo=UTC)  # 15:00 on the 24th in Chicago
+        day2 = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        ev = self.ledger([(1, day1), (2, day2), (3, day2)])
+        tracker = [tracker_row(1, "Verified fresh"), tracker_row(2, "Recent"), tracker_row(3, "Age unverified")]
+        y = summary(ev, tracker=tracker, now=self.NOW, tz=CHI)["yield"]
+        trend = y["trend"]
+        self.assertEqual(len(trend), 14)
+        self.assertEqual([d["date"] for d in trend], sorted(d["date"] for d in trend))  # oldest first
+        self.assertEqual(trend[-1]["date"], "2026-10-26")
+        by_date = {d["date"]: d for d in trend}
+        self.assertEqual({c: by_date["2026-10-24"][c] for c in rp.COHORTS}, {"verified_fresh": 1, "recent": 0, "other": 0})
+        self.assertEqual({c: by_date["2026-10-25"][c] for c in rp.COHORTS}, {"verified_fresh": 0, "recent": 1, "other": 1})
+        self.assertEqual((by_date["2026-10-26"]["total"], by_date["2026-10-26"]["verified_fresh"]), (0, 0))  # after the first row: 0, measured
+        self.assertIsNone(by_date["2026-10-23"]["total"])  # before the first tracker row ever: unknown, never 0
+        self.assertIsNone(by_date["2026-10-13"]["verified_fresh"])
+
+    def test_yield_day_boundary_local_midnight_belongs_to_new_day(self) -> None:
+        midnight = datetime(2026, 10, 25, 5, 0, 0, tzinfo=UTC)  # 00:00:00 on the 25th in Chicago
+        before = datetime(2026, 10, 25, 4, 59, 59, tzinfo=UTC)  # 23:59:59 on the 24th
+        ev = self.ledger([(1, midnight), (2, before)])
+        y = summary(ev, tracker=[tracker_row(1), tracker_row(2)], now=self.NOW, tz=CHI)["yield"]
+        by_date = {d["date"]: d for d in y["trend"]}
+        self.assertEqual((by_date["2026-10-25"]["total"], by_date["2026-10-24"]["total"]), (1, 1))
+
+    def test_yield_day_comes_from_the_evaluation_not_the_publication_or_first_sight(self) -> None:
+        pub = datetime(2026, 10, 23, 18, 0, tzinfo=UTC)
+        first = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
+        found = datetime(2026, 10, 25, 18, 0, tzinfo=UTC)
+        earlier = datetime(2026, 10, 22, 18, 0, tzinfo=UTC)  # a second row, so the days in between are measured zeros rather than unknown
+        ev = [seen(k(1), first, pub=pub), evaluated(k(1), found)] + self.ledger([(2, earlier)])
+        by_date = {d["date"]: d for d in summary(ev, tracker=[tracker_row(1), tracker_row(2)], now=self.NOW, tz=CHI)["yield"]["trend"]}
+        self.assertEqual([by_date[d]["total"] for d in ("2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24", "2026-10-25")], [None, 1, 0, 0, 1])
+
+    def test_dashboard_top_chart_is_tracker_rows_combo_with_target_band(self) -> None:
+        day = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        sm = summary(self.ledger([(1, day)]), tracker=[tracker_row(1)], now=self.NOW, tz=CHI)
+        grid = db.render(sm)
+        top = grid.charts[0]
+        self.assertEqual(top.kind, "combo")
+        self.assertTrue(top.title.startswith("Tracker rows per day"))
+        self.assertEqual(len(grid.charts), 4)
+        spec = db.chart_request(top, 0, 9)["addChart"]["chart"]["spec"]["basicChart"]
+        self.assertEqual(spec["chartType"], "COMBO")
+        self.assertEqual([s["type"] for s in spec["series"]], ["COLUMN"] * 3 + ["LINE"] * 2)
+        self.assertEqual(spec["stackedType"], "STACKED")
+        col = lambda j: [grid.rows[r][db.DATA_COL + j].value for r in range(top.domain[1], top.domain[2])]  # noqa: E731
+        trend = sm["yield"]["trend"]
+        recorded = [d["total"] is not None for d in trend]
+        want20 = [20 if r else "" for r in recorded]
+        want30 = [(30 - 20 if db.BAND_LINES_STACK else 30) if r else "" for r in recorded]
+        self.assertEqual(col(4), want20)
+        self.assertEqual(col(5), want30)
+        self.assertEqual(col(1)[-2], 1)  # the 25th holds the one verified-fresh row
+        self.assertEqual(col(0)[-1], "26")
+        self.assertTrue(all(c >= db.DATA_COL for c, _ in top.series))
 
 
 class CliAndPilotTests(HarnessCase):
