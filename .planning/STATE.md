@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-10-26T17:59:53.471Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-10-26T18:08:01.707Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 1b9c5d208aec06d8c3665a97c4e407473d271d89
+state_head: 7bb68411ff4cc49782f62394ac39c3fa00080de6
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 3
+  completed_plans: 4
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -57,6 +57,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P01 | 3 min | 2 tasks | 8 files |
 | Phase 02 P02 | 7 min | 3 tasks | 8 files |
 | Phase 02 P03 | 7 min | 3 tasks | 10 files |
+| Phase 02 P04 | 7 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: Repository stays public; DEPLOY, README, D-37 note, STATUS, CONCERNS and INGEST-CONFLICTS corrected to say so (P2-15) — History check found no CSV, resume or PDF paths in any commit
 - [Phase 02]: D-49: an alert is recorded only when a channel accepted it; alert sends without an HTTP response are bounded at 5 (owner decision P2-18) — Amends D-07 and D-21 for the alert stage; recorded exception to AGENTS rule 4 (AGENTS.md not edited); accepted risk: a 5-run alert-channel outage abandons pending alerts
 - [Phase 02]: D-50: per-model UTC-day Groq token budget (170000 default, provisional) with a 20% verified-fresh reserve; budget skips record nothing and use no attempt — Groq daily token limit is not in any header; budget-driven fallback accepted by the owner as the D-16 OK; scoring rule, prompt and Min_Alert_Score unchanged (AGENTS rule 7)
+- [Phase 02]: D-51: run deadlines from process start (poll 15, Groq 20, alerts 22 min) and longest-unpolled-first polling — Keeps every run inside the 25-minute workflow timeout; poll and alert cuts degrade the run, an evaluation cut leaves it ok; nothing is recorded against a cut board, job or alert
+- [Phase 02]: Alert cutoff cut makes the run degraded (discretion choice, not part of P2-07) — A fresh alert waiting another hour deserves the owner's attention; keep EVAL_CUTOFF_MINUTES below 22
 
 ### Pending Todos
 
@@ -106,6 +109,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T17:59:53.455Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-10-26T18:08:01.692Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
