@@ -65,7 +65,7 @@ Previous change (D-17..D-21): scheduled discovery is a persistent rotation of da
 
 ## Deployment and pilot status (running log)
 
-- **Deployed:** private-then-public repo, secrets set, Sheet connected, Telegram group delivery verified (labelled fixture), two manual polling runs (second added 0 jobs: no duplicates), a quota failure under back-to-back runs found and fixed (retry on HTTP 429), SmartRecruiters unparked by decision (D-38), Board Inventory enabled with its schedule.
+- **Deployed:** public repo (D-48), secrets set, Sheet connected, Telegram group delivery verified (labelled fixture), two manual polling runs (second added 0 jobs: no duplicates), a quota failure under back-to-back runs found and fixed (retry on HTTP 429), SmartRecruiters unparked by decision (D-38), Board Inventory enabled with its schedule.
 - **Diagnostics for the limits audit** (this change): per-run duration and phase times, Google Sheets request counts and quota rejections, ATS and Groq request counts and 429s, and Events/Boards row counts are recorded in `Runs` and summarized in the pilot report (`LIMITS AUDIT`). Measured values only exist from this change onward.
 - **Since then (2026-10-23):** the schedule fired (38 `schedule` runs in the last 7 days), 20 real alerts were delivered and the seven-day pilot is complete (see "Pilot week 1 result" above).
 

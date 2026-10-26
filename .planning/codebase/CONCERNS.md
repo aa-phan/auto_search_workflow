@@ -99,8 +99,7 @@ Scope: full repository (`/Users/aphan/auto_search_workflow`); `legacy/` is archi
 - Recommendation: keep the URL in secrets only (already the case in `job_hunter.yml` line 67); if the webhook is ever shared, rotate it.
 
 **Repository visibility:**
-- Risk: `STATUS.md` line 68 describes the repository as "private-then-public". Workflows run on `main`; secrets are not exposed to forks, but the public schedule and the workflow files are visible.
-- Recommendation: confirm the intended visibility. No secret values were found in tracked files.
+- Resolved 2026-10-26 (D-48): the repository is public by owner decision; history holds no job-search CSVs; keep logs free of job content and secrets.
 
 **Positive checks (verified in code):**
 - Secrets are environment variables and GitHub secrets only. `git ls-files` lists no `.env`, `Resume.pdf`, `resume.txt`, service-account JSON or `tracked_jobs*.csv`; `.gitignore` covers all of them (`.env`, `.env.*`, `*service-account*.json`, `*credentials*.json`, `Resume.pdf`, `resume.txt`, `tracked_jobs*.csv`, `state/`).

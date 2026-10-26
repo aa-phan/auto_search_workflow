@@ -90,7 +90,7 @@ In this repository: **Settings → Secrets and variables → Actions → New rep
 | `TELEGRAM_BOT_TOKEN` | from step 4 (optional) |
 | `TELEGRAM_CHAT_ID` | from step 4 (optional) |
 
-> **Use a private repository.**
+> **The repository is public.** Never commit `.env`, your resume, the service-account JSON or job-search exports; secrets go in GitHub Secrets only (DECISIONS D-48).
 
 ### 4. Telegram alerts (optional but recommended)
 1. In Telegram, message **@BotFather**, send `/newbot`, follow the prompts, and copy the **token** it gives you.

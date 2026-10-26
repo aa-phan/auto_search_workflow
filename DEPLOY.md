@@ -8,14 +8,16 @@ Nothing here has been run on GitHub yet: this repository has no remote. Follow t
 - `.gitignore` excludes `.env*`, `*service-account*.json`, `*credentials*.json`, `Resume.pdf`, `resume.txt`, `state/`, `.venv/`, `tracked_jobs*.csv`, `legacy/*.csv`.
 - The workflows have `contents: read` and contain no `git push` / `git commit`: nothing the system produces is ever written to the repository. State lives in the Google Sheet.
 - Your resume lives only in the Sheet (`Settings > Resume_Text`), never in the repository.
-- Older commits still contain three CSVs of job-search scores and verdicts (they are no longer tracked). Keep the repository **private**; if you ever make it public, rewrite history first.
+- The repository is public (owner decision, DECISIONS D-48). Git history contains no job-search CSVs or resume files (checked 2026-10-26 with `git log --all --name-only`). Logs and documents carry counts and job keys only; job content and the resume live only in the Google Sheet.
 
-## 1. Private repository (needs your approval: see "Approval needed" at the end)
+## 1. Repository (already created, public)
 
 ```bash
-gh repo create auto_search_workflow --private --source=. --remote=origin   # creates the repo, adds the remote; pushes nothing
+gh repo create auto_search_workflow --public --source=. --remote=origin    # creates the repo, adds the remote; pushes nothing
 git push -u origin main                                                    # the push is a separate, explicit step
 ```
+
+The repository already exists (`aa-phan/auto_search_workflow`), so this step is history.
 
 ## 2. Google Sheet and service account (a TEST sheet first)
 
@@ -102,4 +104,4 @@ The **Watchdog** workflow (`.github/workflows/watchdog.yml`) checks every 15 min
 
 ## Approval needed
 
-Creating the private repository and pushing (steps 1) are outward-facing actions that have not been authorized yet. They are the first thing to approve; secrets, the Sheet and the Telegram bot are created by you and never shared in chat.
+Creating the repository and pushing (steps 1) are outward-facing actions that have not been authorized yet (done; the repository is public, D-48). They are the first thing to approve; secrets, the Sheet and the Telegram bot are created by you and never shared in chat.

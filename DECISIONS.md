@@ -201,7 +201,7 @@ Live check with the configured Serper key (about 80 requests, 3-day window): the
 
 **Completeness by documented behaviour** (see SPEC "Board registry"): Greenhouse and Ashby unpaginated; SmartRecruiters `totalFound`; Lever continued with `skip` when the list length looks like a page size; Workable (undocumented widget) marked possibly truncated at such lengths; none requires a reported total.
 
-**Repository hygiene.** `.gitignore` now also excludes `tracked_jobs*.csv` and `legacy/*.csv` (job-search data: scores and verdicts about the candidate); the three tracked copies are removed from the index (not deleted from disk). Git history contains no secrets (scanned for Tavily/Groq/Google/Telegram/GitHub token patterns and private keys: none) but still contains those CSVs; the repository is meant to be private.
+**Repository hygiene.** `.gitignore` now also excludes `tracked_jobs*.csv` and `legacy/*.csv` (job-search data: scores and verdicts about the candidate); the three tracked copies are removed from the index (not deleted from disk). Git history contains no secrets (scanned for Tavily/Groq/Google/Telegram/GitHub token patterns and private keys: none) but still contains those CSVs; the repository is meant to be private. (Amended by D-48: the repository is public; a 2026-10-26 history check found no job-search CSVs in any commit.)
 
 ## D-38 SmartRecruiters is polled for the pilot (explicit user decision; reverses the default of D-13 / D-27 for this deployment)
 

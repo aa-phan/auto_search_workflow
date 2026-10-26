@@ -17,11 +17,13 @@ None. No two locked decisions contradict once explicit supersession chains are a
   Found: STATUS.md "Deployment and pilot status" lists "private-then-public repo". DECISIONS.md D-37 says the repository "is meant to be private" because git history still contains three job-search CSVs (scores and verdicts about the candidate). DEPLOY.md section 0 says "Keep the repository private; if you ever make it public, rewrite history first." CONCERNS.md "Repository visibility" says to confirm the intended visibility.
   Impact: Precedence (ADR over DOC) says private, but visibility is a fact about the world, not something precedence can resolve. If the repository is public, the old CSVs in history are exposed and the D-37/DEPLOY precondition (rewrite history first) was not met. This repo's own docs do not record whether history was rewritten.
   → Owner to confirm the current visibility. If public, decide on history rewrite or making it private, and record the outcome in DECISIONS.md (REQ-v2-owner-decisions-record).
+  RESOLVED 2026-10-26: public by owner decision, DECISIONS D-48.
 
 [WARNING] Decisions that ask for owner confirmation have no recorded confirmation
   Found: DECISIONS.md D-16 title says "needs your OK" (Groq models deviate from the original request) and D-10 lists it; D-22 asks to confirm slot count and rotation length (since overtaken by D-35); D-30 lists the pool parameters (80/20, 7-day trials, weekly rebalance, 20 replacements, score weights, margin 1.0, two weak cycles, 84 polls) as "initial operating choices, not proven"; D-43 says "Decision requested: none yet" and the pilot ended 2026-10-22 without a recorded decision (CONCERNS.md).
   Impact: All entries are locked by manifest, but their confirmation state is unknown, and D-30 values are now acting on live data (D-45, D-47).
   → Owner to record explicit confirmations or changes in DECISIONS.md. The roadmapper should treat D-30 values as provisional until the first weekly rebalance evidence (due about 2026-10-29) is read.
+  RESOLVED 2026-10-26: D-16 OK for budget-driven fallback recorded in D-48 (P2-03); D-30 values remain initial choices until EVID-01 (Phase 5); D-43 approval listed as pending in D-48.
 
 [WARNING] Candidate v2 scope includes feature or tuning work that AGENTS.md rule 7 and STATUS.md gate
   Found: AGENTS.md rule 7 ("Do not tune scores or add features until freshness and delivery are proven (see STATUS.md)"); STATUS.md closes with "No score tuning or new features until these are read (AGENTS.md rule 7)", referring to the Next milestone items (first weekly rebalance, limits at 700, wider Settings, D-47 follow-up). v2 candidates derived in intel/requirements.md include a daily Telegram digest (feature), a title-gate leak fix (tuning) and structural work.
@@ -37,6 +39,7 @@ None. No two locked decisions contradict once explicit supersession chains are a
   Found: DECISIONS.md D-38 (owner unparked SmartRecruiters for the pilot; permission from SmartRecruiters unknown and not asked; reversal is deleting two workflow lines). SPEC.md "Provider limits honoured" keeps parking as the default and notes the pilot override. CONCERNS.md lists it as a high-severity compliance item and asks the owner to reconfirm. D-38 says it applied "for the seven-day pilot"; the pilot ended 2026-10-22 and no document records a decision to continue or revert, yet 94 SmartRecruiters boards were among those polled and the override is still in the workflows per CONCERNS.md.
   Impact: The deployed behaviour has outlived the stated scope of its decision. Precedence gives the locked decision force, but its time bound has passed without a new decision.
   → Owner to record whether the override continues past the pilot (new D-number) or to remove the two `ALLOW_SMARTRECRUITERS_BULK` lines; the reversal keeps history.
+  RESOLVED 2026-10-26: parked again by owner decision (D-48, P2-14); deployed by plan 02-09 after the first weekly rebalance is read.
 
 ### INFO (13)
 
