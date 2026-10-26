@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 import discovery as dsc
+import eval_budget
 import freshness as fr
 import inventory
 import ledger as lg
@@ -134,6 +135,7 @@ class JobFacts:
     url: str = ""  # the posting URL as the ledger stored it (seen detail, overridden by the evaluated payload); a diagnostic fallback for joins only, never identity
     eval_at: datetime | None = None
     eval_status: str = ""
+    eval_model: str = ""  # the Groq model that scored it ("" = not recorded: written before D-49, or a gate rejection that never reached scoring)
     eval_score: int | None = None
     eval_reject: str = ""  # stage that ended the evaluation ("" = scored and kept)
     eval_visible: bool = False
@@ -209,6 +211,7 @@ def job_facts(events: list[lg.Event]) -> dict[str, JobFacts]:
         elif ev.event == lg.EVALUATED and f.eval_at is None:
             d = ev.detail
             f.eval_at, f.eval_status = t, str(d.get("status", ""))
+            f.eval_model = str(d.get("model") or "")
             if d.get("url"):
                 f.url = str(d["url"])
             f.eval_score = d.get("score") if isinstance(d.get("score"), int) else None
@@ -445,6 +448,8 @@ def build_summary(
     coverage = _coverage(now, finished, boards, discovery, established_target, exploration_target)
     # ---- tracker rows per found-day (MEAS-01)
     yld = _yield(facts, clean.tracker, tz=tz, periods=periods, local=local)
+    # ---- Groq consumption (MEAS-02 / MEAS-03)
+    groq = _groq(now, finished, facts, discovery, periods, local)
     # ---- failures
     failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing=yld["reconcile"]["missing_from_tracker"])
     # ---- feedback
@@ -481,7 +486,7 @@ def build_summary(
             "tracker_fixture_rows": clean.excluded_fixture_rows, "duplicate_run_records_merged": clean.duplicate_run_records,
         },
         "periods": per_period, "health": health, "discovery": disc, "coverage": coverage, "failures": failures, "feedback": feedback,
-        "yield": yld, "trend": trend, "checks": checks,
+        "yield": yld, "groq": groq, "trend": trend, "checks": checks,
     }  # fmt: skip
     summary["headline"] = headline(summary)
     return summary
@@ -613,6 +618,62 @@ def _discovery(now, tz, periods, clean, finished, boards, facts, discovery, day,
         "rotation": rotation, "hydration_retry_queue": len(pending),
         "note": "Credits are what the application recorded from each response; requests that failed before a response may have been billed (unresolved) and use outside this application is invisible here.",
     }  # fmt: skip
+
+
+def _count(value: Any) -> int | None:
+    """A non-negative integer from hand-editable JSON; anything else (text, bool, negative) is unknown."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _budget_today(now: datetime, raw: str | None) -> dict[str, Any] | None:
+    """Today's (UTC day) token use per model against its budget, from the persisted Discovery record `groq_budget`
+    ({"day","used","exhausted","budgets"}). None = no record or unreadable (unknown, never 0). A record from an
+    earlier UTC day is not today's use: the budget rolled at UTC midnight, so today starts at 0 (as `eval_budget` loads it)."""
+    data = _json_dict(raw) if raw else {}
+    if not isinstance(data.get("day"), str):
+        return None
+    today = eval_budget.day_of(now)
+    same_day = data["day"] == today
+    used_raw = data.get("used") if isinstance(data.get("used"), dict) else {}
+    budget_raw = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
+    spent = {m for m in data.get("exhausted", []) if isinstance(m, str)} if isinstance(data.get("exhausted"), list) and same_day else set()
+    models = {}
+    for m in sorted({str(x) for x in used_raw} | {str(x) for x in budget_raw}):
+        models[m] = {"used": (_count(used_raw.get(m)) or 0) if same_day else 0, "budget": _count(budget_raw.get(m)), "exhausted": m in spent}
+    return {"day": today, "record_day": data["day"], "models": models}
+
+
+def _groq(now, finished, facts, discovery, periods, local) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    """Groq consumption (D-49, D-50, D-51). `today` comes from the Discovery budget record; the 7-day figures are sums over
+    the finished runs of the last 7 local days. Runs recorded before the token columns existed carry 0 tokens and 0
+    completions, which is NOT a measurement: tokens per call covers only runs that recorded tokens (`token_runs`)."""
+    p7 = next(p for p in periods if p.key == "7d")
+    runs = [r for r in finished if (t := parse_stamp(r.run_at)) and p7.contains(local(t))]
+    token_runs = [r for r in runs if r.groq_tokens_primary + r.groq_tokens_fallback > 0]
+    tokens = sum(r.groq_tokens_primary + r.groq_tokens_fallback for r in token_runs)
+    completions = sum(r.groq_completions for r in token_runs)
+    prompt = sum(r.groq_prompt_tokens for r in runs)
+    cached = sum(r.groq_cached_tokens for r in runs)
+    by_model: Counter[str] = Counter()
+    for f in facts.values():
+        if f.eval_at is not None and p7.contains(local(f.eval_at)) and f.outcome() in ("kept", "score"):  # reached scoring (gate rejections never call Groq)
+            by_model[f.eval_model or "not recorded"] += 1
+    return {
+        "today": _budget_today(now, discovery.get(eval_budget.GROQ_BUDGET_KEY)),
+        "7d": {
+            "runs": len(runs), "calls": sum(r.groq_calls for r in runs), "http_429": sum(r.groq_429 for r in runs),
+            "tokens_primary": sum(r.groq_tokens_primary for r in runs), "tokens_fallback": sum(r.groq_tokens_fallback for r in runs),
+            "prompt_tokens": prompt, "cached_tokens": cached, "completions": sum(r.groq_completions for r in runs),
+            "budget_skipped": sum(r.eval_budget_skipped for r in runs), "deadline_skipped": sum(r.eval_deadline_skipped for r in runs),
+            "boards_skipped_deadline": sum(r.boards_skipped_deadline for r in runs), "alerts_deferred": sum(r.alerts_deferred for r in runs),
+            "runs_with_eval_cut": sum(1 for r in runs if r.eval_cut),
+        },
+        "token_runs": len(token_runs),
+        "tokens_per_completion": round(tokens / completions) if completions else None,
+        "tokens_per_completion_n": completions,
+        "cached_share_pct": round(100 * cached / prompt) if prompt else None,
+        "scored_by_model": dict(sorted(by_model.items())),
+    }
 
 
 def _coverage(now, finished, boards, discovery, established_target, exploration_target) -> dict[str, Any]:  # type: ignore[no-untyped-def]

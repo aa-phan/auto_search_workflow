@@ -947,6 +947,78 @@ class CliAndPilotTests(HarnessCase):
         self.assertEqual((rep["polling"]["runs"], rep["polling"]["unfinished_run_records"]), (1, 1))
 
 
+class GroqSummaryTests(unittest.TestCase):
+    """MEAS-02 / MEAS-03 / P2-03: Groq consumption read from the Runs tokens, the Discovery budget record and the ledger."""
+
+    NOW = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+    M120, M20 = "openai/gpt-oss-120b", "openai/gpt-oss-20b"
+
+    def budget_record(self, day: str = "2026-10-26") -> str:
+        return json.dumps({"day": day, "used": {self.M120: 45210}, "exhausted": [], "budgets": {self.M120: 170000, self.M20: 170000}})
+
+    def test_groq_summary_reads_today_from_the_budget_record_and_7d_from_runs(self) -> None:
+        runs = [
+            run_rec(self.NOW - timedelta(days=1), groq_tokens_primary=3000, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1),
+            run_rec(self.NOW - timedelta(days=2), groq_tokens_primary=800, groq_tokens_fallback=200, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1, eval_budget_skipped=3, eval_cut=True),
+            run_rec(self.NOW - timedelta(days=3)),  # recorded no tokens and no completions
+            run_rec(self.NOW - timedelta(days=4), groq_completions=2),  # answers recorded but no usage figure: not a token run
+            run_rec(self.NOW - timedelta(days=9), groq_tokens_primary=99999, groq_completions=1),  # outside the 7-day window
+        ]
+        g = summary(runs=runs, discovery={"groq_budget": self.budget_record()}, now=self.NOW)["groq"]
+        self.assertEqual(g["today"]["day"], "2026-10-26")
+        self.assertEqual(g["today"]["models"][self.M120], {"used": 45210, "budget": 170000, "exhausted": False})
+        self.assertEqual(g["today"]["models"][self.M20], {"used": 0, "budget": 170000, "exhausted": False})
+        self.assertEqual(g["token_runs"], 2)
+        self.assertEqual(g["tokens_per_completion"], 2000)  # 4000 tokens / 2 completions of the runs that recorded tokens; the 2 untokened answers are not in it
+        self.assertEqual(g["cached_share_pct"], 20)  # 400 of 2000 prompt tokens
+        self.assertEqual((g["7d"]["tokens_primary"], g["7d"]["tokens_fallback"], g["7d"]["completions"]), (3800, 200, 4))
+        self.assertEqual((g["7d"]["budget_skipped"], g["7d"]["runs_with_eval_cut"]), (3, 1))
+
+    def test_groq_summary_counts_scored_evaluations_by_model(self) -> None:
+        at = self.NOW - timedelta(hours=3)
+        ev: list[lg.Event] = []
+        for n, model in enumerate([self.M120, self.M120, self.M20, ""], start=1):
+            e = evaluated(k(n), at)
+            if model:
+                e.detail["model"] = model
+            ev.append(e)
+        ev.append(evaluated(k(9), at, status="Filtered Out", score=0, reject="location"))  # a gate rejection never reached Groq
+        old = evaluated(k(10), self.NOW - timedelta(days=12))
+        old.detail["model"] = self.M20
+        ev.append(old)  # outside the 7-day window
+        g = summary(ev, now=self.NOW)["groq"]
+        self.assertEqual(g["scored_by_model"], {self.M120: 2, self.M20: 1, "not recorded": 1})
+
+    def test_groq_summary_unknown_when_nothing_recorded(self) -> None:
+        g = summary(runs=[run_rec(self.NOW - timedelta(days=1))], now=self.NOW)["groq"]
+        self.assertIsNone(g["today"])
+        self.assertIsNone(g["tokens_per_completion"])
+        self.assertIsNone(g["cached_share_pct"])
+        self.assertEqual(g["token_runs"], 0)
+        bad = summary(discovery={"groq_budget": "not json"}, now=self.NOW)["groq"]
+        self.assertIsNone(bad["today"])  # a hand-edited, unparseable record reads as unknown (T-02-17)
+
+    def test_groq_summary_budget_record_from_an_earlier_utc_day_is_not_todays_usage(self) -> None:
+        g = summary(discovery={"groq_budget": self.budget_record(day="2026-10-25")}, now=self.NOW)["groq"]
+        self.assertEqual(g["today"]["day"], "2026-10-26")
+        self.assertEqual(g["today"]["record_day"], "2026-10-25")
+        self.assertEqual(g["today"]["models"][self.M120]["used"], 0)  # the budget rolled at UTC midnight, exactly as eval_budget does
+
+    def test_dashboard_groq_line_shows_budget_split_and_cuts(self) -> None:
+        runs = [run_rec(self.NOW - timedelta(days=1), groq_tokens_primary=3000, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1, eval_budget_skipped=2, boards_skipped_deadline=4, alerts_deferred=1, eval_cut=True)]
+        ev = [evaluated(k(1), self.NOW - timedelta(hours=2))]
+        ev[0].detail["model"] = self.M120
+        sm = summary(ev, runs=runs, discovery={"groq_budget": self.budget_record()}, now=self.NOW)
+        rows = {r[0].value: r[1].value for r in db.render(sm).rows if len(r) > 1 and r[0].value == "Groq"}
+        text = str(rows["Groq"])
+        for want in ("of 170000", "per call", "budget skips", "evaluation cuts", "poll cuts", "gpt-oss-120b 45210", "2026-10-26"):
+            self.assertIn(want, text)
+        unknown = summary(now=self.NOW)
+        text = str(next(r[1].value for r in db.render(unknown).rows if len(r) > 1 and r[0].value == "Groq"))
+        self.assertIn("n/a", text)
+        self.assertNotIn(" 0 tokens per call", text)  # unknown is never shown as 0
+
+
 class _World:
     """Minimal pipeline world with a store whose dashboard publication always fails."""
 

@@ -122,6 +122,31 @@ def _share(num: int, den: int) -> str:
     return f"{round(100 * num / den)}% of {den}" if den else UNKNOWN
 
 
+def _groq_text(G: dict[str, Any]) -> str:
+    """The Groq SYSTEM line: today's tokens per model against its budget (UTC day), then the 7-day split by model, tokens per
+    call with its n, cached share and the governor counters. Unknown prints n/a, never 0 (metric rule 7)."""
+    t = G["today"]
+    if t is None:
+        today = f"today: {UNKNOWN} (no budget record yet)"
+    else:
+        parts = [
+            f"{m.rsplit('/', 1)[-1]} {v['used']} of {fmt(v['budget'])} tokens{' SPENT' if v['exhausted'] else ''}"
+            for m, v in t["models"].items()
+        ]
+        today = f"today (UTC {t['day']}): " + (" · ".join(parts) if parts else "no model recorded")
+    split = " ".join(f"{m.rsplit('/', 1)[-1]} {n}" for m, n in G["scored_by_model"].items()) or "none"
+    per_call = G["tokens_per_completion"]
+    calls = f"{UNKNOWN} tokens per call" if per_call is None else f"{per_call} tokens per call (n={G['tokens_per_completion_n']})"
+    cached = UNKNOWN if G["cached_share_pct"] is None else f"{G['cached_share_pct']}%"
+    w = G["7d"]
+    cuts = (
+        f"{UNKNOWN} budget skips · {UNKNOWN} evaluation cuts · {UNKNOWN} poll cuts · {UNKNOWN} alerts deferred"
+        if not w["runs"]
+        else f"{w['budget_skipped']} budget skips · {w['runs_with_eval_cut']} evaluation cuts · {w['boards_skipped_deadline']} poll cuts · {w['alerts_deferred']} alerts deferred"
+    )
+    return f"{today} · 7d: scored by {split} · {calls} · cached {cached} of prompt · {cuts}"
+
+
 def render(sm: dict[str, Any]) -> Grid:
     """The page, top to bottom: banner, cards, four charts, one small table, a few key lines, what needs attention.
     Deliberately sparse: detail tables were removed from the page (the numbers behind the charts sit in a hidden
@@ -311,6 +336,7 @@ def render(sm: dict[str, Any]) -> Grid:
         line("Search credits", f"{led['used_locally']} of {led['cap']} used this month · {led['remaining_scheduled']} left for scheduled runs · {D['periods']['7d']['failed_requests_billing_unknown']} failed request(s) with unknown billing (7d)" + (" · LIMIT HIT" if led["limit_hit"] else ""))
     else:
         line("Search credits", "not recorded yet: remaining budget unknown")
+    line("Groq", _groq_text(sm["groq"]))
     rot = D["rotation"]
     line("Discovery", f"{D['unique_eligible_boards_found_by_search']['7d']} eligible boards found (7d) · {D['unique_verified_fresh_search_matches']['7d']} fresh matches via search · " + (UNKNOWN if rot is None else f"rotation at slot {rot['cursor']} of {fmt(rot['total_slots'])}"))
     v_, t_ = C["validation"], C["trials"]
