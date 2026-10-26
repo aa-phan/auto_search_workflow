@@ -1,13 +1,13 @@
 # Requirements: Auto Search Workflow
 
-**Defined:** 2026-10-24 (ingested from repo docs; see `.planning/intel/requirements.md` for the full derivation)
+**Defined:** 2026-10-24 (v1.0, ingested from repo docs; see `.planning/intel/requirements.md`); v2.0 scope added 2026-10-25
 **Core Value:** A relevant job reaches the user within `Fresh_Window_Hours` (12) of its source publication, and nothing of unverified age is ever presented as fresh.
 
 The repo documents are the authority: `SPEC.md` (contract), `DECISIONS.md` (D-01..D-47), `STATUS.md` (what is verified). Each requirement points at them; if one of these entries and those documents disagree, the documents win and this file is corrected.
 
 Verification legend: **live** = checked against production or real services (STATUS.md); **mocked** = offline tests only (`python -m unittest discover -s tests`, 525 tests).
 
-## v1 Requirements (shipped 2026-10-24; pilot week 1 passed 2026-10-15..22)
+## Validated: v1.0 (shipped 2026-10-24; pilot week 1 passed 2026-10-15..22)
 
 ### Polling and identity
 
@@ -50,66 +50,100 @@ Verification legend: **live** = checked against production or real services (STA
 
 - [x] **SEC-01**: Secrets and personal data never read, printed or committed; resume lives only in the Sheet; workflows read-only toward the repo (AGENTS rule 6; D-09, D-37). *Live repo scan. Repository is public (checked 2026-10-24) and no job-search CSV exists anywhere in git history.*
 
-## v2 Candidates (unscheduled; scope chosen by `/gsd-new-milestone`)
+## v2.0 Requirements: Search-substitute volume
 
-Items marked **[gated]** tune scores or add features and are held by AGENTS.md rule 7 / STATUS.md until the evidence items are read; lifting the gate is an owner decision recorded in DECISIONS.md.
+Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker every day; Telegram alerts stay verified-fresh within 12 h. Principle: volume over precision as long as every job is recent. Research: `.planning/research/SUMMARY.md`. The Groq daily token cap bounds the target until MEAS-02 is settled.
 
-### Evidence (read before changing parameters)
+### Measurement and governors
 
-- [ ] **EVID-01**: Read the first weekly rebalance (about 2026-10-29 01:00 UTC): graduations vs the floor, replacements vs the bound, no move on thin evidence (STATUS "Next milestone"; D-30, D-45).
-- [ ] **EVID-02**: Limits at 700 boards: run duration vs the 25 min timeout, Sheets reads per minute, Events growth (STATUS "Next milestone"; CONCERNS "Run duration").
-- [ ] **EVID-03**: Live effect of the broadened Settings: relevant jobs per day, share scored 50+, tracker rows per day against the 20-30 target, leaks of sales / support titles (PILOT_LOG 2026-10-23 21:21).
-- [ ] **EVID-04**: D-47 follow-up: early releases at the weekly cycle, refill, baseline-driven Events growth (D-47).
-- [ ] **EVID-05**: Evaluate the user's `My_Feedback` labels against AI score, title, location, freshness and source, to decide whether the 50 / 70 cut-offs fit (user request 2026-10-24; read-only).
-- [ ] **EVID-06**: Use re-check flip statistics to choose the re-check interval and budget (D-39; CONCERNS "Validation backlog").
+- [ ] **MEAS-01**: The Dashboard shows tracker rows per day, age when found and the My_Feedback mix, with backfilled / recent rows reported separately from verified-fresh rows
+- [ ] **MEAS-02**: The Groq account's real limits and tokens per call are measured and the Groq plan decision is recorded
+- [ ] **MEAS-03**: Each run records Groq tokens used; a daily token budget keeps runs under the Groq limit
+- [ ] **MEAS-04**: Evaluation and polling stop before the 25-minute timeout; verified-fresh jobs are scored first and unscored jobs stay retryable
+- [ ] **MEAS-05**: A job is recorded `alerted` only when a channel accepted the message, and alert failures without an HTTP response are bounded at 5 attempts (CONCERNS bugs 1 and 2)
 
-### Reliability (contract fixes)
+### Evidence
 
-- [ ] **REL-01**: Record `alerted` only when a channel accepted the message (CONCERNS bug 1; SPEC "Delivery"; AGENTS rule 4).
-- [ ] **REL-02**: Bound alert failures without an HTTP response at 5 attempts (CONCERNS bug 2; SPEC "State model").
-- [ ] **REL-03**: Cap free-text fields before HTML escaping instead of cutting the joined message at 4,096 characters (CONCERNS bug 3).
-- [ ] **REL-04**: Second external trigger for the watchdog plus one real test notification (DEPLOY "Watchdog"; owner action).
-- [ ] **REL-05**: Close live-test gaps: Groq 429 fallback, weekly rebalance at 700, message length and entities, replay and dashboard time at 100k+ Events rows (CONCERNS "Test Coverage Gaps").
+- [ ] **EVID-01**: The first weekly rebalance (about 2026-10-29) is read before board cycling changes
+- [ ] **EVID-05**: My_Feedback labels are compared with AI score, title, source and freshness before any score changes
+
+### 72-hour window and backfill
+
+- [ ] **WIN-01**: Relevant jobs published within 72 h (`Tracker_Window_Hours`) enter the tracker; alerts stay within the 12 h window
+- [ ] **WIN-02**: A newly admitted or re-entering board's jobs posted within 72 h are scored and labelled instead of only baselined (amends D-05)
+- [ ] **WIN-03**: Every tracker row shows its publication time, its precision (exact or date only) and a live age; a `Job_Key` column (ATS|board|ID) carries identity
+- [ ] **WIN-04**: Reposted and evergreen jobs (repost key, talent-pool titles) are labelled in the tracker and never alerted
+- [ ] **WIN-05**: Jobs that leave the 72 h window before scoring are closed without a Groq call (`aged_out`)
 
 ### Storage
 
-- [ ] **STOR-01**: Decide and, if approved, build the D-43 storage proposal (Identity tab, Daily counters, archive) with the parallel-run migration, before Events nears the D-03 review point and the 10M-cell limit (D-03, D-43).
+- [ ] **STOR-01**: Baseline and identity-only rows are stored compactly (Identity and Tally tabs, D-43 amended), parity is proven before old rows retire, and Events stays below the D-03 review point
 
-### Features and filtering [gated]
+### Scale
 
-- [ ] **FEAT-01**: Daily Telegram digest (SPEC "Not built"). [gated]
-- [ ] **FILT-03**: Title-gate leaks such as "Community Associate" (CONCERNS bug 5; Settings-level). [gated]
+- [ ] **SCALE-01**: `Max_Active_Boards` rises in measured steps (1,000, then 1,400), each step gated on run duration, Sheets and Groq metrics
 
-### Maintenance
+### Board cycling
 
-- [ ] **MAINT-01**: Split `hunter.py` (1,981 lines) into Groq client, Sheet store and alert modules with no behaviour change; narrow broad exception handlers in the state path (CONCERNS "Tech Debt").
-- [ ] **MAINT-02**: Pin GitHub Actions by commit SHA and lock Python dependency versions; drop unused `pyyaml` (CONCERNS "Supply chain"; STACK.md).
+- [ ] **CYC-01**: The board score includes relevant postings from the last 72 h read from the listing, for waiting boards as well as monitored ones
+- [ ] **CYC-02**: My_Feedback labels influence the board score (bounded weight, minimum label count), run in shadow beside the current score before going live
+- [ ] **CYC-03**: Trials shorten and boards cycle faster once evidence supports it, with the exploration floor protected
+
+### Search
+
+- [ ] **SRCH-01**: The search rotation covers its role and site slots within the 72 h window, weights slots by past yield and includes the new ATS hosts
+
+### New ATS adapters
+
+- [ ] **ADPT-01**: An adapter registry exists; the five existing providers produce byte-identical job keys (golden tests); permanent errors mark a board invalid; each new provider has a robots gate and a circuit breaker
+- [ ] **ADPT-02**: Breezy boards are polled (time-precise publication)
+- [ ] **ADPT-03**: Gem boards are polled (time-precise publication)
+- [ ] **ADPT-04**: Oracle Recruiting Cloud boards are polled (date only)
+- [ ] **ADPT-05**: Workday boards are polled (date only, requisition-ID identity)
+- [ ] **ADPT-06**: Rippling and BambooHR boards are polled via a per-job detail fetch for the date
+- [ ] **ADPT-07**: Date-only jobs enter the tracker when their date falls within 72 h, labelled "date only", and may alert when posted today or yesterday on a board polled within 12 h (existing D-04c rule; user decision 2026-10-25)
 
 ### Governance
 
-- [ ] **GOV-01**: Record open owner decisions in DECISIONS.md: OK for the Groq models (D-16); resume text sent to Groq in every scoring call; SmartRecruiters polling after the pilot (D-38 was scoped to the pilot); repository public with clean history; D-30 values confirmed or changed; D-43 storage decision.
+- [ ] **GOV-01**: Owner decisions are recorded in DECISIONS.md: Groq plan, the D-05 amendment, the rule-7 lift for board-cycling scores only, per-ATS policy (Paycom skipped, iCIMS deferred), SmartRecruiters after the pilot, repository public, date-only alerts
+
+## Future Requirements (deferred)
+
+- **FEAT-01**: Daily Telegram digest
+- **FILT-03**: Further title-gate tuning (Settings-level; can happen any time)
+- **MAINT-01**: Split `hunter.py` without behaviour change
+- **MAINT-02**: Pin GitHub Actions and Python dependencies; drop unused `pyyaml`
+- **REL-03**: Cap free-text fields before HTML escaping in Telegram messages
+- **REL-04**: Second external watchdog trigger and a real test notification
+- **REL-05**: Remaining live-test gaps (Groq 429 fallback, message entities)
+- **EVID-06**: Re-check interval from flip statistics
+- **ADPT-08**: iCIMS, Recruitee, JazzHR adapters
+- **SCALE-02**: Polling cadence tiers; closed-job marking in the tracker
 
 ## Out of Scope
 
-From SPEC.md "Out of scope for now" unless an owner decision changes it:
-
 | Feature | Reason |
 |---------|--------|
-| Tuning scores | AGENTS.md rule 7 gate; needs EVID-05 evidence and an owner decision first |
-| Additional ATSs (Workday, BambooHR, ...) | SPEC scope; inventories list them but no adapters |
-| Non-US markets | Hard gate excludes them by design (D-08) |
-| Email / SMS, web UI | The Sheet and Telegram are the only interfaces (SPEC "Goal") |
-| Parity with job boards | SPEC "Honest limits": only polled boards have the hourly guarantee |
+| Paycom adapter | robots.txt `Disallow: /` covers the listing API |
+| Teamtailor, Personio, JOIN, SuccessFactors adapters | Little US volume, bot challenge or HTML-only on customer domains (research/STACK.md) |
+| LinkedIn / Indeed scraping | Terms of service; aggregator dates are not publication time |
+| Lowering Min_Alert_Score or the tracker threshold to hit the number | Rule 7: needs EVID-05 evidence and an owner decision |
+| External database | Not needed while the compact Sheet design holds; revisit only on a named trigger (Identity > ~25 MB, load > ~60 s, double-writer incident) |
+| Non-US markets, email / SMS, web UI | SPEC scope |
+| Alerting on jobs not verified fresh within 12 h | Core value (date-only jobs alert only through the existing D-04c rule) |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| POLL-01..03, FRESH-01..02, DLVR-01..02, FILT-01..02, BRD-01..04, OPS-01, OPS-03, SEC-01 | v1.0 (pre-GSD work, Phase 1) | Validated (live) |
-| STATE-01, STATE-02, BRD-05, OPS-02 | v1.0 | Validated (mocked only) |
-| EVID-01..06, REL-01..05, STOR-01, FEAT-01, FILT-03, MAINT-01..02, GOV-01 | v2 (to be scoped) | Candidate |
+| (filled by the roadmap) | | |
 
-**Coverage:** v1 20 validated; v2 17 candidates, 0 mapped to phases yet.
+| v1.0 validated | Status |
+|----------------|--------|
+| POLL-01..03, FRESH-01..02, DLVR-01..02, FILT-01..02, BRD-01..04, OPS-01, OPS-03, SEC-01 | Validated (live) |
+| STATE-01, STATE-02, BRD-05, OPS-02 | Validated (mocked only) |
+
+**Coverage:** v2.0 requirements: 29 total; mapped to phases: 0 (pending roadmap).
 
 ---
-*Requirements defined: 2026-10-24 by /gsd-ingest-docs (merge)*
+*Requirements defined: 2026-10-24 (v1.0); v2.0 scope 2026-10-25*
