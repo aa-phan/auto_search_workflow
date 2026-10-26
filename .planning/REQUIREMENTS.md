@@ -56,11 +56,11 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 
 ### Measurement and governors
 
-- [ ] **MEAS-01**: The Dashboard shows tracker rows per day, age when found and the My_Feedback mix, with backfilled / recent rows reported separately from verified-fresh rows
+- [x] **MEAS-01**: The Dashboard shows tracker rows per day, age when found and the My_Feedback mix, with backfilled / recent rows reported separately from verified-fresh rows
 - [ ] **MEAS-02**: The Groq account's real limits and tokens per call are measured and the Groq plan decision is recorded
-- [ ] **MEAS-03**: Each run records Groq tokens used; a daily token budget keeps runs under the Groq limit
-- [ ] **MEAS-04**: Evaluation and polling stop before the 25-minute timeout; verified-fresh jobs are scored first and unscored jobs stay retryable
-- [ ] **MEAS-05**: A job is recorded `alerted` only when a channel accepted the message, and alert failures without an HTTP response are bounded at 5 attempts (CONCERNS bugs 1 and 2)
+- [x] **MEAS-03**: Each run records Groq tokens used; a daily token budget keeps runs under the Groq limit
+- [x] **MEAS-04**: Evaluation and polling stop before the 25-minute timeout; verified-fresh jobs are scored first and unscored jobs stay retryable
+- [x] **MEAS-05**: A job is recorded `alerted` only when a channel accepted the message, and alert failures without an HTTP response are bounded at 5 attempts (CONCERNS bugs 1 and 2)
 
 ### Evidence
 
@@ -136,11 +136,11 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MEAS-01 | Phase 2 | Pending |
+| MEAS-01 | Phase 2 | Complete |
 | MEAS-02 | Phase 2 | Pending |
-| MEAS-03 | Phase 2 | Pending |
-| MEAS-04 | Phase 2 | Pending |
-| MEAS-05 | Phase 2 | Pending |
+| MEAS-03 | Phase 2 | Complete |
+| MEAS-04 | Phase 2 | Complete |
+| MEAS-05 | Phase 2 | Complete |
 | GOV-01 | Phase 2 | Pending |
 | STOR-01 | Phase 3 | Pending |
 | WIN-01 | Phase 4 | Pending |

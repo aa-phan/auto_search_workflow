@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-06-PLAN.md
-last_updated: "2026-10-26T18:22:39.154Z"
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-10-26T19:17:30.682Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: c484df9b4df43e5a5882c7a10c62a141d655edcc
+state_head: f4a989bf1ff61a881c1f724cd20db8f108520338
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 7
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 7 of 9
+Plan: 8 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -60,6 +60,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P04 | 7 min | 3 tasks | 9 files |
 | Phase 02 P05 | 5 min | 3 tasks | 5 files |
 | Phase 02 P06 | 12 min | 2 tasks | 7 files |
+| Phase 02 P07 | 1h | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: D-52: the NEEDS ATTENTION row for ledger-kept jobs missing from the tracker is applied literally (P2-12); the 20-30 band is two constant LINE series with BAND_LINES_STACK as the switch — Shows whenever the all-time mismatch is not 0, so the 2 jobs flagged on 2026-10-25 stay visible until resolved; Sheets stacking of LINE series is unverified (A7), checked live in plan 02-07
 - [Phase 02]: 02-06: scored_by_model counts only evaluations that reached scoring; Groq budget record from an earlier UTC day shows 0 used today — gate rejections never call Groq; eval_budget rolls the budget at UTC midnight
 - [Phase 02]: 02-06: public pilot log prints only x-ratelimit-* values and model ids matching strict allow patterns — T-02-16: a damaged or hand-edited Groq_Limits record must not leak text into a public log
+- [Phase 02]: 02-07: Phase 2 deployed 2026-10-26 18:25 UTC (fc197c1); first run success with no cut, pilot report and one delivery test (telegram_sent true) live; Sheet render, Telegram arrival and the missing tracker row greenhouse|nadiacare|4459849009 are owner checks
 
 ### Pending Todos
 
@@ -115,6 +117,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T18:22:39.138Z
-Stopped at: Completed 02-06-PLAN.md
+Last session: 2026-10-26T19:17:30.667Z
+Stopped at: Completed 02-07-PLAN.md
 Resume file: None
