@@ -107,7 +107,7 @@ Plans:
 **Goal**: A relevant job published within the last 72 hours reaches the tracker with its real age, including the recent jobs of a newly admitted or re-entering board, without being presented as verified-fresh and without delaying any real alert.
 **Depends on**: Phase 2, Phase 3
 **Requirements**: WIN-01, WIN-02, WIN-03, WIN-04, WIN-05
-**Entry gates**: D-05 amendment (D-48) recorded and the Groq plan known (Phase 2); storage parity accepted (Phase 3). SPEC "Baselining" and "State model", DECISIONS and STATUS change in the same change as the code; PILOT_LOG entry for the deployment (it changes the rows per day measurement).
+**Entry gates**: D-05 amendment recorded under its own D-number (listed as pending in D-48) and the Groq plan known (Phase 2); storage parity accepted (Phase 3). SPEC "Baselining" and "State model", DECISIONS and STATUS change in the same change as the code; PILOT_LOG entry for the deployment (it changes the rows per day measurement).
 **Notes**: No new freshness class: backfilled jobs are `RECENT` with a backfill marker, a stored publication time and precision, and a separate reporting cohort (research reconciliation). Backfill never starves live alerts: verified-fresh jobs are scored first and backfill takes a capped share of the daily token budget (Phase 2). Boundary tests at 71, 72 and 73 hours and for board re-entry.
 **Success Criteria** (what must be TRUE):
   1. A relevant job published 13 to 72 hours ago (by its source publication time) appears in the Job Tracker (`Tracker_Window_Hours`, default 72), while a Telegram alert is still sent only for a verified-fresh job inside the 12-hour window.
@@ -176,7 +176,7 @@ Plans:
 
 ## Owner Decisions (GOV-01) and When Each Is Needed
 
-All are surfaced in Phase 2. Each is recorded in DECISIONS.md before the work it gates.
+All are surfaced in Phase 2. Each is recorded in DECISIONS.md before the work it gates. The list, with each item's state, is DECISIONS.md D-48 (2026-10-26).
 
 | Decision | Recorded before | Default if unanswered |
 |----------|-----------------|-----------------------|
