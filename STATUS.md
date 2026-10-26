@@ -4,7 +4,7 @@ Last updated 2026-10-26 (Phase 2 governors and measurement built and verified of
 
 ## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
 
-**Built, verified offline only (mocked). Nothing in this section has been verified live yet.** Run `.venv/bin/python -m unittest discover -s tests` for the current count: **620 tests pass offline** at the end of plan 02-06 (612 at the end of 02-05; 520 offline tests were last recorded before this phase).
+**Built and verified offline (mocked); deployed to production 2026-10-26 18:25 UTC (fc197c1). Live evidence is in "Phase 2 live verification" below; everything not listed there as live stays mocked.** Run `.venv/bin/python -m unittest discover -s tests` for the current count: **620 tests pass offline** at the end of plan 02-06 (612 at the end of 02-05; 520 offline tests were last recorded before this phase).
 
 - **D-49 alert recording:** `alerted` is written only when a channel accepted the message; an alert no channel accepted stays pending and the run is `degraded`; sends without an HTTP response are bounded at 5 attempts; secrets are redacted from everything stored or logged; Telegram free text is capped before escaping.
 - **D-50 Groq daily token budget per model (MEAS-03):** a persisted UTC-day budget per model (default 170,000, provisional) with the last 20% reserved for verified-fresh jobs, fallback from the primary to the second model, budget-skipped jobs left pending with nothing recorded, and seven new Runs columns for tokens, cached tokens, completions and the `x-ratelimit-*` response header values.
@@ -20,7 +20,7 @@ Last updated 2026-10-26 (Phase 2 governors and measurement built and verified of
 | Deadlines and poll order (D-51): process-start anchor, poll / evaluation / alert cutoffs, Groq client deferral at the deadline, longest-unpolled first | pass | **mocked** (injected monotonic clock; no real run was cut) |
 | Yield view (D-52): found-day buckets, local midnight, age buckets, feedback per cohort, reconciliation, four charts with fixed ids | pass | **mocked** (fake spreadsheet, requests checked offline; not rendered) |
 | Groq read-outs: Dashboard Groq line, pilot limits-audit lines, counts-only public log | pass | **mocked** (hand-built Runs, ledger and Discovery records) |
-| Dashboard render in the real Sheet (band lines flat at 20 and 30, new Groq line, four charts, `BAND_LINES_STACK` assumption A7), real `Runs` rows with the new columns, Groq console figures, delivery test | **not verified live yet** | plan 02-07 / 02-08 |
+| Dashboard render in the real Sheet (band lines flat at 20 and 30, new Groq line, four charts, `BAND_LINES_STACK` assumption A7), Groq console figures | **not verified live yet** (owner check pending / plan 02-08); the `Runs` columns and the delivery test were verified live, see below | plan 02-07 / 02-08 |
 
 **Mutation checks (each applied, observed failing, then reverted):** 27 across plans 02-02..02-06 (5 on alert recording, bounding and redaction; 7 on budget, reserve, pre-check, persistence, daily-limit 429 and charging; 7 on deadlines, poll order and the process-start anchor; 5 on the yield view; 3 here: counting runs without recorded tokens in tokens per call fails the Dashboard 7-day test, removing the `x-ratelimit-*` filter fails the counts-only log test, and counting every timed run as a token run fails both audit tests). Details are in the 02-02..02-06 SUMMARY files.
 
@@ -29,7 +29,33 @@ Last updated 2026-10-26 (Phase 2 governors and measurement built and verified of
 - **The Settings rows `Groq_Daily_Token_Budget` and `Groq_Fallback_Daily_Token_Budget` are optional** and absent from the live Settings tab; the run note names the value in force.
 - **The Discovery tab gains the key `groq_budget`** (the persisted per-model budget for the UTC day).
 - **SmartRecruiters is still unparked** until plan 02-09 deploys D-48's decision.
-- Not yet deployed: none of D-49..D-52 runs in production until the owner deploys them (plan 02-07 / 02-08).
+- Deployed 2026-10-26 18:25 UTC (fc197c1): D-49..D-52 run in production from the 19:00 UTC run (see "Phase 2 live verification"). The Groq console figures (plan 02-08) are still to be read.
+
+## Phase 2 live verification (2026-10-26)
+
+Pushed `main` (fc197c1) at 2026-10-26 18:25 UTC on the owner's choice `deploy-with-delivery-test`. Everything marked **live** below was read from public GitHub Actions logs (`gh`) of runs on fc197c1; the agent has no Sheet credentials, so anything inside the Sheet is an **owner check pending**. Log excerpts below are counts, run ids, job keys and setting names only; the three logs were scanned for secret patterns (0 matches).
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| First production run on fc197c1 (run 40382764588, started 19:00:09 UTC, finished about 19:12:50) | workflow `success`; `Run: boards 699 ok / 1 failed of 700, new jobs 92 (84 verified fresh), evaluated 11, alerts 0 sent / 0 failed`; no poll, evaluation or alert cutoff note, no budget-reached note, no "no alert channel" note; the run took about 12.5 min, inside the 15 min poll cutoff | **live** (public log) |
+| Run outcome and code version (pilot report 40384832233) | `workflow runs by outcome: 'ok': 206`, no unfinished run-start record; `Code_Version` fc197c17 recorded for 1 run from 2026-10-26T19:00:30Z, so the newest `Runs` row exists with the new code | **live** (read by the report from the Sheet; the cell values themselves are an owner check) |
+| Groq daily budget (D-50) value in force | log line `groq budget 2026-10-26 UTC: openai/gpt-oss-120b 30826/170000, openai/gpt-oss-20b 0/170000 (last 20% for verified-fresh jobs)`: the persisted per-model budget works and the day's tokens are being counted | **live** |
+| Groq budget note with its source ("... per UTC day from <source>") | **not in the public log**: `hunter.groq_budget_note` is appended to the run's notes after the settings notes are logged, so it is written to `Runs.Notes` only. Value 170000 / 170000 equals the code default, and the Settings rows are known to be absent, so the source is the default by inference | not verified live (owner check: `Runs.Notes` of the 19:00 run) |
+| Cut and skip counters (D-51, D-49, D-50) | pilot report: `budget skips 0, deadline skips 0, runs with an evaluation cut 0, boards cut by the poll deadline 0, alerts deferred 0` over 206 timed runs (runs before the new columns count 0); 1 run has the columns, so this is "nothing was cut in the one run on the new code", not a test of the cutoffs | **live**, but the governors never fired: cutoffs, budget skip, fallback and deferral stay **mocked** |
+| Pilot report Groq lines (run 40384832233) | `Groq calls 307 (HTTP 429: 0)`; `tokens: primary 30826, fallback 0 over 1 of 206 timed runs that recorded tokens; tokens per scoring call 3082.6 (n=10); completions per day 1.4; cached 19% of prompt tokens`; `Groq tokens per UTC day: 2026-10-26 primary 30826 / fallback 0`; the latest `x-ratelimit-*` header values for gpt-oss-120b are printed (requests limit 1000, remaining 990; tokens limit 8000, remaining 4841). `n=10` is one run's scored jobs: **not enough for a tokens-per-call figure**, a day or more of runs is needed (plan 02-08) | **live** |
+| Reconciliation (same report) | tracker 97 rows = 2 labelled fixtures + 95 real rows (95 distinct jobs); 55 ledger-kept in the window, 54 in the tracker; **1 ledger-kept job missing from the tracker** (STATUS recorded 2 on 2026-10-25 without their keys). Missing key: `greenhouse|nadiacare|4459849009`, evaluated 2026-10-23T02:00:32Z. `1 tracker row(s) were placed by their exact stored URL` (the new diagnostic fallback), which probably accounts for the drop from 2 to 1; not confirmed because the earlier keys were not saved | **live**; whether the row was deleted by hand is an owner question |
+| Delivery test (run 40385017743, 19:15 UTC) | workflow `success`; JSON line `scored: 90, status: To Apply, tracker_row_appended: true, telegram_sent: true, label: TEST FIXTURE (not a real job)`. The send path accepted the message (HTTP-level success is what `telegram_sent` records); **whether the message arrived uncut is an owner check**. The fixture also added a third labelled test row to the tracker (reports exclude fixtures) | **live** for `telegram_sent`; arrival and text cut: owner check pending |
+| Pilot report run itself (read-only) | run 40384832233 at 19:13 UTC, `success`; no secret pattern in its log | **live** |
+
+**Owner checks in the real Sheet (pending; the agent cannot see the Sheet):**
+1. Dashboard tab: first chart "Tracker rows per day · target 20-30", bars in three colours, two dashed amber lines flat at 20 and 30 (if the upper line sits near 50 or rides on the bars, say "band stacked": the fix is the `BAND_LINES_STACK` switch in `dashboard.py`); second chart "How old jobs were when found · 7d"; a "TRACKER ROWS · 7 DAYS" table with Would apply / Maybe / Irrelevant / Unlabelled per cohort; the Groq SYSTEM line.
+2. Runs tab: the newest row (19:00 UTC run, Code_Version fc197c17...) has values under `Groq_Tokens_Primary` .. `Alerts_Deferred` (zeros are fine where nothing was scored; the header should now be 77 columns), and its Notes contain the "Groq daily token budget ... from ..." note.
+3. NEEDS ATTENTION: "tracker missing kept jobs" should name `greenhouse|nadiacare|4459849009`. Say whether you deleted that row by hand (keep it deleted, restore it, or decide a different rule).
+4. Telegram: the labelled TEST FIXTURE message arrived and no line is cut off.
+
+**Not verified live and still mocked:** the 15 / 20 / 22 minute cutoffs, budget-skip and fallback behaviour, deferral of an unsent alert, the five-attempt bound without an HTTP response, and the Dashboard render (until you confirm item 1). The first weekly rebalance is due about 2026-10-29 01:00 UTC and is unchanged by this deployment.
+
+**Observations to carry forward (not acted on, AGENTS rule 7):** Events rows are now 189,830 (the D-03 200k review point is near, plan 02-08); the live Groq headers show `x-ratelimit-limit-tokens=8000` for gpt-oss-120b, which is a per-minute figure the budget does not govern; and the budget source note not reaching the public log means a future "which budget is in force" check needs the Sheet.
 
 ## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
 
