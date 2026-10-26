@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-10-26T18:08:01.707Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-10-26T18:15:41.641Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 7bb68411ff4cc49782f62394ac39c3fa00080de6
+state_head: ab6cf0fe1b1ba01714a9e4aac10fa86c73c4a92c
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 4
+  completed_plans: 5
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -58,6 +58,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P02 | 7 min | 3 tasks | 8 files |
 | Phase 02 P03 | 7 min | 3 tasks | 10 files |
 | Phase 02 P04 | 7 min | 3 tasks | 9 files |
+| Phase 02 P05 | 5 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: D-50: per-model UTC-day Groq token budget (170000 default, provisional) with a 20% verified-fresh reserve; budget skips record nothing and use no attempt — Groq daily token limit is not in any header; budget-driven fallback accepted by the owner as the D-16 OK; scoring rule, prompt and Min_Alert_Score unchanged (AGENTS rule 7)
 - [Phase 02]: D-51: run deadlines from process start (poll 15, Groq 20, alerts 22 min) and longest-unpolled-first polling — Keeps every run inside the 25-minute workflow timeout; poll and alert cuts degrade the run, an evaluation cut leaves it ok; nothing is recorded against a cut board, job or alert
 - [Phase 02]: Alert cutoff cut makes the run degraded (discretion choice, not part of P2-07) — A fresh alert waiting another hour deserves the owner's attention; keep EVAL_CUTOFF_MINUTES below 22
+- [Phase 02]: D-52: day of a tracker row comes from the ledger evaluated instant in the display time zone, not the user-formatted Date_Found text — Date_Found is display text Sheets may re-render; the evaluated event is the same moment it was written. Flagged for the owner's acceptance
+- [Phase 02]: D-52: the NEEDS ATTENTION row for ledger-kept jobs missing from the tracker is applied literally (P2-12); the 20-30 band is two constant LINE series with BAND_LINES_STACK as the switch — Shows whenever the all-time mismatch is not 0, so the 2 jobs flagged on 2026-10-25 stay visible until resolved; Sheets stacking of LINE series is unverified (A7), checked live in plan 02-07
 
 ### Pending Todos
 
@@ -109,6 +112,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T18:08:01.692Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-10-26T18:15:41.626Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
