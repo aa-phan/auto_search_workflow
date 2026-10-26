@@ -6,7 +6,7 @@ Ordering rules that protect correctness (SPEC.md "State model"):
   1. `seen` events are written BEFORE the Boards registry is saved (a baselined board must
      always have its baseline events, or its backlog would later look new).
   2. The tracker row is appended BEFORE the `evaluated` event, guarded by a tracker-key check.
-  3. `alerted` is written only after the alert channel accepted the message.
+  3. `alerted` is written only after a channel accepted the message (send_alert returned True).
 """
 
 from __future__ import annotations
@@ -593,12 +593,19 @@ def run_cycle(d: Deps) -> RunRecord:
                 if getattr(getattr(exc, "response", None), "status_code", 500) < 500 and getattr(getattr(exc, "response", None), "status_code", 429) != 429:
                     pending_events += lg.failure_events(st.key, lg.STAGE_ALERT, str(exc), st, now, run.run_id)
                 continue
+            if sent is not True:
+                # No channel accepted the message (none configured): that is configuration, not a send failure,
+                # so nothing is recorded and no attempt is used; the job stays alert-pending (D-49, AGENTS rule 4).
+                run.alerts_failed += 1
+                run.notes += "no alert channel configured or accepted the message; " if "no alert channel" not in run.notes else ""
+                log.warning("No alert channel accepted the message for %s; it stays pending", st.key)
+                continue
             pub, _ = fr.parse_instant(st.last_published)
             lag = _minutes(now - pub) if pub else None
-            pending_events.append(lg.Event(lg.stamp(now), st.key, lg.ALERTED, detail={"channel": "telegram" if sent else "none", "lag_min": lag, "late": bool(late), "run": run.run_id}))
+            pending_events.append(lg.Event(lg.stamp(now), st.key, lg.ALERTED, detail={"channel": "telegram", "lag_min": lag, "late": bool(late), "run": run.run_id}))
             st.alerted = True
-            run.alerts_sent += bool(sent)
-            if sent and lag is not None and (run.max_alert_lag_min is None or lag > run.max_alert_lag_min):
+            run.alerts_sent += 1
+            if lag is not None and (run.max_alert_lag_min is None or lag > run.max_alert_lag_min):
                 run.max_alert_lag_min = lag
             write()  # record the delivery immediately: shrinks the duplicate-alert window
         write()

@@ -73,6 +73,8 @@ class Harness:
         self.tracked_keys: set[str] = set()  # persists across runs, like the real tracker tab
         self.alerts: list[dict[str, Any]] = []
         self.alert_error: Exception | None = None
+        self.alert_result: bool = True  # what send_alert returns when no error is set: False = no channel accepted the message
+        self.alert_calls = 0
         self.tracker_error: Exception | None = None
         self.plan: dict[str, list[pl.EvalOutcome]] = {}
         self.calls: collections.Counter[str] = collections.Counter()
@@ -97,10 +99,12 @@ class Harness:
         self.tracker.extend(payloads)
 
     def send_alert(self, payload: dict[str, Any]) -> bool:
+        self.alert_calls += 1
         if self.alert_error:
             raise self.alert_error
-        self.alerts.append(payload)
-        return True
+        if self.alert_result:
+            self.alerts.append(payload)
+        return self.alert_result
 
     def run(self, minutes_later: int = 0, seeds: list[bd.BoardId] | None = None, **kw: Any) -> st_mod.RunRecord:
         self.now = self.now + timedelta(minutes=minutes_later)
@@ -134,6 +138,12 @@ class HarnessCase(unittest.TestCase):
         """First poll of the board (baselining), then move 60 minutes on."""
         self.w.listings[self.board.key] = list(jobs)
         self.w.run(seeds=[self.board])
+
+    def fresh_setup(self) -> str:
+        """Baseline a board, then list one job published 10 minutes before the next run; returns its key."""
+        self.baseline(job("acme", "1", published=ago(days=30)))
+        self.w.listings[self.board.key].append(job("acme", "7", published=ago(minutes=10, base=T0 + timedelta(minutes=60))))
+        return self.key("7")
 
 
 # --------------------------------------------------------------------------- freshness
@@ -384,11 +394,6 @@ class FreshnessRoutingTests(HarnessCase):
 
 
 class RetryTests(HarnessCase):
-    def fresh_setup(self) -> str:
-        self.baseline(job("acme", "1", published=ago(days=30)))
-        self.w.listings[self.board.key].append(job("acme", "7", published=ago(minutes=10, base=T0 + timedelta(minutes=60))))
-        return self.key("7")
-
     def test_transient_scoring_failure_is_retried_without_using_attempts(self) -> None:
         k = self.fresh_setup()
         self.w.plan[k] = [pl.EvalOutcome("transient", message="groq 429")] * 3 + [done()]
@@ -494,6 +499,25 @@ class RetryTests(HarnessCase):
         with self.assertRaises(OSError):
             self.w.run(minutes_later=60)
         self.assertTrue(self.w.state.load_runs()[-1].notes)  # the run record exists and says what happened
+
+
+class AlertRecordingTests(HarnessCase):
+    """`alerted` means a channel accepted the message (D-49); failures are recorded, bounded and redacted."""
+
+    def test_alert_not_accepted_by_any_channel_is_not_recorded_alerted(self) -> None:
+        k = self.fresh_setup()
+        self.w.alert_result = False  # no channel configured or accepted the message
+        run = self.w.run(minutes_later=60)
+        self.assertEqual((run.alerts_failed, run.alerts_sent, run.outcome), (1, 0, "degraded"))
+        self.assertIn("no alert channel configured or accepted the message", run.notes)
+        self.assertEqual((self.w.events(k, lg.ALERTED), self.w.events(k, lg.ERROR), self.w.alerts), ([], [], []))
+        self.w.alert_result = True  # a working channel on the next run delivers it exactly once
+        self.w.run(minutes_later=60)
+        alerted = self.w.events(k, lg.ALERTED)
+        self.assertEqual((len(alerted), alerted[0].detail["channel"], len(self.w.alerts)), (1, "telegram", 1))
+        for _ in range(2):
+            self.w.run(minutes_later=60)
+        self.assertEqual((len(self.w.events(k, lg.ALERTED)), len(self.w.alerts)), (1, 1))
 
 
 class BoardHealthTests(HarnessCase):
