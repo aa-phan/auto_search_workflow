@@ -6,10 +6,10 @@ current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
 stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-10-26T19:26:04.960Z"
+last_updated: "2026-10-26T19:26:59.840Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 6e2012f2e7e6e47c9f847ebbfce7abfe96812d44
+state_head: 1d5e47c8affb7e8e665c5e74b17bf34c82d6fea7
 progress:
   total_phases: 6
   completed_phases: 1
@@ -83,6 +83,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: 02-06: scored_by_model counts only evaluations that reached scoring; Groq budget record from an earlier UTC day shows 0 used today — gate rejections never call Groq; eval_budget rolls the budget at UTC midnight
 - [Phase 02]: 02-06: public pilot log prints only x-ratelimit-* values and model ids matching strict allow patterns — T-02-16: a damaged or hand-edited Groq_Limits record must not leak text into a public log
 - [Phase 02]: 02-07: Phase 2 deployed 2026-10-26 18:25 UTC (fc197c1); first run success with no cut, pilot report and one delivery test (telegram_sent true) live; Sheet render, Telegram arrival and the missing tracker row greenhouse|nadiacare|4459849009 are owner checks
+- [Phase 02]: Owner-read Groq console figures (read 2026-10-26, for 02-08 Task 3; not yet recorded as D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer still pending at 02-08 Task 2.
 
 ### Pending Todos
 
