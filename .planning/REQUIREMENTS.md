@@ -136,14 +136,41 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (filled by the roadmap) | | |
+| MEAS-01 | Phase 2 | Pending |
+| MEAS-02 | Phase 2 | Pending |
+| MEAS-03 | Phase 2 | Pending |
+| MEAS-04 | Phase 2 | Pending |
+| MEAS-05 | Phase 2 | Pending |
+| GOV-01 | Phase 2 | Pending |
+| STOR-01 | Phase 3 | Pending |
+| WIN-01 | Phase 4 | Pending |
+| WIN-02 | Phase 4 | Pending |
+| WIN-03 | Phase 4 | Pending |
+| WIN-04 | Phase 4 | Pending |
+| WIN-05 | Phase 4 | Pending |
+| EVID-01 | Phase 5 | Pending |
+| EVID-05 | Phase 5 | Pending |
+| CYC-01 | Phase 5 | Pending |
+| CYC-02 | Phase 5 | Pending |
+| CYC-03 | Phase 5 | Pending |
+| SCALE-01 | Phase 5 | Pending |
+| ADPT-01 | Phase 6 | Pending |
+| ADPT-02 | Phase 6 | Pending |
+| ADPT-03 | Phase 6 | Pending |
+| ADPT-04 | Phase 6 | Pending |
+| ADPT-07 | Phase 6 | Pending |
+| ADPT-05 | Phase 7 | Pending |
+| ADPT-06 | Phase 7 | Pending |
+| SRCH-01 | Phase 7 | Pending |
+
+GOV-01 is mapped to Phase 2, where every owner decision is surfaced and the first ones are recorded; the later ones (D-05 amendment, rule-7 lift, per-ATS policy per adapter) are entry gates recorded in DECISIONS.md before the Phase 4, 5, 6 and 7 work they gate (decision table in ROADMAP.md).
 
 | v1.0 validated | Status |
 |----------------|--------|
 | POLL-01..03, FRESH-01..02, DLVR-01..02, FILT-01..02, BRD-01..04, OPS-01, OPS-03, SEC-01 | Validated (live) |
 | STATE-01, STATE-02, BRD-05, OPS-02 | Validated (mocked only) |
 
-**Coverage:** v2.0 requirements: 26 total; mapped to phases: 0 (pending roadmap).
+**Coverage:** v2.0 requirements: 26 total; mapped to phases: 26 (Phases 2-7, each requirement in exactly one phase); unmapped: 0.
 
 ---
 *Requirements defined: 2026-10-24 (v1.0); v2.0 scope 2026-10-25*
