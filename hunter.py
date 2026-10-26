@@ -883,9 +883,11 @@ class TokenBudget:
             self.events.popleft()
         return sum(t for _, t in self.events)
 
-    def wait(self, tokens: int) -> None:
+    def wait(self, tokens: int, deadline: float | None = None) -> None:
         while True:
             now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise GroqDeferred("deadline")  # the run's evaluation cutoff: stop waiting, the job waits for the next run (D-51)
             if not self.events or self._used(now) + tokens <= self.tpm * 0.9:
                 return
             time.sleep(min(10.0, max(0.5, self.events[0][0] + 60 - now + 0.1)))
@@ -941,6 +943,7 @@ class GroqClient:
         }
         self._last_call = 0.0
         self._fallback_until = 0.0
+        self.deadline: float | None = None  # absolute time.monotonic() value of the run's evaluation cutoff (None = no deadline, D-51)
         self.unavailable: set[str] = set()  # models Groq reported as not existing / not accessible
 
     def order(self) -> list[str]:
@@ -958,6 +961,11 @@ class GroqClient:
         if model is None:
             raise GroqDeferred("budget")
         return model
+
+    def _check_deadline(self, upcoming_sleep: float = 0.0) -> None:
+        """Stop before a request or a backoff sleep that would end at or past the run's evaluation cutoff (D-51)."""
+        if self.deadline is not None and time.monotonic() + upcoming_sleep >= self.deadline:
+            raise GroqDeferred("deadline")
 
     def _pace(self) -> None:
         wait = self._last_call + self.cfg.llm_interval - time.monotonic()
@@ -1007,8 +1015,9 @@ class GroqClient:
         est = sum(len(m["content"]) for m in messages) // 3 + MAX_OUTPUT_TOKENS
         parse_failures = 0
         for attempt in range(GROQ_ATTEMPTS):
+            self._check_deadline()
             model = self._model(fresh)
-            self.budgets[model].wait(est)
+            self.budgets[model].wait(est, deadline=self.deadline)
             self._pace()
             try:
                 resp = self.http.post(
@@ -1026,6 +1035,7 @@ class GroqClient:
             except requests.RequestException as exc:
                 METER.add("groq_calls")
                 log.warning("Groq request error (%s): %s", model, exc)
+                self._check_deadline(min(30, 3 * 2**attempt))
                 time.sleep(min(30, 3 * 2**attempt))
                 continue
             METER.add("groq_calls")
@@ -1044,6 +1054,7 @@ class GroqClient:
                     continue
                 delay = min(60.0, _retry_after(resp) or 5 * 2**attempt)
                 log.warning("Groq 429 on %s; backing off %.0fs", model, delay)
+                self._check_deadline(delay)
                 time.sleep(delay)
                 continue
             if code in {401, 403}:
@@ -1059,6 +1070,7 @@ class GroqClient:
                 continue
             self._learn_limit(model, resp)
             if code >= 500:
+                self._check_deadline(min(30, 3 * 2**attempt))
                 time.sleep(min(30, 3 * 2**attempt))
                 continue
             if code >= 400:

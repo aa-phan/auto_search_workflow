@@ -621,7 +621,12 @@ def run_cycle(d: Deps) -> RunRecord:
         todo = sorted((s for s in states.values() if lg.needs_evaluation(s)), key=lg.priority)
         if len(todo) > d.max_jobs:
             log.info("%d jobs awaiting evaluation; evaluating the %d highest priority", len(todo), d.max_jobs)
-        for i, st in enumerate(todo[: d.max_jobs], 1):
+        batch = todo[: d.max_jobs]
+        for i, st in enumerate(batch, 1):
+            if d.clock() >= eval_deadline:  # the evaluation cutoff: this job and the rest wait, nothing recorded, no attempt (D-51)
+                run.eval_cut = True
+                run.eval_deadline_skipped += len(batch) - (i - 1)
+                break
             if d.can_score is not None and not d.can_score(st):
                 run.eval_budget_skipped += 1  # the daily Groq budget is spent for this job: it waits, nothing recorded, no attempt (D-50)
                 continue
@@ -638,8 +643,13 @@ def run_cycle(d: Deps) -> RunRecord:
                 pending_events.append(lg.Event(lg.stamp(now), st.key, lg.EVALUATED, st.freshness, detail=payload))
                 run.evaluated += 1
                 states[st.key].evaluated, states[st.key].evaluated_time = payload, lg.stamp(now)
+            elif out.kind == "deferred" and out.message == "deadline":
+                # The Groq client stopped at the evaluation cutoff: same as the check above (nothing recorded, no attempt, not a failure).
+                run.eval_cut = True
+                run.eval_deadline_skipped += len(batch) - (i - 1)
+                break
             elif out.kind == "deferred":
-                run.eval_budget_skipped += 1  # budget or deadline reached mid-job: nothing recorded, no attempt, not a failure
+                run.eval_budget_skipped += 1  # the daily budget ran out mid-job: nothing recorded, no attempt, not a failure
             elif out.kind == "transient":
                 # A temporary outage records nothing: it must neither mark the job done nor
                 # use up its bounded retry attempts. The next run simply tries again.
@@ -655,6 +665,10 @@ def run_cycle(d: Deps) -> RunRecord:
                 save_budget()
         write()
         save_budget()
+        if run.eval_cut:
+            minutes = round(d.eval_cutoff_s / 60, 1)
+            log.warning("Evaluation cutoff after %s min: %d jobs wait for the next run (nothing recorded, no attempt used)", minutes, run.eval_deadline_skipped)
+            run.notes += f"evaluation cutoff after {minutes:g} min: {run.eval_deadline_skipped} jobs wait for the next run; " if "evaluation cutoff" not in run.notes else ""
         if run.eval_budget_skipped:
             run.notes += f"groq daily budget reached: {run.eval_budget_skipped} jobs wait (no attempt used); " if "groq daily budget reached" not in run.notes else ""
         if d.groq_budget is not None:
@@ -666,6 +680,9 @@ def run_cycle(d: Deps) -> RunRecord:
                 continue
             if d.dry_run:
                 log.info("[dry-run] would alert for %s", st.key)
+                continue
+            if d.clock() >= alert_deadline:  # the alert cutoff: no send, no event, no attempt; it stays pending for the next run (D-51)
+                run.alerts_deferred += 1
                 continue
             try:
                 late = lg.alert_delay_note(st, now, d.fresh_window)  # retried past the window: still delivered, labelled
@@ -698,6 +715,10 @@ def run_cycle(d: Deps) -> RunRecord:
             if lag is not None and (run.max_alert_lag_min is None or lag > run.max_alert_lag_min):
                 run.max_alert_lag_min = lag
             write()  # record the delivery immediately: shrinks the duplicate-alert window
+        if run.alerts_deferred:
+            minutes = round(d.alert_cutoff_s / 60, 1)
+            log.warning("Alert cutoff after %s min: %d alerts wait for the next run (still pending, no attempt used)", minutes, run.alerts_deferred)
+            run.notes += f"alert cutoff after {minutes:g} min: {run.alerts_deferred} alerts wait for the next run; "
         write()
         crashed = False
     finally:

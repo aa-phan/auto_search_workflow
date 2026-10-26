@@ -513,7 +513,7 @@ class GroqDeadlineTests(unittest.TestCase):
         self.assertIn(mock.call(3.0), sleep.call_args_list)
 
     def test_a_deadline_with_time_left_does_not_change_the_result(self) -> None:
-        c, _ = self.client([FakeResponse(429), FakeResponse(429, headers={"retry-after": "3"}), groq_ok(72)], deadline=10_000.0)
+        c, _ = self.client([FakeResponse(429), FakeResponse(429, headers={"retry-after": "3"}), groq_ok(72)], deadline=h.time.monotonic() + 10_000)
         with mock.patch.object(h.time, "sleep") as sleep:
             ev = c.evaluate(settings(), posting())
         self.assertEqual(ev.score, 72)
