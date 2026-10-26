@@ -613,6 +613,7 @@ class PollResult:
     error: str = ""
     complete: bool = True  # False when the adapter truncated the listing: counts are not the board's totals
     skipped: bool = False  # not requested at all: the provider is in backoff after a 429 (not a failure of this board)
+    skipped_deadline: bool = False  # not started: the run's poll cutoff had passed; not a failure, state untouched
 
 
 def poll_boards(
@@ -621,14 +622,19 @@ def poll_boards(
     fetch: Callable[[BoardId], list[ListedJob]] = fetch_board,
     workers: int = 8,
     clock: Callable[[], float] = time.monotonic,
+    deadline: float | None = None,
 ) -> list[PollResult]:
     """List every board concurrently. One board failing never affects another. A provider that answers
     HTTP 429 is left alone for its Retry-After (default 5 minutes, at most 15) for the rest of the run: its
-    remaining boards are `skipped` (not requested, not counted as failures) and retried next run."""
+    remaining boards are `skipped` (not requested, not counted as failures) and retried next run.
+    A board not started before `deadline` (an absolute `clock()` value) is `skipped_deadline`: never fetched,
+    not a failure and not the 429 `skipped`; the caller leaves its record untouched (D-51)."""
     backoff: dict[str, float] = {}
     lock = threading.Lock()
 
     def one(rec: BoardRecord) -> PollResult:
+        if deadline is not None and clock() >= deadline:
+            return PollResult(rec, skipped_deadline=True, error="poll cutoff")
         with lock:
             until = backoff.get(rec.ats, 0.0)
         if until > clock():

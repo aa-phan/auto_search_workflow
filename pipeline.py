@@ -44,6 +44,10 @@ FLUSH_EVERY = 10
 FLOOD_MIN_JOBS = 30  # a baselined board suddenly showing this many unseen IDs is treated as a re-baseline
 SUSPICIOUS_EMPTY_AFTER = 3  # an empty listing from a board that had more than this many jobs is a glitch
 MAX_SEARCH_HYDRATIONS = 20
+# Run deadlines, measured from PROCESS start (the workflow timeout is 25 minutes and includes the writer-lease wait, D-51):
+POLL_CUTOFF_S = 15 * 60  # no new board poll starts after this
+EVAL_CUTOFF_S = 20 * 60  # no new Groq call starts after this
+ALERT_CUTOFF_S = 22 * 60  # no new alert send starts after this
 
 
 class FatalRunError(Exception):
@@ -121,6 +125,11 @@ class Deps:
     groq_budget: eb.GroqBudget | None = None  # the per-model daily token budget, shared with the Groq client (None = unbudgeted)
     can_score: Callable[[lg.JobState], bool] | None = None  # pre-check before evaluating a job: False = the budget is spent for it (None = always allowed)
     groq_limits: Callable[[], str] | None = None  # JSON of the x-ratelimit-* response headers the Groq client saw this run
+    clock: Callable[[], float] = time.monotonic  # monotonic seconds for the run deadlines (tests inject a fake)
+    process_t0: float | None = None  # `clock()` value at process start, before the lease wait (None = anchor at run_cycle start)
+    poll_cutoff_s: float = POLL_CUTOFF_S
+    eval_cutoff_s: float = EVAL_CUTOFF_S
+    alert_cutoff_s: float = ALERT_CUTOFF_S
 
 
 _BOT_TOKEN_IN_URL = re.compile(r"bot[0-9]{5,}:[A-Za-z0-9_-]{20,}")
@@ -176,6 +185,10 @@ def degraded_reason(run: RunRecord) -> str:
         reasons.append("alerts")
     if run.eval_transient:
         reasons.append("scoring")
+    if run.boards_skipped_deadline:
+        reasons.append("poll cutoff")
+    if run.alerts_deferred:
+        reasons.append("alert cutoff")
     if "provider backoff after HTTP 429" in run.notes:
         reasons.append("provider")
     if run.boards_failed and run.boards_failed >= max(3, run.boards_total // 10):
@@ -186,6 +199,8 @@ def degraded_reason(run: RunRecord) -> str:
 def run_cycle(d: Deps) -> RunRecord:
     now = d.now()
     t_start = time.monotonic()
+    t0 = d.process_t0 if d.process_t0 is not None else d.clock()  # the deadlines count from process start, not from here
+    poll_deadline, eval_deadline, alert_deadline = t0 + d.poll_cutoff_s, t0 + d.eval_cutoff_s, t0 + d.alert_cutoff_s
     meter0 = METER.snapshot()
     d.state.ensure()
     boards = d.state.load_boards()
@@ -376,11 +391,14 @@ def run_cycle(d: Deps) -> RunRecord:
             promoted_keys.add(rec.key)
             run.boards_activated += 1
             log.info("Pool %s: waiting -> exploration (%s)", rec.key, rec.pool_reason)
-        active = [b for b in boards.values() if b.status in MONITORED]
+        active = sorted((b for b in boards.values() if b.status in MONITORED), key=lambda b: (b.last_attempt_at or "", b.key))  # longest-unpolled first (P2-06)
         run.boards_total = len(active)
         max_gap: timedelta | None = None
         skipped_backoff: dict[str, int] = {}
-        for res in poll_boards(active, fetch=d.fetch, workers=d.workers):
+        for res in poll_boards(active, fetch=d.fetch, workers=d.workers, deadline=poll_deadline, clock=d.clock):
+            if res.skipped_deadline:  # not started before the poll cutoff: untouched, polled first next run (nothing about it changes)
+                run.boards_skipped_deadline += 1
+                continue
             was_baselined = bool(res.board.baselined_at)
             # A board that is `new` but already has a baseline came back after leaving monitoring.
             reentry = was_baselined and res.board.status == STATUS_NEW
@@ -431,6 +449,10 @@ def run_cycle(d: Deps) -> RunRecord:
             detail = ", ".join(f"{n} {a}" for a, n in sorted(skipped_backoff.items()))
             log.warning("Provider backoff (HTTP 429): %s boards were not polled this run and keep their previous state", detail)
             run.notes += f"provider backoff after HTTP 429: not polled this run: {detail}; "
+        if run.boards_skipped_deadline:
+            minutes = round(d.poll_cutoff_s / 60, 1)
+            log.warning("Poll cutoff after %s min: %d boards were not polled this run and keep their previous state", minutes, run.boards_skipped_deadline)
+            run.notes += f"poll cutoff after {minutes:g} min: {run.boards_skipped_deadline} boards not polled this run (polled first next run); "
         run.max_board_gap_min = _minutes(max_gap)
         # New-relevant-posting counts come from the ledger (first observations on ordinary polls
         # only). Every monitored board was polled above, so each row is already being written.

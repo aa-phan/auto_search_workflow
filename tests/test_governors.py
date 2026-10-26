@@ -20,10 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import discovery as dsc  # noqa: E402
 import eval_budget as eb  # noqa: E402
 import freshness as fr  # noqa: E402
+import boards as bd  # noqa: E402
 import ledger as lg  # noqa: E402
 import pipeline as pl  # noqa: E402
 import state as st_mod  # noqa: E402
-from test_core import HarnessCase, job  # noqa: E402
+from test_core import HarnessCase, T0, ago, job  # noqa: E402
 
 D1 = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
 
@@ -234,22 +235,31 @@ class ForcedLimitTests(HarnessCase):
 
     def test_runs_budget_columns_round_trip_and_old_rows_load(self) -> None:
         self.assertEqual(
-            st_mod.RUN_COLUMNS[-7:],
+            st_mod.RUN_COLUMNS[-11:-4],
             ["Groq_Tokens_Primary", "Groq_Tokens_Fallback", "Groq_Prompt_Tokens", "Groq_Cached_Tokens", "Groq_Completions", "Groq_Limits", "Eval_Budget_Skipped"],
         )
+        self.assertEqual(st_mod.RUN_COLUMNS[-4:], ["Eval_Deadline_Skipped", "Eval_Cut", "Boards_Skipped_Deadline", "Alerts_Deferred"])
         self.assertEqual(len(st_mod.RUN_COLUMNS), len(st_mod.RunRecord("t").to_row()))
         rec = st_mod.RunRecord("2026-10-26T12:00:00Z", code_version="abc", groq_tokens_primary=900, groq_tokens_fallback=40, groq_prompt_tokens=700,
-                               groq_cached_tokens=400, groq_completions=3, groq_limits='{"m":{"x":"1"}}', eval_budget_skipped=2)  # fmt: skip
+                               groq_cached_tokens=400, groq_completions=3, groq_limits='{"m":{"x":"1"}}', eval_budget_skipped=2,
+                               eval_deadline_skipped=4, eval_cut=True, boards_skipped_deadline=5, alerts_deferred=6)  # fmt: skip
         back = st_mod.RunRecord.from_row([str(v) for v in rec.to_row()])
         assert back is not None
         self.assertEqual(
             (back.code_version, back.groq_tokens_primary, back.groq_tokens_fallback, back.groq_prompt_tokens, back.groq_cached_tokens, back.groq_completions, back.groq_limits, back.eval_budget_skipped),
             ("abc", 900, 40, 700, 400, 3, '{"m":{"x":"1"}}', 2),
         )
+        self.assertEqual((back.eval_deadline_skipped, back.eval_cut, back.boards_skipped_deadline, back.alerts_deferred), (4, True, 5, 6))
+        self.assertEqual(rec.to_row()[-2], 5)  # Boards_Skipped_Deadline sits in its own column
+        self.assertEqual(st_mod.RunRecord.from_row([str(v) for v in st_mod.RunRecord("t").to_row()]).eval_cut, False)  # type: ignore[union-attr]
         old = [str(v) for v in rec.to_row()][:66]  # a row written before the seven columns existed
         loaded = st_mod.RunRecord.from_row(old)
         assert loaded is not None
         self.assertEqual((loaded.code_version, loaded.groq_tokens_primary, loaded.groq_limits, loaded.eval_budget_skipped), ("abc", 0, "", 0))
+        older = [str(v) for v in rec.to_row()][:73]  # a row written before the four deadline columns existed
+        loaded2 = st_mod.RunRecord.from_row(older)
+        assert loaded2 is not None
+        self.assertEqual((loaded2.eval_budget_skipped, loaded2.eval_deadline_skipped, loaded2.eval_cut, loaded2.boards_skipped_deadline, loaded2.alerts_deferred), (2, 0, False, 0, 0))
 
     def test_run_row_records_the_tokens_the_run_used(self) -> None:
         self.fresh_setup()
@@ -280,6 +290,117 @@ class ForcedLimitTests(HarnessCase):
 
         run = self.w.run(minutes_later=60, groq_limits=broken)
         self.assertEqual((run.groq_limits, run.outcome), ("", "ok"))
+
+
+class FakeClock:
+    """A monotonic clock the tests move by hand: callable like `time.monotonic`."""
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def rec(name: str, attempt: str = "") -> bd.BoardRecord:
+    return bd.BoardRecord(bd.GREENHOUSE, name, ago(days=30), "seed", bd.STATUS_ACTIVE, baselined_at=ago(days=20), last_attempt_at=attempt, last_success_at=attempt)
+
+
+class PollCutoffTests(HarnessCase):
+    def two_boards(self) -> tuple[str, str]:
+        """Two baselined boards; returns their keys (acme sorts before beta)."""
+        a, b = bd.BoardId(bd.GREENHOUSE, "acme"), bd.BoardId(bd.GREENHOUSE, "beta")
+        self.w.listings[a.key] = [job("acme", "1", published=ago(days=30))]
+        self.w.listings[b.key] = [job("beta", "1", published=ago(days=30))]
+        self.w.run(seeds=[a, b])
+        return a.key, b.key
+
+    def cut_after_each_fetch(self, clock: FakeClock, order: list[str], step: float = 200.0) -> None:
+        original = self.w.fetch
+
+        def fetch(board: bd.BoardId) -> list[bd.ListedJob]:
+            order.append(board.key)
+            clock.advance(step)
+            return original(board)
+
+        self.w.fetch = fetch  # type: ignore[method-assign]
+
+    def test_poll_boards_deadline_marks_rest_skipped_deadline_not_skipped(self) -> None:
+        clock, fetched = FakeClock(), []
+
+        def fetch(board: bd.BoardId) -> list[bd.ListedJob]:
+            fetched.append(board.key)
+            clock.advance(60)
+            return []
+
+        boards = [rec("a"), rec("b"), rec("c")]
+        res = bd.poll_boards(boards, fetch=fetch, workers=1, clock=clock, deadline=90)
+        self.assertEqual(fetched, ["greenhouse|a", "greenhouse|b"])  # c starts at t=120, past the deadline
+        self.assertEqual([(r.ok, r.skipped, r.skipped_deadline) for r in res], [(True, False, False), (True, False, False), (False, False, True)])
+        self.assertEqual(res[2].board, boards[2])
+        self.assertNotIn("429", res[2].error)
+
+    def test_poll_boards_without_deadline_polls_everything(self) -> None:
+        clock = FakeClock(10_000)
+        res = bd.poll_boards([rec("a"), rec("b")], fetch=lambda b: [], workers=1, clock=clock)
+        self.assertEqual([r.skipped_deadline for r in res], [False, False])
+
+    def test_poll_order_is_longest_unpolled_first_with_key_tiebreak(self) -> None:
+        stamps = {"late": "2026-10-14T10:00:00Z", "early": "2026-10-14T09:00:00Z", "blank": "", "tie_b": "2026-10-14T09:30:00Z", "tie_a": "2026-10-14T09:30:00Z"}
+        self.w.state.save_boards([rec(n, t) for n, t in stamps.items()])
+        order: list[str] = []
+        self.cut_after_each_fetch(FakeClock(), order, 0)
+        for n in stamps:
+            self.w.listings[f"greenhouse|{n}"] = []
+        run = self.w.run(workers=1)
+        self.assertEqual(order, [f"greenhouse|{n}" for n in ("blank", "early", "tie_a", "tie_b", "late")])
+        self.assertEqual(run.boards_skipped_deadline, 0)
+
+    def test_poll_cutoff_skipped_board_keeps_state_and_goes_first_next_run(self) -> None:
+        a, b = self.two_boards()
+        before = {x.key: x for x in self.w.state.load_boards().values()}
+        self.assertEqual(before[a].last_attempt_at, before[b].last_attempt_at)
+        self.w.listings[f"{bd.GREENHOUSE}|beta"].append(job("beta", "2", published=ago(minutes=5, base=T0 + timedelta(minutes=60))))
+        clock, order = FakeClock(), []
+        self.cut_after_each_fetch(clock, order)
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, poll_cutoff_s=100, workers=1)
+        self.assertEqual(order, [a])  # acme first (stamps tie, key order); the cutoff passes before beta starts
+        after = self.w.state.load_boards()
+        self.assertGreater(after[a].last_attempt_at, before[a].last_attempt_at)
+        for attr in ("last_attempt_at", "consecutive_failures", "baselined_at", "last_success_at", "status", "last_error"):
+            self.assertEqual(getattr(after[b], attr), getattr(before[b], attr), attr)
+        self.assertEqual(self.w.events(self.key("2", board="beta"), None), [])  # nothing observed for the skipped board's jobs
+        self.assertEqual((run.boards_skipped_deadline, run.boards_ok, run.boards_failed), (1, 1, 0))
+        order.clear()
+        clock.t = 0
+        run2 = self.w.run(minutes_later=60, clock=clock, process_t0=0, poll_cutoff_s=100, workers=1)
+        self.assertEqual(order, [b])  # beta is now the longest unpolled: first
+        self.assertEqual(len(self.w.events(self.key("2", board="beta"), lg.SEEN)), 1)  # its new job is observed once the board is polled
+        self.assertEqual(run2.boards_skipped_deadline, 1)  # acme is the one cut now
+
+    def test_outcome_poll_cutoff_makes_run_degraded(self) -> None:
+        self.two_boards()
+        clock, order = FakeClock(), []
+        self.cut_after_each_fetch(clock, order)
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, poll_cutoff_s=100, workers=1)
+        self.assertEqual(run.boards_skipped_deadline, 1)
+        self.assertEqual(run.outcome, "degraded")
+        self.assertIn("poll cutoff", pl.degraded_reason(run))
+        self.assertIn("poll cutoff after", run.notes)
+        self.assertNotIn("provider backoff after HTTP 429", run.notes)
+        self.assertNotIn("provider", pl.degraded_reason(run))
+        stored = [r for r in self.w.state.load_runs() if r.run_id == run.run_id][-1]
+        self.assertEqual((stored.boards_skipped_deadline, stored.outcome), (1, "degraded"))
+
+    def test_run_that_polled_every_board_before_the_cutoff_is_ok(self) -> None:
+        self.two_boards()
+        clock = FakeClock()
+        run = self.w.run(minutes_later=60, clock=clock, process_t0=0, poll_cutoff_s=100, workers=1)  # the clock never moves
+        self.assertEqual((run.boards_skipped_deadline, run.outcome), (0, "ok"))
+        self.assertNotIn("poll cutoff", run.notes)
 
 
 if __name__ == "__main__":

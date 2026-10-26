@@ -55,6 +55,7 @@ RUN_COLUMNS = [
     "Run_ID", "Finished_At", "Outcome", "Run_Kind", "Search_Failed", "Search_Account_Used", "Credit_Status",
     "Eval_Attempted", "Eval_Transient", "Eval_Failed", "Code_Version",
     "Groq_Tokens_Primary", "Groq_Tokens_Fallback", "Groq_Prompt_Tokens", "Groq_Cached_Tokens", "Groq_Completions", "Groq_Limits", "Eval_Budget_Skipped",
+    "Eval_Deadline_Skipped", "Eval_Cut", "Boards_Skipped_Deadline", "Alerts_Deferred",
 ]  # fmt: skip
 RUN_ID_COLUMN = RUN_COLUMNS.index("Run_ID") + 1  # 1-based sheet column
 # Run outcomes. A run-start record is written first with STARTED; the end of the run overwrites it. A record that
@@ -144,6 +145,10 @@ class RunRecord:
     groq_completions: int = 0  # answered Groq requests that returned a completion
     groq_limits: str = ""  # JSON of the x-ratelimit-* response header values seen this run, per model (never request headers)
     eval_budget_skipped: int = 0  # pending jobs left waiting because the daily Groq budget was spent (nothing recorded, no attempt)
+    eval_deadline_skipped: int = 0  # pending jobs left waiting because the evaluation cutoff passed (nothing recorded, no attempt)
+    eval_cut: bool = False  # the run stopped scoring at its evaluation cutoff (the run stays ok)
+    boards_skipped_deadline: int = 0  # monitored boards not started because the poll cutoff passed (state untouched, polled first next run)
+    alerts_deferred: int = 0  # alerts not sent because the alert cutoff passed (still pending, no attempt)
 
     @property
     def completed(self) -> bool:
@@ -175,7 +180,8 @@ class RunRecord:
                    *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
                    *(num(i) or 0 for i in range(36, 55)),
                    row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0, row[65],
-                   num(66) or 0, num(67) or 0, num(68) or 0, num(69) or 0, num(70) or 0, row[71], num(72) or 0)  # fmt: skip
+                   num(66) or 0, num(67) or 0, num(68) or 0, num(69) or 0, num(70) or 0, row[71], num(72) or 0,
+                   num(73) or 0, row[74] == "yes", num(75) or 0, num(76) or 0)  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:
