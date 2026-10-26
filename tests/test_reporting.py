@@ -224,7 +224,7 @@ class _Groq:
     def __init__(self, score: int) -> None:
         self.score = score
 
-    def evaluate(self, s: Any, p: Any) -> h.Evaluation:
+    def evaluate(self, s: Any, p: Any, **kw: Any) -> h.Evaluation:
         return h.Evaluation(self.score, "verdict", "gaps")
 
 

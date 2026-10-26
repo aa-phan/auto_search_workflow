@@ -6,6 +6,7 @@ All mocked (no network, no credentials). See tests/test_core.py for the polling/
 from __future__ import annotations
 
 import csv
+import json
 from datetime import datetime, timezone
 import os
 import sys
@@ -22,10 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import boards as bd  # noqa: E402
 import freshness as fr  # noqa: E402
 import discovery as dsc  # noqa: E402
+import eval_budget as eb  # noqa: E402
 import hunter as h  # noqa: E402
 import ledger as lg  # noqa: E402
 import pipeline as pl  # noqa: E402
 import search  # noqa: E402
+from meter import METER  # noqa: E402
 
 
 def settings(**kw: object) -> h.Settings:
@@ -424,6 +427,214 @@ class GroqTests(unittest.TestCase):
         c, _ = self.client([bad] * h.GROQ_ATTEMPTS)
         with mock.patch.object(h.time, "sleep"), self.assertRaises(ValueError):
             c.evaluate(settings(), posting())
+
+
+class GroqBudgetTests(unittest.TestCase):
+    """The daily token governor inside the Groq client (D-50): per-model spending, metering, daily-limit 429s, limits headers."""
+
+    API_KEY = "gsk_test_key_do_not_leak"
+
+    def client(self, responses: list[FakeResponse], budgets: dict[str, int] | None = None, *, daily: bool = True) -> tuple[h.GroqClient, mock.Mock, eb.GroqBudget | None]:
+        cfg = h.replace(h.Config.from_env(), groq_api_key=self.API_KEY, llm_interval=0.0, groq_tpm=10**9, groq_fallback_tpm=10**9)
+        budget = eb.GroqBudget(day="", budgets=budgets or {cfg.groq_model: 10000, cfg.groq_fallback_model: 10000}) if daily else None
+        c = h.GroqClient(cfg, budget=budget) if daily else h.GroqClient(cfg)
+        c.http = mock.Mock()
+        c.http.post.side_effect = responses
+        return c, c.http.post, budget
+
+    def metered(self, fn: Any) -> dict[str, float]:
+        before = METER.snapshot()
+        fn()
+        return METER.since(before)
+
+    def models(self, post: mock.Mock) -> list[str]:
+        return [call.kwargs["json"]["model"] for call in post.call_args_list]
+
+    def usage_response(self, usage: Any, score: int = 80, headers: dict | None = None) -> FakeResponse:
+        content = f'{{"score": {score}, "verdict": "ok", "missing_gaps": "None"}}'
+        body: dict[str, Any] = {"choices": [{"message": {"content": content}}]}
+        if usage is not None:
+            body["usage"] = usage
+        return FakeResponse(200, body, headers=headers)
+
+    def estimate(self) -> int:
+        messages = h.build_messages(settings(), posting())
+        return sum(len(m["content"]) for m in messages) // 3 + h.MAX_OUTPUT_TOKENS
+
+    def test_charges_usage_tokens_to_the_answering_model_and_meters_cached(self) -> None:
+        full = {"total_tokens": 900, "prompt_tokens": 700, "prompt_tokens_details": {"cached_tokens": 400}}
+        c, _, budget = self.client([self.usage_response(full)])
+        assert budget is not None
+        delta = self.metered(lambda: c.evaluate(settings(), posting()))
+        self.assertEqual(budget.used, {c.cfg.groq_model: 900})
+        self.assertEqual(
+            (delta.get("groq_tokens_primary"), delta.get("groq_prompt_tokens"), delta.get("groq_cached_tokens"), delta.get("groq_completions"), delta.get("groq_tokens_fallback")),
+            (900, 700, 400, 1, None),
+        )
+        # an answer from the fallback model is charged to the fallback, not to the primary
+        c2, post2, budget2 = self.client([FakeResponse(429), self.usage_response({"total_tokens": 500, "prompt_tokens": 450})])
+        assert budget2 is not None
+        with mock.patch.object(h.time, "sleep"):
+            delta2 = self.metered(lambda: c2.evaluate(settings(), posting()))
+        self.assertEqual(budget2.used, {c2.cfg.groq_fallback_model: 500})
+        self.assertEqual((delta2.get("groq_tokens_fallback"), delta2.get("groq_tokens_primary")), (500, None))
+
+    def test_missing_usage_charges_the_estimate(self) -> None:
+        c, _, budget = self.client([self.usage_response(None)])
+        assert budget is not None
+        delta = self.metered(lambda: c.evaluate(settings(), posting()))
+        self.assertEqual(budget.used, {c.cfg.groq_model: self.estimate()})
+        self.assertEqual(delta.get("groq_tokens_primary"), self.estimate())
+
+    def test_non_numeric_usage_is_ignored_not_raised(self) -> None:
+        weird = [{"total_tokens": "abc", "prompt_tokens": [1], "prompt_tokens_details": "x"}, {"total_tokens": None, "prompt_tokens_details": {"cached_tokens": "many"}}, ["not", "a", "dict"], {"total_tokens": True}]
+        for usage in weird:
+            with self.subTest(usage=usage):
+                c, _, budget = self.client([self.usage_response(usage, headers={"x-ratelimit-limit-tokens": "lots", "x-ratelimit-remaining-tokens": None})])  # type: ignore[dict-item]
+                assert budget is not None
+                ev = c.evaluate(settings(), posting())
+                self.assertEqual(ev.score, 80)
+                self.assertEqual(budget.used, {c.cfg.groq_model: self.estimate()})
+
+    def test_daily_limit_429_by_retry_after_marks_model_spent_without_sleeping(self) -> None:
+        c, post, budget = self.client([FakeResponse(429, headers={"retry-after": "3600"}), groq_ok(71)])
+        assert budget is not None
+        with mock.patch.object(h.time, "sleep") as sleep:
+            ev = c.evaluate(settings(), posting())
+        self.assertEqual(ev.score, 71)
+        self.assertEqual(budget.exhausted, {c.cfg.groq_model})
+        self.assertEqual(self.models(post), [c.cfg.groq_model, c.cfg.groq_fallback_model])
+        self.assertEqual([x for x in sleep.call_args_list if x.args and x.args[0] >= 60], [])
+        self.assertEqual(sleep.call_args_list, [])  # not even a short backoff
+        c.http.post.side_effect = [groq_ok(72)]  # the next job: the primary stays spent for the day
+        c.evaluate(settings(), posting())
+        self.assertEqual(c.http.post.call_args.kwargs["json"]["model"], c.cfg.groq_fallback_model)
+
+    def test_daily_limit_429_by_body_text_marks_model_spent(self) -> None:
+        text = '{"error":{"message":"Rate limit reached for model in organization on tokens per day (TPD): Limit 200000, Used 199990"}}'
+        c, post, budget = self.client([FakeResponse(429, text=text), groq_ok(60)])
+        assert budget is not None
+        with mock.patch.object(h.time, "sleep") as sleep:
+            c.evaluate(settings(), posting())
+        self.assertEqual(budget.exhausted, {c.cfg.groq_model})
+        self.assertEqual(sleep.call_args_list, [])
+        self.assertEqual(self.models(post), [c.cfg.groq_model, c.cfg.groq_fallback_model])
+
+    def test_a_per_minute_429_is_not_a_daily_limit(self) -> None:
+        text = '{"error":{"message":"Rate limit reached on tokens per minute (TPM): Limit 8000"}}'
+        c, _, budget = self.client([FakeResponse(429, headers={"retry-after": "7"}, text=text), groq_ok(60)])
+        assert budget is not None
+        with mock.patch.object(h.time, "sleep"):
+            c.evaluate(settings(), posting())
+        self.assertEqual(budget.exhausted, set())  # only the 90 s hold applies
+
+    def test_primary_budget_spent_uses_fallback(self) -> None:
+        c, post, budget = self.client([groq_ok(66)])
+        assert budget is not None
+        budget.used[c.cfg.groq_model] = 8000  # the non-fresh share (80% of 10000) is spent
+        c.evaluate(settings(), posting())
+        self.assertEqual(self.models(post), [c.cfg.groq_fallback_model])
+
+    def test_both_budgets_spent_raises_deferred_without_a_request(self) -> None:
+        c, post, budget = self.client([groq_ok()])
+        assert budget is not None
+        budget.used.update({c.cfg.groq_model: 10000, c.cfg.groq_fallback_model: 10000})
+        with self.assertRaises(h.GroqDeferred) as ctx:
+            c.evaluate(settings(), posting(), fresh=True)
+        self.assertEqual((ctx.exception.reason, str(ctx.exception)), ("budget", "budget"))
+        self.assertNotIsInstance(ctx.exception, h.TransientError)  # a deferral is not a scoring outage
+        post.assert_not_called()
+
+    def test_a_model_spent_during_the_call_is_not_retried(self) -> None:
+        c, post, budget = self.client([FakeResponse(429, headers={"retry-after": "7200"}), FakeResponse(429, headers={"retry-after": "7200"})])
+        assert budget is not None
+        with mock.patch.object(h.time, "sleep"), self.assertRaises(h.GroqDeferred):
+            c.evaluate(settings(), posting())
+        self.assertEqual(len(post.call_args_list), 2)  # one request per model, then deferred
+        self.assertEqual(budget.exhausted, {c.cfg.groq_model, c.cfg.groq_fallback_model})
+
+    def test_reserve_lets_only_fresh_jobs_use_the_last_share(self) -> None:
+        c, post, budget = self.client([groq_ok(81)])
+        assert budget is not None
+        budget.used.update({c.cfg.groq_model: 8000, c.cfg.groq_fallback_model: 8000})  # both at 80%
+        with self.assertRaises(h.GroqDeferred):
+            c.evaluate(settings(), posting(), fresh=False)
+        post.assert_not_called()
+        ev = c.evaluate(settings(), posting(), fresh=True)
+        self.assertEqual(ev.score, 81)
+        self.assertEqual(self.models(post), [c.cfg.groq_model])
+
+    def test_records_rate_limit_headers_per_model_without_request_headers(self) -> None:
+        wanted = {
+            "x-ratelimit-limit-requests": "1000", "x-ratelimit-remaining-requests": "999", "x-ratelimit-reset-requests": "1m26.4s",
+            "x-ratelimit-limit-tokens": "8000", "x-ratelimit-remaining-tokens": "7100", "x-ratelimit-reset-tokens": "6.75s",
+        }  # fmt: skip
+        long_value = "z" * 90
+        ok = self.usage_response({"total_tokens": 900}, headers=dict(wanted, **{"x-request-id": "abc", "set-cookie": "s", "x-ratelimit-reset-tokens": long_value}))
+        c, post, _ = self.client([FakeResponse(429, headers={"x-ratelimit-limit-requests": "1000", "authorization": f"Bearer {self.API_KEY}"}), ok])
+        with mock.patch.object(h.time, "sleep"):
+            c.evaluate(settings(), posting())
+        raw = c.limits_json()
+        data = json.loads(raw)
+        primary, fallback = c.cfg.groq_model, c.cfg.groq_fallback_model
+        self.assertEqual({k: v for k, v in data[fallback].items() if k not in {"at", "x-ratelimit-reset-tokens"}}, {k: v for k, v in wanted.items() if k != "x-ratelimit-reset-tokens"})
+        self.assertEqual(data[fallback]["x-ratelimit-reset-tokens"], long_value[:40])  # cut at 40 characters
+        self.assertEqual(set(data[primary]), {"x-ratelimit-limit-requests", "at"})  # the 429 answer's headers count too
+        self.assertRegex(data[fallback]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        for secret in (self.API_KEY, "Bearer", "authorization", "set-cookie", "x-request-id"):
+            self.assertNotIn(secret.lower(), raw.lower())
+        self.assertLessEqual(len(raw), 1000)
+        self.assertEqual(post.call_args.kwargs["headers"], {"Authorization": f"Bearer {self.API_KEY}"})  # the key is sent, never stored
+
+    def test_limits_json_is_bounded_and_empty_without_answers(self) -> None:
+        c, _, _ = self.client([])
+        self.assertEqual(json.loads(c.limits_json()), {})
+        for i in range(60):
+            c.limits[f"model-{i}"] = {"x-ratelimit-limit-requests": "9" * 40, "at": "2026-10-26T00:00:00Z"}
+        self.assertLessEqual(len(c.limits_json()), 1000)
+
+    def test_evaluator_maps_deferral_to_deferred_outcome_without_failure(self) -> None:
+        s = settings()
+        groq = mock.Mock()
+        groq.evaluate.side_effect = h.GroqDeferred("budget")
+        ev = h.make_evaluator(s, groq, h.excluded_title_regex(s.excluded), hydrate=lambda r: posting())
+        ident = bd.JobIdentity("lever", "acme", "123e4567-e89b-12d3-a456-426614174000")
+        st = lg.JobState(ident.key, seen=True, freshness=fr.VERIFIED_FRESH, seen_detail={"board": "acme", "title": "Marketing Intern"})
+        out = ev(ident, st)
+        self.assertEqual((out.kind, out.message, out.payload), ("deferred", "budget", None))
+        self.assertEqual(groq.evaluate.call_args.kwargs.get("fresh"), True)  # verified-fresh jobs may use the reserve
+        stale = lg.JobState(ident.key, seen=True, freshness=fr.RECENT, seen_detail={"board": "acme"})
+        ev(ident, stale)
+        self.assertEqual(groq.evaluate.call_args.kwargs.get("fresh"), False)
+
+    def test_scored_payload_records_the_model(self) -> None:
+        s = settings()
+        ident = bd.JobIdentity("lever", "acme", "123e4567-e89b-12d3-a456-426614174000")
+        st = lg.JobState(ident.key, seen=True, freshness=fr.VERIFIED_FRESH, seen_detail={"board": "acme", "title": "Marketing Intern"})
+        groq = mock.Mock()
+        groq.evaluate.return_value = h.Evaluation(88, "v", "g", model="the-backup-model")
+        out = h.make_evaluator(s, groq, h.excluded_title_regex(s.excluded), hydrate=lambda r: posting())(ident, st)
+        assert out.payload is not None
+        self.assertEqual((out.kind, out.payload["model"], out.payload["score"]), ("done", "the-backup-model", 88))
+        groq.evaluate.return_value = h.Evaluation(88, "v", "g")  # no model reported: the key is left out
+        again = h.make_evaluator(s, groq, h.excluded_title_regex(s.excluded), hydrate=lambda r: posting())(ident, st)
+        assert again.payload is not None
+        self.assertNotIn("model", again.payload)
+        closed = h.make_evaluator(s, groq, None, hydrate=lambda r: (_ for _ in ()).throw(h.ClosedPosting("404")))(ident, st)
+        assert closed.payload is not None
+        self.assertNotIn("model", closed.payload)  # only scored evaluations name a model
+
+    def test_no_daily_budget_keeps_old_behaviour(self) -> None:
+        c, post, _ = self.client(
+            [FakeResponse(429, headers={"retry-after": "3600"}), FakeResponse(429, headers={"retry-after": "3600"}), groq_ok(75)], daily=False
+        )
+        self.assertIsNone(c.daily)
+        with mock.patch.object(h.time, "sleep") as sleep:
+            ev = c.evaluate(settings(), posting())
+        self.assertEqual(ev.score, 75)
+        self.assertEqual(self.models(post), [c.cfg.groq_model, c.cfg.groq_fallback_model, c.cfg.groq_fallback_model])
+        self.assertIn(mock.call(60.0), sleep.call_args_list)  # the old capped backoff on the fallback, not "model spent"
+        self.assertEqual(ev.model, c.cfg.groq_fallback_model)
 
 
 # --------------------------------------------------------------------------- stores
