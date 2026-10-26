@@ -36,6 +36,7 @@ import boards as boards_mod
 import eligibility
 import inventory
 import discovery as dsc
+import eval_budget as eb
 import freshness as fr
 import ledger as lg
 import pipeline as pl
@@ -777,6 +778,7 @@ class Evaluation:
     score: int
     verdict: str
     missing_gaps: str
+    model: str = ""  # the Groq model that scored the job (recorded in the evaluated payload, D-50)
 
 
 def parse_evaluation(raw: str | None) -> Evaluation:
@@ -827,6 +829,16 @@ class GroqAuthError(RuntimeError):
     """Invalid Groq key: abort the run instead of failing every job."""
 
 
+class GroqDeferred(Exception):
+    """Scoring is held back on purpose: the daily token budget is spent for this job (`reason` = "budget") or the run's
+    time is up ("deadline"). Not a TransientError: it is not an outage, so it never counts as a scoring failure and the
+    job records nothing and keeps all its attempts."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class TokenBudget:
     """Sliding 60 s window of tokens used, to stay under a tokens-per-minute limit."""
 
@@ -857,11 +869,39 @@ def _retry_after(resp: requests.Response) -> float | None:
         return None
 
 
+def _int(value: Any, default: int) -> int:
+    """A non-negative whole number from untrusted input (a Groq usage field), else `default`. Never raises."""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if number >= 0 else default
+
+
+DAILY_LIMIT_RETRY_AFTER = 60  # a 429 asking for a longer wait than this is a daily limit, not a per-minute one
+_DAILY_LIMIT_TEXT = re.compile(r"per day|\bTPD\b|\bRPD\b", re.I)
+LIMIT_HEADERS = (
+    "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests",
+    "x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
+)  # fmt: skip
+LIMITS_JSON_CHARS = 1000
+
+
+def _is_daily_limit(resp: requests.Response) -> bool:
+    """A 429 that names a per-day limit (long `retry-after` or TPD/RPD wording): the model is spent until the next UTC day."""
+    wait = _retry_after(resp)
+    return (wait is not None and wait > DAILY_LIMIT_RETRY_AFTER) or bool(_DAILY_LIMIT_TEXT.search(resp.text or ""))
+
+
 class GroqClient:
     """Groq OpenAI-compatible chat client with 429 fallback, backoff and pacing."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, budget: eb.GroqBudget | None = None) -> None:
         self.cfg = cfg
+        self.daily = budget  # per-model daily token budget (D-50); None = unbudgeted (manual --url / --delivery-test)
+        self.limits: dict[str, dict[str, str]] = {}  # model -> x-ratelimit-* response header values last seen
         self.http = requests.Session()
         self.budgets = {
             cfg.groq_model: TokenBudget(cfg.groq_tpm),
@@ -871,10 +911,21 @@ class GroqClient:
         self._fallback_until = 0.0
         self.unavailable: set[str] = set()  # models Groq reported as not existing / not accessible
 
-    def _model(self) -> str:
-        if self.cfg.groq_model in self.unavailable or time.monotonic() < self._fallback_until:
-            return self.cfg.groq_fallback_model
-        return self.cfg.groq_model
+    def order(self) -> list[str]:
+        """Models in the order they are tried: the fallback first only during the hold after a primary 429 (deterministic, P2-03)."""
+        if time.monotonic() < self._fallback_until:
+            return [self.cfg.groq_fallback_model, self.cfg.groq_model]
+        return [self.cfg.groq_model, self.cfg.groq_fallback_model]
+
+    def _model(self, fresh: bool = False) -> str:
+        if self.daily is None:
+            if self.cfg.groq_model in self.unavailable or time.monotonic() < self._fallback_until:
+                return self.cfg.groq_fallback_model
+            return self.cfg.groq_model
+        model = self.daily.pick_model(self.order(), fresh=fresh, unavailable=self.unavailable)
+        if model is None:
+            raise GroqDeferred("budget")
+        return model
 
     def _pace(self) -> None:
         wait = self._last_call + self.cfg.llm_interval - time.monotonic()
@@ -891,14 +942,40 @@ class GroqClient:
         if limit > 0 and model in self.budgets:
             self.budgets[model].tpm = limit
 
-    def evaluate(self, s: Settings, posting: Posting) -> Evaluation:
+    def _learn_limits(self, model: str, resp: requests.Response) -> None:
+        """Keep the x-ratelimit-* RESPONSE header values (40 characters each) so the owner can read the real limits from Runs.
+        Request headers (the Authorization key) are never read."""
+        headers = getattr(resp, "headers", None) or {}
+        found = {name: str(headers.get(name))[:40] for name in LIMIT_HEADERS if headers.get(name) is not None}
+        if found:
+            found["at"] = lg.stamp(datetime.now(timezone.utc))
+            self.limits.setdefault(model, {}).update(found)
+
+    def limits_json(self) -> str:
+        """Compact JSON of the limits seen, at most LIMITS_JSON_CHARS characters (whole models only, so it stays valid JSON)."""
+        out: dict[str, dict[str, str]] = {}
+        for model in sorted(self.limits):
+            if len(json.dumps({**out, model: self.limits[model]}, separators=(",", ":"))) > LIMITS_JSON_CHARS:
+                break
+            out[model] = self.limits[model]
+        return json.dumps(out, separators=(",", ":"))
+
+    def _spend(self, model: str, tokens: int) -> None:
+        """Count tokens an answer used: the daily budget, the per-minute window and the run's meter, all for the model that answered."""
+        if self.daily is not None:
+            self.daily.charge(model, tokens)
+        METER.add("groq_tokens_primary" if model == self.cfg.groq_model else "groq_tokens_fallback", tokens)
+        self.budgets[model].add(tokens)
+
+    def evaluate(self, s: Settings, posting: Posting, *, fresh: bool = False) -> Evaluation:
         """Score one job. Raises TransientError if Groq stays unavailable (retry next run),
-        ValueError if it can't produce usable JSON, GroqAuthError on a bad key."""
+        ValueError if it can't produce usable JSON, GroqAuthError on a bad key, GroqDeferred when the daily
+        token budget is spent for this job (`fresh` jobs may also use the last share of each model's budget)."""
         messages = build_messages(s, posting)
         est = sum(len(m["content"]) for m in messages) // 3 + MAX_OUTPUT_TOKENS
         parse_failures = 0
         for attempt in range(GROQ_ATTEMPTS):
-            model = self._model()
+            model = self._model(fresh)
             self.budgets[model].wait(est)
             self._pace()
             try:
@@ -920,10 +997,15 @@ class GroqClient:
                 time.sleep(min(30, 3 * 2**attempt))
                 continue
             METER.add("groq_calls")
+            self._learn_limits(model, resp)
             if resp.status_code == 429:
                 METER.add("groq_429")
             code = resp.status_code
             if code == 429:
+                if self.daily is not None and _is_daily_limit(resp):
+                    self.daily.exhaust(model)
+                    log.warning("Groq daily limit reached on %s; using the other model or waiting for the next UTC day", model)
+                    continue
                 if model == self.cfg.groq_model:
                     log.warning("Groq 429 on %s; switching to %s", model, self.cfg.groq_fallback_model)
                     self._fallback_until = time.monotonic() + FALLBACK_HOLD_SECONDS
@@ -951,12 +1033,19 @@ class GroqClient:
                 if "json_validate_failed" in resp.text:  # model emitted bad JSON: just retry
                     parse_failures += 1
                     log.warning("Groq (%s) produced invalid JSON: %s", model, resp.text[:240].replace("\n", " "))
+                    self._spend(model, est)  # Groq returns no usage for this answer; over-counting is the safe direction
                     continue
                 raise ValueError(f"Groq HTTP {code}: {resp.text[:200]}")
             data = resp.json()
-            self.budgets[model].add(int((data.get("usage") or {}).get("total_tokens") or est))
+            usage = data.get("usage") if isinstance(data, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            details = usage.get("prompt_tokens_details")
+            self._spend(model, _int(usage.get("total_tokens"), est) or est)
+            METER.add("groq_prompt_tokens", _int(usage.get("prompt_tokens"), 0))
+            METER.add("groq_cached_tokens", _int(details.get("cached_tokens"), 0) if isinstance(details, dict) else 0)
+            METER.add("groq_completions")
             try:
-                return parse_evaluation(data["choices"][0]["message"]["content"])
+                return replace(parse_evaluation(data["choices"][0]["message"]["content"]), model=model)
             except (KeyError, IndexError, ValueError) as exc:
                 parse_failures += 1
                 log.warning("Unusable Groq response (%s): %s", model, exc)
@@ -1522,14 +1611,15 @@ def make_evaluator(
         url = str(st.seen_detail.get("url") or ident.url)
         title_hint = str(st.seen_detail.get("title") or "")
 
-        def done(status: str, score: int | None, posting: Posting | None, verdict: str, gaps: str = "", reject: str = "") -> pl.EvalOutcome:
+        def done(status: str, score: int | None, posting: Posting | None, verdict: str, gaps: str = "", reject: str = "", model: str = "") -> pl.EvalOutcome:
             row = JobRow(
                 status, score, (posting.company if posting else ident.board), (posting.title if posting else title_hint),
                 posting.location if posting else "", verdict, gaps, url, posting.posted if posting else "",
             )  # fmt: skip
             # `reject` is the stage that ended the evaluation (closed | age | title | location | experience | language | score);
             # empty = the job was scored and kept. Stored in the ledger so reports never have to parse the verdict text.
-            return pl.EvalOutcome("done", dict(row.payload(is_visible(row, s.min_score)), reject=reject))
+            extra = {"model": model} if model else {}  # which model scored it (P2-03); absent for gate rejections
+            return pl.EvalOutcome("done", dict(row.payload(is_visible(row, s.min_score)), reject=reject, **extra))
 
         try:
             posting = hydrate(ref_for(ident, url))
@@ -1552,7 +1642,9 @@ def make_evaluator(
             return done(STATUS_FILTERED, 0, posting, f"Filtered before scoring: {coded[1]}.", reject=coded[0])
 
         try:
-            ev = groq.evaluate(s, posting)
+            ev = groq.evaluate(s, posting, fresh=st.freshness == fr.VERIFIED_FRESH)
+        except GroqDeferred as exc:  # before TransientError and the generic handler: a deferral is not a failure (D-50)
+            return pl.EvalOutcome("deferred", message=exc.reason)
         except TransientError as exc:
             return pl.EvalOutcome("transient", message=str(exc))
         except GroqAuthError as exc:
@@ -1560,7 +1652,7 @@ def make_evaluator(
         except Exception as exc:
             return pl.EvalOutcome("failed", message=f"AI scoring failed: {exc}")
         status = STATUS_APPLY if ev.score >= s.min_score else STATUS_STRETCH if ev.score >= MIN_TRACKER_SCORE else STATUS_FILTERED
-        return done(status, ev.score, posting, ev.verdict, ev.missing_gaps, reject="score" if status == STATUS_FILTERED else "")
+        return done(status, ev.score, posting, ev.verdict, ev.missing_gaps, reject="score" if status == STATUS_FILTERED else "", model=ev.model)
 
     return evaluate
 
