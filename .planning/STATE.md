@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Search-substitute volume
-current_phase: 2
+current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-10-26T16:51:03.170Z"
-last_activity: 2026-10-25
-last_activity_desc: v2.0 roadmap created (6 phases, 26 of 26 requirements mapped)
-state_head: c37f65b086d36cbd188b98e65731fabad6f9fe30
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-10-26T17:42:07.563Z"
+last_activity: 2026-10-26
+last_activity_desc: Phase 02 execution started
+state_head: c641d3e6ba5c72533aee7707f458a9907c2250b0
 progress:
   total_phases: 6
   completed_phases: 1
@@ -25,14 +25,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-10-25)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Phase 2: Measurement, governors and owner decisions (first of the 6 v2.0 phases, Phases 2-7)
+**Current focus:** Phase 02 — Measurement, governors and owner decisions
 
 ## Current Position
 
-Phase: 2 (Measurement, governors and owner decisions) — READY TO EXECUTE
-Plan: not planned yet
+Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-10-25 — v2.0 roadmap created (6 phases, 26 of 26 requirements mapped)
+Last activity: 2026-10-26 — Phase 02 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -50,6 +50,11 @@ Progress: [░░░░░░░░░░] 0%
 | - | - | - | - |
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 02 P01 | 3 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -61,6 +66,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - Order is governors, compact storage, backfill, board growth, adapters, search; storage is Phase 3 because Events passes the D-03 200k point about 2026-10-29 and nothing that adds rows or load runs before parity.
 - Phases 3 and 4 never overlap (both touch `ledger.observe_new` and the run-cycle observation block); board growth waits for backfill so admitted boards' recent jobs are scored.
 - The 20-30 a day target is conditional on the Groq plan decision (MEAS-02).
+- [Phase 02]: D-48 is one entry listing all eleven GOV-01 owner decisions with state, needed-by and default; pending items get their own D-number when decided — Keeps the list in one place and leaves undecided items labelled pending with their default (AGENTS rule 1, GOV-01)
+- [Phase 02]: Repository stays public; DEPLOY, README, D-37 note, STATUS, CONCERNS and INGEST-CONFLICTS corrected to say so (P2-15) — History check found no CSV, resume or PDF paths in any commit
 
 ### Pending Todos
 
@@ -95,6 +102,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T04:44:07.767Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-measurement-governors-and-owner-decisions/02-CONTEXT.md
+Last session: 2026-10-26T17:42:07.549Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

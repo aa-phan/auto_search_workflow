@@ -57,11 +57,11 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   4. A job is recorded `alerted` only after a channel accepted the message; a send that fails without an HTTP response leaves the job unalerted, is retried, and stops after 5 attempts.
   5. Every owner decision the milestone needs is either recorded in DECISIONS.md or listed with its needed-by phase and its default if unanswered: Groq plan, D-05 amendment (before Phase 4), rule-7 lift for board-cycling scores only (before CYC-02 goes live), per-ATS policy (Paycom skipped, iCIMS deferred; before each adapter), SmartRecruiters after the pilot, repository public or private, date-only alerts (user decision 2026-10-25); the storage design approval that closes the D-03 review (before Phase 3 executes) is surfaced with them.
 
-**Plans**: 9 plans (waves 1-9, sequential: every plan edits the contract documents)
+**Plans**: 1/9 plans executed (waves 1-9, sequential: every plan edits the contract documents)
 
 Plans:
 **Wave 1**
-- [ ] 02-01-PLAN.md — GOV-01: owner-decision inventory D-48 and public-repository doc corrections
+- [x] 02-01-PLAN.md — GOV-01: owner-decision inventory D-48 and public-repository doc corrections
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02-PLAN.md — MEAS-05: alerted only when a channel accepted; no-response sends bounded at 5 (P2-18); secret redaction; Telegram caps (D-49)
@@ -209,7 +209,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
-| 2. Measurement, governors and owner decisions | v2.0 | 0/9 | Planned | - |
+| 2. Measurement, governors and owner decisions | v2.0 | 1/9 | In Progress | - |
 | 3. Compact storage | v2.0 | 0/TBD | Not started | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
