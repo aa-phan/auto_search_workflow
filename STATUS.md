@@ -1,6 +1,35 @@
 # STATUS
 
-Last updated 2026-10-23 (pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-26 (Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+
+## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
+
+**Built, verified offline only (mocked). Nothing in this section has been verified live yet.** Run `.venv/bin/python -m unittest discover -s tests` for the current count: **620 tests pass offline** at the end of plan 02-06 (612 at the end of 02-05; 520 offline tests were last recorded before this phase).
+
+- **D-49 alert recording:** `alerted` is written only when a channel accepted the message; an alert no channel accepted stays pending and the run is `degraded`; sends without an HTTP response are bounded at 5 attempts; secrets are redacted from everything stored or logged; Telegram free text is capped before escaping.
+- **D-50 Groq daily token budget per model (MEAS-03):** a persisted UTC-day budget per model (default 170,000, provisional) with the last 20% reserved for verified-fresh jobs, fallback from the primary to the second model, budget-skipped jobs left pending with nothing recorded, and seven new Runs columns for tokens, cached tokens, completions and the `x-ratelimit-*` response header values.
+- **D-51 run deadlines (MEAS-04):** board polling stops starting boards 15 min after the process started, Groq calls stop at 20 min and alert sends at 22 min, inside the 25 min workflow timeout; boards are polled longest-unpolled first; a poll or alert cut makes the run `degraded`, an evaluation cut leaves it `ok`; nothing is recorded against a cut board, job or alert.
+- **D-52 Dashboard yield view (MEAS-01):** tracker rows per found-day by cohort with the 20-30 band, age when found, My_Feedback mix per cohort, and a tracker-versus-ledger reconciliation that names ledger-kept jobs missing from the tracker.
+- **Groq read-outs (this plan, MEAS-02 / MEAS-03 visibility):** a Groq SYSTEM line on the Dashboard (today's UTC-day tokens per model against its budget, the 7-day split of scored evaluations by model, tokens per scoring call with its n, cached share, budget skips, evaluation cuts, poll cuts, alerts deferred) and Groq lines in the read-only pilot report's limits audit (tokens per scoring call with n, tokens per UTC day per model, cached share, governor counters, run duration p95, latest rate-limit header values) so measured consumption can be read from the public workflow log without credentials. Runs recorded before the token columns existed are not counted as zero-token runs (figures cover only runs that recorded tokens, and the line says how many).
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Alert recording and bounding (D-49): no accepting channel leaves the alert pending and the run degraded; five attempts without an HTTP response; 4xx/5xx handling | pass | **mocked** |
+| Redaction of secrets from stored and logged text; Telegram free-text cap | pass | **mocked** |
+| Daily budget, 20% reserve, fallback model, budget-skip leaves the job pending, forced-limit runs (budget at 0 and the next UTC day) (D-50) | pass | **mocked** |
+| Deadlines and poll order (D-51): process-start anchor, poll / evaluation / alert cutoffs, Groq client deferral at the deadline, longest-unpolled first | pass | **mocked** (injected monotonic clock; no real run was cut) |
+| Yield view (D-52): found-day buckets, local midnight, age buckets, feedback per cohort, reconciliation, four charts with fixed ids | pass | **mocked** (fake spreadsheet, requests checked offline; not rendered) |
+| Groq read-outs: Dashboard Groq line, pilot limits-audit lines, counts-only public log | pass | **mocked** (hand-built Runs, ledger and Discovery records) |
+| Dashboard render in the real Sheet (band lines flat at 20 and 30, new Groq line, four charts, `BAND_LINES_STACK` assumption A7), real `Runs` rows with the new columns, Groq console figures, delivery test | **not verified live yet** | plan 02-07 / 02-08 |
+
+**Mutation checks (each applied, observed failing, then reverted):** 27 across plans 02-02..02-06 (5 on alert recording, bounding and redaction; 7 on budget, reserve, pre-check, persistence, daily-limit 429 and charging; 7 on deadlines, poll order and the process-start anchor; 5 on the yield view; 3 here: counting runs without recorded tokens in tokens per call fails the Dashboard 7-day test, removing the `x-ratelimit-*` filter fails the counts-only log test, and counting every timed run as a token run fails both audit tests). Details are in the 02-02..02-06 SUMMARY files.
+
+**Migration notes:**
+- **The `Runs` header widens by 11 columns, to 77, on the first run after deploy** (the new Groq token, limits, skip and cut columns); rows written before it stay as they are and read as unknown.
+- **The Settings rows `Groq_Daily_Token_Budget` and `Groq_Fallback_Daily_Token_Budget` are optional** and absent from the live Settings tab; the run note names the value in force.
+- **The Discovery tab gains the key `groq_budget`** (the persisted per-model budget for the UTC day).
+- **SmartRecruiters is still unparked** until plan 02-09 deploys D-48's decision.
+- Not yet deployed: none of D-49..D-52 runs in production until the owner deploys them (plan 02-07 / 02-08).
 
 ## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
 
@@ -208,5 +237,6 @@ Post-pilot week at 700 boards with `Rebalance_Mode` on (from 2026-10-23 20:52 UT
 - **Storage (needs action soon):** Events 186,430 rows (13.1% of the 10M-cell limit), growing about 3,355 rows/day at 700 boards: **the D-03 200k-row review point is about 4 days away**, and 84.5% of rows are baseline identities. Load time 10 s at 186k rows (slope about 4 s per 100k rows).
 - **Re-checks (D-47):** the faster re-check pass cleared the overdue queue (12,308 -> 0); 250 more boards gained relevant open jobs; 747 relevant boards wait.
 - **Reconciliation flag:** 2 ledger-kept jobs are missing from the tracker (should be 0); not yet investigated.
+- **Target status:** the 20-30 a day target stays conditional on the Groq plan decision (MEAS-02, D-48 row 1): about 7-20 kept rows a day until then.
 
 No score tuning or new features until these are read (AGENTS.md rule 7).
