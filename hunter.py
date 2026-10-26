@@ -1424,21 +1424,32 @@ def make_store(cfg: Config) -> SheetStore | CsvStore:
 # --------------------------------------------------------------------------- alerts
 
 
+# Free-text limits applied BEFORE html.escape, so the final message is never sliced inside a tag or entity. About 1,750
+# code points of free text plus the fixed labels stay under Telegram's 4,096 limit even in UTF-16 code units (astral
+# characters count twice).
+ALERT_FIELD_CHARS = {"title": 200, "company": 150, "location": 200, "verdict": 400, "gaps": 600, "late": 200}
+
+
+def _cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
     """Telegram and/or generic webhook. Returns False if neither is configured."""
     sent = False
     if cfg.telegram_token and cfg.telegram_chat_id:
         esc = html.escape
+        cap = ALERT_FIELD_CHARS
         lines = [
-            f"🎯 <b>{esc(row.title or row.label)}</b>",
-            f"🏢 {esc(row.company or 'Company not stated')}",
-            f"📍 {esc(row.location or 'Location not stated')}",
+            f"🎯 <b>{esc(_cap(row.title or row.label, cap['title']))}</b>",
+            f"🏢 {esc(_cap(row.company or 'Company not stated', cap['company']))}",
+            f"📍 {esc(_cap(row.location or 'Location not stated', cap['location']))}",
             f"⭐ Score: <b>{row.score}/100</b>",
             f"🕒 {esc(FRESHNESS_LABELS.get(row.freshness, 'Freshness unknown'))}"
             + (f" · posted {esc(row.posted)}" if row.posted else ""),
-            *([f"⏱ {esc(row.late)}"] if row.late else []),
-            f"💬 {esc(row.verdict)}",
-            f"⚠️ Gaps: {esc(row.gaps or 'None')}",
+            *([f"⏱ {esc(_cap(row.late, cap['late']))}"] if row.late else []),
+            f"💬 {esc(_cap(row.verdict, cap['verdict']))}",
+            f"⚠️ Gaps: {esc(_cap(row.gaps or 'None', cap['gaps']))}",
             f'🔗 <a href="{esc(row.url, quote=True)}">Apply here</a>',
         ]
         if sheet_url:
@@ -1447,7 +1458,7 @@ def send_alert(cfg: Config, row: JobRow, sheet_url: str = "") -> bool:
             f"https://api.telegram.org/bot{cfg.telegram_token}/sendMessage",
             json={
                 "chat_id": cfg.telegram_chat_id,
-                "text": "\n".join(lines)[:4096],
+                "text": "\n".join(lines),
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
