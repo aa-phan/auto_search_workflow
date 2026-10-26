@@ -791,6 +791,125 @@ class YieldTests(unittest.TestCase):
         self.assertEqual(col(0)[-1], "26")
         self.assertTrue(all(c >= db.DATA_COL for c, _ in top.series))
 
+    # ---- Task 2: age when found, feedback per cohort, reconciliation
+
+    def test_yield_age_buckets_inclusive_upper_bounds_and_unknown_for_day_precision(self) -> None:
+        def facts(age: timedelta | None, precision: str = "time") -> rp.JobFacts:
+            pub = None if age is None else T0 - age
+            return rp.JobFacts(k(1), seen_at=T0, published=pub, precision=precision)
+
+        m = timedelta
+        cases = [(m(minutes=60), "le1h"), (m(minutes=61), "h1_12"), (m(hours=12), "h1_12"), (m(hours=12, minutes=1), "h12_24"), (m(hours=24), "h12_24"),
+                 (m(hours=72), "h24_72"), (m(hours=72, minutes=1), "older")]
+        for age, want in cases:
+            self.assertEqual(rp.age_bucket(facts(age)), want, age)
+        self.assertEqual(rp.age_bucket(facts(m(minutes=30), precision="day")), "unknown")  # a date only: never counted as a measured age
+        self.assertEqual(rp.age_bucket(facts(None)), "unknown")  # no publication date
+        self.assertEqual(rp.age_bucket(facts(m(minutes=-5))), "unknown")  # published after first sight: a future date
+        self.assertEqual(rp.age_bucket(None), "unknown")  # an unmatched row
+        self.assertEqual([key for key, _ in rp.AGE_BUCKETS], ["le1h", "h1_12", "h12_24", "h24_72", "older", "unknown"])
+
+    def test_yield_age_counts_come_from_matched_rows_in_the_period(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        ev = [seen(k(1), at, pub=at - timedelta(minutes=30)), evaluated(k(1), at), seen(k(2), at, pub=at - timedelta(hours=30)), evaluated(k(2), at),
+              seen(k(3), at, pub=at - timedelta(hours=1), precision="day"), evaluated(k(3), at)]
+        rows = [tracker_row(1), tracker_row(2), tracker_row(3), tracker_row(99, url="https://example.com/x", date_found="10/25/2026 03:00 PM")]
+        age = summary(ev, tracker=rows, now=self.NOW, tz=CHI)["yield"]["per_period"]["7d"]["by_age"]
+        self.assertEqual(age, {"le1h": 1, "h1_12": 0, "h12_24": 0, "h24_72": 1, "older": 0, "unknown": 2})  # the day-precision row and the unmatched row are unknown, never fresh
+
+    def test_yield_feedback_mix_per_cohort(self) -> None:
+        d = "10/25/2026 09:15 AM"
+        rows = [tracker_row(1, "Verified fresh", "Would apply", d, url="https://example.com/1"), tracker_row(2, "Verified fresh", "Maybe", d, url="https://example.com/2"),
+                tracker_row(3, "Recent", "Irrelevant", d, url="https://example.com/3"), tracker_row(4, "Recent", "", d, url="https://example.com/4"),
+                tracker_row(5, "Age unverified", "great job", d, url="https://example.com/5"), tracker_row(6, "New on board (age unverified)", "Would apply", d, url="https://example.com/6")]
+        fb = summary(tracker=rows, now=self.NOW, tz=CHI)["yield"]["per_period"]["7d"]["feedback"]
+        zero = {"Would apply": 0, "Maybe": 0, "Irrelevant": 0, "unlabelled": 0, "other_text": 0}
+        self.assertEqual(fb["verified_fresh"], {**zero, "Would apply": 1, "Maybe": 1})
+        self.assertEqual(fb["recent"], {**zero, "Irrelevant": 1, "unlabelled": 1})
+        self.assertEqual(fb["other"], {**zero, "Would apply": 1, "other_text": 1})  # free text is counted apart and never becomes a label
+
+    def test_yield_rows_by_ats_keep_the_provider_baseline(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        urls = {"greenhouse": gh_url(1), "lever": "https://jobs.lever.co/acme/11111111-1111-1111-1111-111111111111",
+                "smartrecruiters": "https://jobs.smartrecruiters.com/acme/123456789-title"}
+        ev: list[lg.Event] = []
+        for u in urls.values():
+            key = bd.parse_job_url(u).key  # type: ignore[union-attr]
+            ev += [seen(key, at, pub=at - timedelta(hours=1)), evaluated(key, at)]
+        rows = [tracker_row(0, url=u) for u in urls.values()] + [tracker_row(0, url="https://example.com/x", date_found="10/25/2026 03:00 PM")]
+        by_ats = summary(ev, tracker=rows, now=self.NOW, tz=CHI)["yield"]["per_period"]["7d"]["by_ats"]
+        self.assertEqual(by_ats, {"greenhouse": 1, "lever": 1, "smartrecruiters": 1, "unknown": 1})
+
+    def test_yield_unmatched_row_uses_date_found_or_unknown_day(self) -> None:
+        rows = [tracker_row(1, url="https://example.com/a", date_found="10/24/2026 09:15 PM"), tracker_row(2, url="https://example.com/b", date_found="not a date")]
+        y = summary(tracker=rows, now=self.NOW, tz=CHI)["yield"]
+        by_date = {d["date"]: d for d in y["trend"]}
+        self.assertEqual(by_date["2026-10-24"]["total"], 1)
+        self.assertEqual(y["day_unknown"], 1)  # counted apart, never put on a guessed day
+        self.assertEqual(sum(d["total"] or 0 for d in y["trend"]), 1)
+
+    def test_yield_reconcile_names_missing_keys_both_directions(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        ev = self.ledger([(1, at), (2, at + timedelta(minutes=7))])
+        rows = [tracker_row(1), tracker_row(77, url="https://example.com/hand-made", date_found="10/25/2026 01:00 PM")]
+        rc = summary(ev, tracker=rows, now=self.NOW, tz=CHI)["yield"]["reconcile"]
+        self.assertEqual((rc["ledger_kept"], rc["in_tracker"]), (2, 1))
+        self.assertEqual(rc["missing_from_tracker"], [{"key": k(2), "evaluated": stamp(at + timedelta(minutes=7))}])
+        self.assertEqual(rc["tracker_rows_without_ledger_match"], 1)
+
+    def test_yield_stored_url_fallback_matches_custom_domain_url(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        custom = "https://careers.acme.example/open-roles/senior-analyst?gh_jid=4455"  # not parseable to a job identity
+        self.assertIsNone(bd.parse_job_url(custom))
+        ev = self.ledger([(1, at)])
+        ev[-1].detail["url"] = custom  # the evaluated payload carries the URL the job was stored with
+        rows = [tracker_row(1, url=custom)]
+        y = summary(ev, tracker=rows, now=self.NOW, tz=CHI)["yield"]
+        self.assertEqual(y["join"], {"by_identity": 0, "by_stored_url": 1, "unmatched": 0})
+        self.assertEqual(y["reconcile"]["missing_from_tracker"], [])
+
+    def test_dashboard_needs_attention_row_only_when_mismatch_nonzero(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        ev = self.ledger([(1, at), (2, at + timedelta(minutes=1))])
+        both = summary(ev, tracker=[tracker_row(1), tracker_row(2)], now=self.NOW, tz=CHI)
+        self.assertEqual([r for r in both["failures"]["table"] if r["what"] == "tracker missing kept jobs"], [])
+        self.assertNotIn("tracker missing kept jobs", "\n".join(str(v) for row in db.render(both).values() for v in row))
+        none = summary(ev, tracker=[tracker_row(50, url="https://example.com/x", date_found="10/25/2026 01:00 PM")], now=self.NOW, tz=CHI)
+        rows = [r for r in none["failures"]["table"] if r["what"] == "tracker missing kept jobs"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 2)
+        self.assertIn(k(1), rows[0]["detail"])
+        self.assertIn(k(2), rows[0]["detail"])
+        self.assertEqual(rows[0]["ref"], "Job Tracker")
+        self.assertIn("tracker missing kept jobs", "\n".join(str(v) for row in db.render(none).values() for v in row))
+
+    def test_dashboard_rerun_is_identical(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        sm = summary(self.ledger([(1, at)]), tracker=[tracker_row(1, feedback="Maybe")], now=self.NOW, tz=CHI)
+        self.assertEqual(db.requests_for(db.render(sm), 5), db.requests_for(db.render(sm), 5))
+
+    def test_dashboard_cohort_labels_match_hunter_freshness_labels(self) -> None:
+        self.assertTrue(set(rp.COHORT_OF_LABEL) <= set(h.FRESHNESS_LABELS.values()))  # reporting may not import hunter, so the test pins the labels
+
+    def test_dashboard_page_has_the_age_chart_the_tracker_rows_table_and_no_tracker_text(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        rows = [{**tracker_row(1, feedback="Would apply"), "Company_and_Title": "ZZ-SECRET Corp — Analyst", "User_Notes": "ZZ-NOTE", "AI_Verdict": "ZZ-VERDICT"}]
+        sm = summary(self.ledger([(1, at)]), tracker=rows, now=self.NOW, tz=CHI)
+        grid = db.render(sm)
+        text = "\n".join(str(v) for row in grid.values() for v in row)
+        self.assertEqual([c.title for c in grid.charts], ["Tracker rows per day · target 20-30", "How old jobs were when found · 7d", "Runs per day", "Why relevant-title jobs were dropped · 7d"])
+        self.assertEqual([r["addChart"]["chart"]["chartId"] for r in db.requests_for(grid, 5) if "addChart" in r], [db.CHART_ID_BASE + i for i in range(4)])
+        self.assertNotIn("Alerts delivered and tracker additions", text)
+        self.assertNotIn("Relevant jobs per day", text)
+        for needle in ("TRACKER ROWS", "Would apply", "ledger-kept jobs are in the tracker"):
+            self.assertIn(needle, text)
+        for secret in ("ZZ-SECRET", "ZZ-NOTE", "ZZ-VERDICT"):
+            self.assertNotIn(secret, text)
+        age = grid.charts[1]
+        spec = db.chart_request(age, 1, 9)["addChart"]["chart"]["spec"]["basicChart"]
+        self.assertEqual({s["targetAxis"] for s in spec["series"]}, {"BOTTOM_AXIS"})
+        self.assertEqual(sm["yield"]["per_period"]["7d"]["by_age"]["h1_12"], 1)  # published 2 h before first sight
+
 
 class CliAndPilotTests(HarnessCase):
     def test_dashboard_cli_dry_run_prints_and_writes_nothing(self) -> None:
