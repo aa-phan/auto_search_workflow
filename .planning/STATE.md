@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-10-26T18:15:41.641Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-10-26T18:22:39.154Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: ab6cf0fe1b1ba01714a9e4aac10fa86c73c4a92c
+state_head: c484df9b4df43e5a5882c7a10c62a141d655edcc
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 5
+  completed_plans: 6
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -59,6 +59,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P03 | 7 min | 3 tasks | 10 files |
 | Phase 02 P04 | 7 min | 3 tasks | 9 files |
 | Phase 02 P05 | 5 min | 3 tasks | 5 files |
+| Phase 02 P06 | 12 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: Alert cutoff cut makes the run degraded (discretion choice, not part of P2-07) — A fresh alert waiting another hour deserves the owner's attention; keep EVAL_CUTOFF_MINUTES below 22
 - [Phase 02]: D-52: day of a tracker row comes from the ledger evaluated instant in the display time zone, not the user-formatted Date_Found text — Date_Found is display text Sheets may re-render; the evaluated event is the same moment it was written. Flagged for the owner's acceptance
 - [Phase 02]: D-52: the NEEDS ATTENTION row for ledger-kept jobs missing from the tracker is applied literally (P2-12); the 20-30 band is two constant LINE series with BAND_LINES_STACK as the switch — Shows whenever the all-time mismatch is not 0, so the 2 jobs flagged on 2026-10-25 stay visible until resolved; Sheets stacking of LINE series is unverified (A7), checked live in plan 02-07
+- [Phase 02]: 02-06: scored_by_model counts only evaluations that reached scoring; Groq budget record from an earlier UTC day shows 0 used today — gate rejections never call Groq; eval_budget rolls the budget at UTC midnight
+- [Phase 02]: 02-06: public pilot log prints only x-ratelimit-* values and model ids matching strict allow patterns — T-02-16: a damaged or hand-edited Groq_Limits record must not leak text into a public log
 
 ### Pending Todos
 
@@ -112,6 +115,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T18:15:41.626Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-10-26T18:22:39.138Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None
