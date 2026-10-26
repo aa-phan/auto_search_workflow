@@ -816,6 +816,82 @@ class GroqSettingsTests(unittest.TestCase):
         self.assertIn("Groq daily token budget 5000 / 3000 per UTC day from Settings tab", deps.config_notes)
 
 
+class ConfigDeadlineTests(unittest.TestCase):
+    """Run cutoffs: configuration and the process-start anchor in main (D-51)."""
+
+    def cfg(self, **env: str) -> h.Config:
+        with mock.patch.dict("os.environ", env):
+            for name in ("POLL_CUTOFF_MINUTES", "EVAL_CUTOFF_MINUTES"):
+                if name not in env:
+                    os.environ.pop(name, None)
+            return h.Config.from_env()
+
+    def test_deadline_cutoff_minutes_from_environment(self) -> None:
+        c = self.cfg()
+        self.assertEqual((c.poll_cutoff_s, c.eval_cutoff_s), (900, 1200))
+        self.assertEqual((pl.POLL_CUTOFF_S, pl.EVAL_CUTOFF_S, pl.ALERT_CUTOFF_S), (900, 1200, 1320))
+        c = self.cfg(POLL_CUTOFF_MINUTES="10", EVAL_CUTOFF_MINUTES="18")
+        self.assertEqual((c.poll_cutoff_s, c.eval_cutoff_s), (600, 1080))
+        c = self.cfg(POLL_CUTOFF_MINUTES="soon", EVAL_CUTOFF_MINUTES="")
+        self.assertEqual((c.poll_cutoff_s, c.eval_cutoff_s), (900, 1200))  # non-numeric or blank: the default
+        c = self.cfg(POLL_CUTOFF_MINUTES="0", EVAL_CUTOFF_MINUTES="-5")
+        self.assertEqual((c.poll_cutoff_s, c.eval_cutoff_s), (60, 60))  # at least one minute
+
+    def run_main(self, argv: list[str], env: dict[str, str]) -> tuple[Any, list[h.GroqClient]]:
+        fake = mock.Mock()
+        fake.state = mock.Mock()
+        fake.load_settings.return_value = {}
+        fake.sheet_timezone.return_value = None
+        fake.state.acquire_lease.return_value = mock.Mock(ok=True, token="t")
+        fake.state.holds_lease.return_value = True
+        base = {"GOOGLE_SHEET_ID": "sheet", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}", "GROQ_API_KEY": "k", "GITHUB_ACTIONS": "true", "TAVILY_API_KEY": ""}
+        made: list[h.GroqClient] = []
+
+        class Spy(h.GroqClient):
+            def __init__(self, *a: Any, **k: Any) -> None:
+                super().__init__(*a, **k)
+                made.append(self)
+
+        ticks = iter(5000.0 + i for i in range(10_000))  # the first reading is the process start
+        with mock.patch.dict("os.environ", {**base, **env}), mock.patch.object(h, "make_store", return_value=fake), mock.patch.object(h, "load_resume_file", return_value="r" * 300), \
+                mock.patch.object(h, "GroqClient", Spy), mock.patch.object(h.dashboard, "refresh"), mock.patch.object(h.pl, "run_cycle") as run_cycle, \
+                mock.patch.object(h.time, "monotonic", side_effect=lambda: next(ticks)):  # fmt: skip
+            run_cycle.return_value = mock.Mock(boards_ok=0, boards_failed=0, boards_total=0, boards_added=0, new_jobs=0, verified_fresh=0, evaluated=0, alerts_sent=0, alerts_failed=0, gap_since_prev_run_min=None, max_board_gap_min=None)
+            self.assertEqual(h.main(argv), 0)
+        return run_cycle, made
+
+    def test_deadline_main_anchors_process_start_and_wires_the_cutoffs(self) -> None:
+        run_cycle, made = self.run_main([], {"POLL_CUTOFF_MINUTES": "10", "EVAL_CUTOFF_MINUTES": "18"})
+        deps = run_cycle.call_args.args[0]
+        self.assertEqual(deps.process_t0, 5000.0)  # read at the top of main, before the Sheet connection and the writer lease
+        self.assertTrue(callable(deps.clock))
+        self.assertEqual((deps.poll_cutoff_s, deps.eval_cutoff_s, deps.alert_cutoff_s), (600, 1080, pl.ALERT_CUTOFF_S))
+        self.assertEqual(made[0].deadline, 5000.0 + 1080)  # the Groq client stops at the evaluation cutoff
+
+    def test_deadline_single_job_check_keeps_the_client_unbounded(self) -> None:
+        fake_out = pl.EvalOutcome("transient", message="x")
+        with mock.patch.object(h, "make_evaluator", return_value=lambda ident, st: fake_out):
+            _, made = self.run_main_url()
+        self.assertIsNone(made[0].deadline)
+
+    def run_main_url(self) -> tuple[None, list[h.GroqClient]]:
+        fake = mock.Mock()
+        fake.load_settings.return_value = {}
+        fake.sheet_timezone.return_value = None
+        made: list[h.GroqClient] = []
+
+        class Spy(h.GroqClient):
+            def __init__(self, *a: Any, **k: Any) -> None:
+                super().__init__(*a, **k)
+                made.append(self)
+
+        env = {"GOOGLE_SHEET_ID": "sheet", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}", "GROQ_API_KEY": "k", "GITHUB_ACTIONS": "true", "TAVILY_API_KEY": ""}
+        with mock.patch.dict("os.environ", env), mock.patch.object(h, "make_store", return_value=fake), mock.patch.object(h, "load_resume_file", return_value="r" * 300), \
+                mock.patch.object(h, "GroqClient", Spy), mock.patch("builtins.print"):  # fmt: skip
+            self.assertEqual(h.main(["--url", "https://boards.greenhouse.io/acme/jobs/123"]), 0)
+        return None, made
+
+
 # --------------------------------------------------------------------------- stores
 
 
