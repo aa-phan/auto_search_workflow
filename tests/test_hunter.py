@@ -701,6 +701,39 @@ class AlertTests(unittest.TestCase):
         for needle in ["&lt;Intern&gt;", "A&amp;B", "88/100", "good", "Gaps: None", "Remote", "Verified fresh", 'href="https://u"', "spreadsheets/d/FAKE"]:
             self.assertIn(needle, text)
 
+    def _posted_text(self, row: h.JobRow) -> str:
+        cfg = h.replace(h.Config.from_env(), telegram_token="t", telegram_chat_id="1", webhook_url="")
+        with mock.patch.object(h.requests, "post", return_value=mock.Mock()) as post:
+            self.assertTrue(h.send_alert(cfg, row, "https://docs.google.com/spreadsheets/d/FAKE"))
+        return post.call_args.kwargs["json"]["text"]
+
+    def test_alert_message_caps_free_text_before_escaping_and_keeps_tags_whole(self) -> None:
+        row = h.JobRow("To Apply", 88, "Acme", "&<>" * 3334, "&<>" * 1667, "&<>" * 3334, "&<>" * 3334, "https://u", "2026-10-12T10:00:00Z", fr.VERIFIED_FRESH, "poll", "&<>" * 3334)
+        text = self._posted_text(row)
+        self.assertIn("Apply here</a>", text)
+        self.assertEqual(text.count("<b>"), text.count("</b>"))
+        self.assertEqual(text.count("<a "), text.count("</a>"))
+        import re
+
+        self.assertEqual(re.findall(r"&(?!amp;|lt;|gt;|quot;|#x27;)", text), [])  # every ampersand starts a whole entity
+        lines = text.split("\n")
+        self.assertTrue(lines[0].endswith("…</b>"))  # title capped
+        self.assertTrue(lines[2].endswith("…"))  # location capped
+        self.assertTrue(any(line.startswith("💬") and line.endswith("…") for line in lines))  # verdict capped
+        self.assertTrue(any(line.startswith("⚠️ Gaps:") and line.endswith("…") for line in lines))  # gaps capped
+        self.assertTrue(any(line.startswith("⏱") and line.endswith("…") for line in lines))  # late note capped
+
+    def test_alert_message_fits_telegram_limit_in_utf16_units(self) -> None:
+        import html
+        import re
+
+        x = "\U0001d4b3"  # a 4-byte character: 2 UTF-16 code units
+        row = h.JobRow("To Apply", 88, x * 10000, x * 10000, x * 10000, x * 10000, x * 10000, "https://u", "2026-10-12T10:00:00Z", fr.VERIFIED_FRESH, "poll", x * 10000)
+        text = self._posted_text(row)
+        plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+        self.assertLessEqual(len(plain.encode("utf-16-le")) // 2, 4096)
+        self.assertIn("Apply here", text)  # the link line survives: nothing was sliced off the end
+
     def test_no_channels_means_no_alert(self) -> None:
         cfg = h.replace(h.Config.from_env(), telegram_token="", telegram_chat_id="", webhook_url="")
         self.assertFalse(h.send_alert(cfg, job()))
