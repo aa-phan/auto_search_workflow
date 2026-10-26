@@ -188,6 +188,14 @@ def render(sm: dict[str, Any]) -> Grid:
         for j, v in enumerate(row_vals):
             put(yield_head + 1 + i, DATA_COL + j, Cell(v, "data"))
     y0, y1 = yield_head + 1, yield_head + 1 + len(Y["trend"])
+    # age when found, 7 days, every cohort (a bar chart reads this block)
+    age_head = yield_head + CHART_DAYS + 3
+    put(age_head, DATA_COL, Cell("Age when found", "data_head"))
+    put(age_head, DATA_COL + 1, Cell("Rows", "data_head"))
+    for i, (key, label) in enumerate(rp.AGE_BUCKETS):
+        put(age_head + 1 + i, DATA_COL, Cell(label, "data"))
+        put(age_head + 1 + i, DATA_COL + 1, Cell(Y["per_period"]["7d"]["by_age"][key], "data"))
+    age0, age1 = age_head + 1, age_head + 1 + len(rp.AGE_BUCKETS)
 
     def spark(col: int) -> Cell:
         rng = f"{col_letter(DATA_COL + col)}{d0 + 1}:{col_letter(DATA_COL + col)}{d1}"
@@ -235,7 +243,7 @@ def render(sm: dict[str, Any]) -> Grid:
     g.charts += [
         Chart("combo", "Tracker rows per day · target 20-30", (0, y0, y1), [(1, "teal"), (2, "blue"), (3, "slate"), (4, "amber"), (5, "amber")], a, 0, 490, 258,
               series_types=["COLUMN", "COLUMN", "COLUMN", "LINE", "LINE"], stacked=True),
-        Chart("column", "Alerts delivered and tracker additions", (0, d0, d1), [(4, "teal"), (5, "slate")], a, 4, 500, 258),
+        Chart("bar", "How old jobs were when found · 7d", (0, age0, age1), [(1, "blue")], a, 4, 500, 258),
         Chart("stacked_column", "Runs per day", (0, d0, d1), [(6, "teal"), (7, "crimson")], b, 0, 490, 258),
         Chart("bar", "Why relevant-title jobs were dropped · 7d", (0, rej_head + 1, rej_head + 1 + len(rej_rows)), [(1, "blue")], b, 4, 500, 258),
     ]
@@ -244,6 +252,25 @@ def render(sm: dict[str, Any]) -> Grid:
         ch.series = [(DATA_COL + c, colr) for c, colr in ch.series]
     for r_, c_, cell_ in deferred:
         g.put(r_, c_, cell_)
+
+    # ---- tracker rows, 7 days: rows and the My_Feedback mix per cohort (P2-11); counts only, never tracker text
+    section("TRACKER ROWS · 7 DAYS")
+    g.add([Cell("", "thead"), *[Cell(t_, "thead_r") for t_ in ("Rows", "Would apply", "Maybe", "Irrelevant", "Unlabelled")]], 24)
+    y7 = Y["per_period"]["7d"]
+    fb_cols = ("Would apply", "Maybe", "Irrelevant", "unlabelled")
+    cohort_rows = [("Verified fresh", "verified_fresh"), ("Recent", "recent"), ("Other", "other")]
+    for label_, cohort in cohort_rows:
+        f_ = y7["feedback"][cohort]
+        g.add([Cell(label_, "label"), *[Cell(fmt(v), "num") for v in (y7["by_cohort"][cohort], *(f_[c] for c in fb_cols))]], 26)
+    g.add([Cell("All", "label"), *[Cell(fmt(v), "num") for v in (y7["rows"], *(sum(y7["feedback"][c_][c] for _, c_ in cohort_rows) for c in fb_cols))]], 26)
+    rc = Y["reconcile"]
+    other_text = sum(y7["feedback"][c_]["other_text"] for _, c_ in cohort_rows)
+    ats_text = " · ".join(f"{a_} {n_}" for a_, n_ in sorted(y7["by_ats"].items(), key=lambda kv: (-kv[1], kv[0]))) or "none"
+    i = g.add([Cell(
+        f"Day = the day the job was found ({sm['timezone']}); age = when it was found minus the posting's own publication time; unknown = no time-precise publication time (never counted as fresh). "
+        f"{rc['in_tracker']} of {rc['ledger_kept']} ledger-kept jobs are in the tracker; {rc['tracker_rows_without_ledger_match']} rows have no ledger match"
+        + (f"; {other_text} row(s) carry free-text feedback" if other_text else "") + f". By ATS (7d): {ats_text}.", "muted_wrap")], 48)
+    g.merges.append((i, 0, COLUMNS - 1))
 
     # ---- one small table
     section("THIS WEEK")

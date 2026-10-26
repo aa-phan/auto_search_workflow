@@ -53,6 +53,8 @@ TARGET_ROWS_PER_DAY = (20, 30)  # the owner's target band for tracker rows per d
 COHORTS = ("verified_fresh", "recent", "other")
 COHORT_OF_LABEL = {"Verified fresh": "verified_fresh", "Recent": "recent"}  # the tracker `Freshness` labels (hunter.FRESHNESS_LABELS); every other label is "other"
 YIELD_DAYS = 14
+AGE_BUCKETS = (("le1h", "<=1h"), ("h1_12", "1-12h"), ("h12_24", "12-24h"), ("h24_72", "24-72h"), ("older", "older"), ("unknown", "unknown"))
+_AGE_BOUNDS_MIN = (("le1h", 60), ("h1_12", 12 * 60), ("h12_24", 24 * 60), ("h24_72", 72 * 60))  # inclusive upper bounds, consistent with the inclusive 12-hour boundary (D-17)
 DATE_FOUND_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")  # hunter.DISPLAY_FORMAT first; Sheets may re-render USER_ENTERED cells
 DEGRADED_BOARD_SHARE = 0.2  # a provider is "degraded" when this share (and at least 3) of its monitored boards failed their last poll
 _BACKOFF_RE = re.compile(r"provider backoff after HTTP 429: not polled this run: ([^;]+)")
@@ -444,7 +446,7 @@ def build_summary(
     # ---- tracker rows per found-day (MEAS-01)
     yld = _yield(facts, clean.tracker, tz=tz, periods=periods, local=local)
     # ---- failures
-    failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health)
+    failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing=yld["reconcile"]["missing_from_tracker"])
     # ---- feedback
     feedback = _feedback(clean.tracker, min_alert_score)
     # ---- daily trend (last 30 local days, newest first); None = nothing was recorded that day (unknown, not zero)
@@ -671,7 +673,7 @@ def _coverage(now, finished, boards, discovery, established_target, exploration_
     }  # fmt: skip
 
 
-def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing: list[dict[str, Any]] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     pend_eval = [f for f in facts.values() if f.seen_at and f.disposition == lg.PENDING and f.eval_at is None and lg.STAGE_EVALUATE not in f.abandoned]
     pend_alert = [f for f in facts.values() if f.eval_at and f.eval_alert and not f.alert_times and lg.STAGE_ALERT not in f.abandoned]
     pending_hyd = dsc.load_pending(discovery.get(dsc.PENDING_KEY))
@@ -715,6 +717,10 @@ def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finishe
             rows.append({"severity": 1, "what": "provider degraded", "ref": p["provider"], "count": p["failing_last_poll"], "since": None, "last": None,
                          "detail": f"{p['failing_last_poll']} of {p['monitored']} monitored boards failed their last poll; 429 backoffs {p['backoff_in_last_24_runs']}; {p['last_error']}",
                          "action": "Usually transient; persistent 429s mean lowering that provider's rate."})  # fmt: skip
+    if tracker_missing:  # P2-12: only when the all-time mismatch is not 0; keys and dates only, never tracker text (T-02-13)
+        rows.append({"severity": 1, "what": "tracker missing kept jobs", "ref": "Job Tracker", "count": len(tracker_missing), "since": None, "last": None,
+                     "detail": ", ".join(m["key"] for m in tracker_missing[:3]) + (f" and {len(tracker_missing) - 3} more" if len(tracker_missing) > 3 else ""),
+                     "action": "Look these keys up in the hidden Events tab (their evaluated row has the URL); if you deleted the rows on purpose, tell the agent; the program never rewrites tracker rows."})  # fmt: skip
     rows.sort(key=lambda x: (x["severity"], -(x["count"] or 0), str(x["ref"])))
     unique_failing = {f.key for f in facts.values() if f.errors}
     return {
@@ -807,6 +813,21 @@ def _found_day(row: dict[str, str], f: JobFacts | None, local: Any) -> date | No
     return None
 
 
+def age_bucket(f: JobFacts | None) -> str:
+    """Age when found = first observation minus the source publication time (P2-10), in inclusive buckets. Anything that
+    is not a time-precise, non-negative age is `unknown` and never counted as fresh (AGENTS rule 2): an unmatched row,
+    a day-precision or missing publication time, a publication time after first observation."""
+    if f is None or f.precision != fr.TIME or f.published is None or f.seen_at is None:
+        return "unknown"
+    minutes = (f.seen_at - f.published).total_seconds() / 60
+    if minutes < 0:
+        return "unknown"
+    for key, bound in _AGE_BOUNDS_MIN:
+        if minutes <= bound:
+            return key
+    return "older"
+
+
 def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzinfo, periods: list[Period], local: Any) -> dict[str, Any]:
     """Tracker ROWS per found-day by cohort (verified fresh / Recent / other), joined to the ledger by identity.
     Counts, keys and dates only: tracker free text is never copied (T-02-14)."""
@@ -834,8 +855,20 @@ def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzi
         trend.append(entry)
     per_period: dict[str, dict[str, Any]] = {}
     for p in periods:
-        inside = [(cohort, key) for d_, cohort, key, _ in rows if d_ is not None and p.contains(d_)]
-        per_period[p.key] = {"rows": len(inside), "by_cohort": {cohort: sum(1 for c_, _ in inside if c_ == cohort) for cohort in COHORTS}}
+        inside = [(cohort, key, row) for d_, cohort, key, row in rows if d_ is not None and p.contains(d_)]
+        by_ats: Counter[str] = Counter()
+        by_age: Counter[str] = Counter()
+        feedback = {cohort: {**{label: 0 for label in FEEDBACK}, "unlabelled": 0, "other_text": 0} for cohort in COHORTS}
+        for cohort, key, row in inside:
+            f = facts.get(key) if key else None
+            by_ats[f.ats if f is not None else "unknown"] += 1
+            by_age[age_bucket(f)] += 1
+            label = (row.get("My_Feedback") or "").strip()  # the user's column: read, counted, never written or copied
+            feedback[cohort]["unlabelled" if not label else label if label in FEEDBACK else "other_text"] += 1
+        per_period[p.key] = {
+            "rows": len(inside), "by_cohort": {cohort: sum(1 for c_, _, _ in inside if c_ == cohort) for cohort in COHORTS},
+            "by_ats": dict(sorted(by_ats.items())), "by_age": {key: by_age[key] for key, _ in AGE_BUCKETS}, "feedback": feedback,
+        }
     kept = {key: f for key, f in facts.items() if f.eval_visible}
     in_tracker = {key for key in keys if key in kept}
     missing = sorted(({"key": key, "evaluated": _stamp(f.eval_at)} for key, f in kept.items() if key not in in_tracker), key=lambda m: (m["evaluated"] or "", m["key"]))
@@ -985,13 +1018,17 @@ def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[di
     visible_in = {f.key for f in facts.values() if f.eval_visible and inside(f.eval_at)}
     tracker_keys: Counter[str] = Counter()
     unparsed = 0
-    for row in clean.tracker:
+    joined, join_counts = tracker_join(facts, clean.tracker)
+    for row, matched in zip(clean.tracker, joined):
         ident = parse_job_url((row.get("Apply_URL") or "").strip())
-        if ident is None:
+        if matched is not None:
+            tracker_keys[matched] += 1
+        elif ident is None:
             unparsed += 1
         else:
             tracker_keys[ident.key] += 1
     tkeys = set(tracker_keys)
+    missing = sorted(({"key": key, "evaluated": _stamp(facts[key].eval_at)} for key in visible_all - tkeys), key=lambda m: (m["evaluated"] or "", m["key"]))
     return {
         "window": {"from": _stamp(start), "to": _stamp(end), "hours": round((end - start).total_seconds() / 3600, 1)},
         "excluded": {"rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events, "tracker_fixture_rows": clean.excluded_fixture_rows},
@@ -1018,6 +1055,7 @@ def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[di
             "in_ledger_as_kept_any_time": len(tkeys & visible_all), "not_in_ledger_as_kept": len(tkeys - visible_all),
             "ledger_kept_in_window": len(visible_in), "ledger_kept_in_window_and_in_tracker": len(visible_in & tkeys),
             "ledger_kept_any_time_but_not_in_tracker": len(visible_all - tkeys),
+            "missing_from_tracker": missing, "by_stored_url": join_counts["by_stored_url"],  # keys and stamps only, never tracker text
         },
     }  # fmt: skip
 
@@ -1044,4 +1082,9 @@ def format_reconciliation(r: dict[str, Any]) -> list[str]:
         f"ledger-kept jobs missing from the tracker: {t['ledger_kept_any_time_but_not_in_tracker']} (should be 0)",
         f"    ledger-kept in this window: {t['ledger_kept_in_window']} ({t['ledger_kept_in_window_and_in_tracker']} are in the tracker)",
     ]
+    if t.get("by_stored_url"):
+        lines.append(f"    {t['by_stored_url']} tracker row(s) were placed by their exact stored URL (a diagnostic fallback; identity is the ATS, board and posting id)")
+    miss = t.get("missing_from_tracker") or []
+    if miss:
+        lines.append("    missing from the tracker (key, evaluated): " + "; ".join(f"{m['key']} {m['evaluated']}" for m in miss[:10]) + (f"; and {len(miss) - 10} more" if len(miss) > 10 else ""))
     return lines
