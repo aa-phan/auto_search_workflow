@@ -6,10 +6,10 @@ current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
 stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-10-26T19:17:30.682Z"
+last_updated: "2026-10-26T19:26:04.960Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: f4a989bf1ff61a881c1f724cd20db8f108520338
+state_head: 6e2012f2e7e6e47c9f847ebbfce7abfe96812d44
 progress:
   total_phases: 6
   completed_phases: 1
@@ -98,6 +98,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
+- 02-08 waits for one full UTC day of production runs on fc197c1 (owner chose wait, 2026-10-26); resume /gsd-execute-phase 2 at or after 2026-10-28 00:05 UTC. 02-09 also waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
 
 ## Deferred Items
 
