@@ -54,6 +54,7 @@ RUN_COLUMNS = [
     "Sheets_Reads", "Sheets_Writes", "Sheets_429", "ATS_Requests", "ATS_429", "ATS_Seconds", "Groq_Calls", "Groq_429",
     "Run_ID", "Finished_At", "Outcome", "Run_Kind", "Search_Failed", "Search_Account_Used", "Credit_Status",
     "Eval_Attempted", "Eval_Transient", "Eval_Failed", "Code_Version",
+    "Groq_Tokens_Primary", "Groq_Tokens_Fallback", "Groq_Prompt_Tokens", "Groq_Cached_Tokens", "Groq_Completions", "Groq_Limits", "Eval_Budget_Skipped",
 ]  # fmt: skip
 RUN_ID_COLUMN = RUN_COLUMNS.index("Run_ID") + 1  # 1-based sheet column
 # Run outcomes. A run-start record is written first with STARTED; the end of the run overwrites it. A record that
@@ -136,6 +137,13 @@ class RunRecord:
     eval_transient: int = 0  # attempts that ended in a temporary failure (retried later, nothing recorded per job)
     eval_failed: int = 0  # attempts recorded as failures against the job (bounded)
     code_version: str = ""  # first 8 characters of the commit that ran (GITHUB_SHA): reports use it to find the periods a deployment or correction affected
+    groq_tokens_primary: int = 0  # Groq usage.total_tokens charged to the primary model this run (D-50)
+    groq_tokens_fallback: int = 0  # the same for the fallback model
+    groq_prompt_tokens: int = 0  # prompt part of usage, both models
+    groq_cached_tokens: int = 0  # prompt tokens Groq served from its cache (recorded so true consumption is visible)
+    groq_completions: int = 0  # answered Groq requests that returned a completion
+    groq_limits: str = ""  # JSON of the x-ratelimit-* response header values seen this run, per model (never request headers)
+    eval_budget_skipped: int = 0  # pending jobs left waiting because the daily Groq budget was spent (nothing recorded, no attempt)
 
     @property
     def completed(self) -> bool:
@@ -166,7 +174,8 @@ class RunRecord:
                    num(15) or 0, num(16) or 0, num(17) or 0, num(18) or 0,
                    *(num(i) or 0 for i in range(19, 30)), num(30), num(31), *(num(i) or 0 for i in range(32, 35)), row[35],
                    *(num(i) or 0 for i in range(36, 55)),
-                   row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0, row[65])  # fmt: skip
+                   row[55], row[56], row[57], row[58], num(59) or 0, num(60), row[61], num(62) or 0, num(63) or 0, num(64) or 0, row[65],
+                   num(66) or 0, num(67) or 0, num(68) or 0, num(69) or 0, num(70) or 0, row[71], num(72) or 0)  # fmt: skip
 
 
 def board_to_row(b: BoardRecord) -> list[Any]:

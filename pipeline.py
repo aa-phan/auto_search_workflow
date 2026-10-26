@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 import discovery as dsc
+import eval_budget as eb
 import freshness as fr
 import inventory as inv
 import ledger as lg
@@ -74,9 +75,10 @@ class EvalOutcome:
     done:      payload holds the final row (status, score, ...); evaluation is complete.
     transient: temporary failure (timeout, 5xx, rate limit); retry next run.
     failed:    permanent-looking failure; retried a bounded number of times, then abandoned.
+    deferred:  budget or deadline: nothing recorded, no attempt used; the job waits (D-50).
     """
 
-    kind: str  # "done" | "transient" | "failed"
+    kind: str  # "done" | "transient" | "failed" | "deferred"
     payload: dict[str, Any] | None = None
     message: str = ""
 
@@ -116,6 +118,9 @@ class Deps:
     run_kind: str = KIND_PRODUCTION  # `rehearsal` for a local run: its run record says so and reports leave it out
     pool_policy: pools.PoolPolicy = field(default_factory=pools.PoolPolicy)  # max_active is always max_monitored_boards
     secrets: tuple[str, ...] = ()  # values that must never reach the Events ledger, Runs.Notes or the log (bot token, chat id, webhook URL)
+    groq_budget: eb.GroqBudget | None = None  # the per-model daily token budget, shared with the Groq client (None = unbudgeted)
+    can_score: Callable[[lg.JobState], bool] | None = None  # pre-check before evaluating a job: False = the budget is spent for it (None = always allowed)
+    groq_limits: Callable[[], str] | None = None  # JSON of the x-ratelimit-* response headers the Groq client saw this run
 
 
 _BOT_TOKEN_IN_URL = re.compile(r"bot[0-9]{5,}:[A-Za-z0-9_-]{20,}")
@@ -212,6 +217,23 @@ def run_cycle(d: Deps) -> RunRecord:
             d.state.append_events(pending_events)
             pending_events = []
 
+    budget_loaded = False  # set once this run holds the Discovery tab's rows; save_budget does nothing before that
+
+    def save_budget() -> None:
+        """Persist the Groq daily budget in the Discovery tab (key `groq_budget`) when it changed. Never in a dry run, never
+        before the tab's rows were loaded (it rewrites the whole body), and a failed save never stops the run."""
+        if d.dry_run or d.groq_budget is None or not budget_loaded:
+            return
+        value = d.groq_budget.to_json()
+        if value == discovery_state.get(eb.GROQ_BUDGET_KEY):
+            return
+        try:
+            d.state.save_discovery_state(dict(discovery_state, **{eb.GROQ_BUDGET_KEY: value}), lg.stamp(d.now()))
+            discovery_state[eb.GROQ_BUDGET_KEY] = value
+        except Exception as exc:
+            log.error("Could not record the Groq daily token budget: %s", exc)
+            run.notes += "groq budget not saved; " if "groq budget not saved" not in run.notes else ""
+
     if not d.dry_run:
         try:  # instrumentation only: failing to write the start record must never stop the run
             d.state.begin_run(run)
@@ -245,6 +267,11 @@ def run_cycle(d: Deps) -> RunRecord:
         found: dsc.DiscoveryResult | None = None
         found_keys: list[str] = []
         discovery_state = d.state.load_discovery_state()
+        budget_loaded = True
+        if d.groq_budget is not None:
+            d.groq_budget.restore(discovery_state.get(eb.GROQ_BUDGET_KEY), now)
+            if d.groq_budget.rolled_from:
+                log.info("Groq daily token budget restarted for %s (previous day %s)", d.groq_budget.day, d.groq_budget.rolled_from)
         rotation = dsc.RotationState.from_json(discovery_state.get(dsc.ROTATION_KEY))
         pending = dsc.load_pending(discovery_state.get(dsc.PENDING_KEY))
         budget = search.SearchBudget.load(
@@ -563,6 +590,7 @@ def run_cycle(d: Deps) -> RunRecord:
             save_values.update(rebalance_values)
             if save_values != discovery_state:
                 d.state.save_discovery_state(save_values, lg.stamp(now))
+            discovery_state = save_values  # later budget saves must carry the advanced cursor, queue and rebalance keys
         else:
             pending_events = []
 
@@ -572,9 +600,13 @@ def run_cycle(d: Deps) -> RunRecord:
         if len(todo) > d.max_jobs:
             log.info("%d jobs awaiting evaluation; evaluating the %d highest priority", len(todo), d.max_jobs)
         for i, st in enumerate(todo[: d.max_jobs], 1):
+            if d.can_score is not None and not d.can_score(st):
+                run.eval_budget_skipped += 1  # the daily Groq budget is spent for this job: it waits, nothing recorded, no attempt (D-50)
+                continue
             ident = JobIdentity(st.key.split("|")[0], str(st.seen_detail.get("board") or st.key.split("|")[1]), st.key.split("|", 2)[2])
             out = d.evaluate(ident, st)
-            run.eval_attempted += 1
+            if out.kind != "deferred":
+                run.eval_attempted += 1
             if out.kind == "done" and out.payload is not None:
                 payload = dict(out.payload, freshness=st.freshness, source=st.seen_detail.get("source", ""), alert=False, run=run.run_id)
                 payload["alert"] = bool(st.freshness in fr.ALERTABLE and payload.get("status") == "To Apply")
@@ -584,6 +616,8 @@ def run_cycle(d: Deps) -> RunRecord:
                 pending_events.append(lg.Event(lg.stamp(now), st.key, lg.EVALUATED, st.freshness, detail=payload))
                 run.evaluated += 1
                 states[st.key].evaluated, states[st.key].evaluated_time = payload, lg.stamp(now)
+            elif out.kind == "deferred":
+                run.eval_budget_skipped += 1  # budget or deadline reached mid-job: nothing recorded, no attempt, not a failure
             elif out.kind == "transient":
                 # A temporary outage records nothing: it must neither mark the job done nor
                 # use up its bounded retry attempts. The next run simply tries again.
@@ -596,7 +630,13 @@ def run_cycle(d: Deps) -> RunRecord:
                 st.errors[lg.STAGE_EVALUATE] = st.errors.get(lg.STAGE_EVALUATE, 0) + 1
             if i % FLUSH_EVERY == 0:
                 write()
+                save_budget()
         write()
+        save_budget()
+        if run.eval_budget_skipped:
+            run.notes += f"groq daily budget reached: {run.eval_budget_skipped} jobs wait (no attempt used); " if "groq daily budget reached" not in run.notes else ""
+        if d.groq_budget is not None:
+            log.info(d.groq_budget.summary())
 
         # ---------------------------------------------------------------- 4. alert
         for st in states.values():
@@ -653,6 +693,15 @@ def run_cycle(d: Deps) -> RunRecord:
         run.sheets_reads, run.sheets_writes, run.sheets_429 = (int(used.get(k, 0)) for k in ("sheets_reads", "sheets_writes", "sheets_429"))
         run.ats_requests, run.ats_429, run.ats_seconds = int(used.get("ats_requests", 0)), int(used.get("ats_429", 0)), round(used.get("ats_seconds", 0))
         run.groq_calls, run.groq_429 = int(used.get("groq_calls", 0)), int(used.get("groq_429", 0))
+        run.groq_tokens_primary, run.groq_tokens_fallback = int(used.get("groq_tokens_primary", 0)), int(used.get("groq_tokens_fallback", 0))
+        run.groq_prompt_tokens, run.groq_cached_tokens = int(used.get("groq_prompt_tokens", 0)), int(used.get("groq_cached_tokens", 0))
+        run.groq_completions = int(used.get("groq_completions", 0))
+        if d.groq_limits is not None:
+            try:
+                run.groq_limits = d.groq_limits()[:1000]
+            except Exception as exc:  # instrumentation only
+                log.warning("Could not read the Groq limits: %s", exc)
+        save_budget()
         run.credit_status = run.credit_status or CREDIT_NONE
         run.finished_at = lg.stamp(d.now())
         run.outcome = OUTCOME_FAILED if crashed else OUTCOME_DEGRADED if degraded_reason(run) else OUTCOME_OK
