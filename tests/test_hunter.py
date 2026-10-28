@@ -743,23 +743,37 @@ class GroqSettingsTests(unittest.TestCase):
             s = self.parse(raw, env)
             return s.groq_daily_token_budget, s.groq_fallback_daily_token_budget
 
-        self.assertEqual(pair({}), (170000, 170000))
+        self.assertEqual(pair({}), (100000, 100000))
         self.assertEqual(pair({"Groq_Daily_Token_Budget": "200000", "Groq_Fallback_Daily_Token_Budget": ""}), (200000, 200000))
         self.assertEqual(pair({"Groq_Daily_Token_Budget": "200000", "Groq_Fallback_Daily_Token_Budget": "500000"}), (200000, 500000))
         self.assertEqual(pair({"Groq_Daily_Token_Budget": "-5"}), (0, 0))  # a negative value never spends
         self.assertEqual(pair({"Groq_Daily_Token_Budget": "1.9e5"}), (190000, 190000))  # a float string truncates through _int_or
         self.assertEqual(pair({"Groq_Daily_Token_Budget": "0", "Groq_Fallback_Daily_Token_Budget": "300"}), (0, 300))
-        self.assertEqual(pair({"Groq_Daily_Token_Budget": "abc"}), (170000, 170000))  # unreadable: the default, never a crash
-        self.assertEqual(pair({"Groq_Fallback_Daily_Token_Budget": "xyz"}), (170000, 170000))
+        self.assertEqual(pair({"Groq_Daily_Token_Budget": "abc"}), (100000, 100000))  # unreadable: the default, never a crash
+        self.assertEqual(pair({"Groq_Fallback_Daily_Token_Budget": "xyz"}), (100000, 100000))
         self.assertEqual(pair({}, {"GROQ_DAILY_TOKEN_BUDGET": "90000", "GROQ_FALLBACK_DAILY_TOKEN_BUDGET": "40000"}), (90000, 40000))
+
+    def test_groq_budget_default_is_half_of_the_recorded_daily_limit_because_the_window_rolls(self) -> None:
+        """D-53: the owner read 200,000 tokens/day per model from the account's limits page (2026-10-26); the daily request
+        window was measured as rolling (reset 86.4 s per request), so the default is half the limit (two consecutive UTC-day
+        budgets stay below a rolling 24-hour limit), not 85%. The two limits are equal, so the fallback row stays blank."""
+        self.assertEqual(h.GROQ_TPD_PRIMARY, 200000)
+        self.assertEqual(h.GROQ_TPD_FALLBACK, 200000)
+        self.assertEqual(h.SETTING_DEFAULTS["Groq_Daily_Token_Budget"], str(h.GROQ_TPD_PRIMARY // 2))
+        self.assertEqual(h.DEFAULT_GROQ_DAILY_TOKENS, h.GROQ_TPD_PRIMARY // 2)
+        self.assertEqual(h.SETTING_DEFAULTS["Groq_Fallback_Daily_Token_Budget"], "")  # same limit: blank = same
+        s = self.parse({})
+        self.assertLess(s.groq_daily_token_budget * 2, h.GROQ_TPD_PRIMARY + 1)  # two budget days fit in one rolling 24 h
+        self.assertEqual((s.groq_daily_token_budget, s.groq_fallback_daily_token_budget), (h.GROQ_TPD_PRIMARY // 2, h.GROQ_TPD_FALLBACK // 2))
 
     def test_groq_budget_rows_exist_and_say_what_they_limit_and_where_the_figure_came_from(self) -> None:
         rows = {key: (default, note) for key, default, note in h.DEFAULT_SETTINGS}
-        self.assertEqual(h.SETTING_DEFAULTS["Groq_Daily_Token_Budget"], "170000")
+        self.assertEqual(h.SETTING_DEFAULTS["Groq_Daily_Token_Budget"], "100000")
         self.assertEqual(h.SETTING_DEFAULTS["Groq_Fallback_Daily_Token_Budget"], "")
         primary, fallback = rows["Groq_Daily_Token_Budget"][1], rows["Groq_Fallback_Daily_Token_Budget"][1]
-        for text in ("per model per UTC day", "85%", "200,000", "provisional"):
+        for text in ("per model per UTC day", "50%", "200,000", "2026-10-26", "limits page", "rolling", "D-53"):
             self.assertIn(text, primary)
+        self.assertNotIn("provisional", primary)  # the figure now rests on the account's limits page, not the public table
         self.assertIn("Blank = same", fallback)
         keys = [k for k, _, _ in h.DEFAULT_SETTINGS]
         self.assertEqual(keys[keys.index("Max_New_Boards_Per_Run") + 1 : keys.index("Max_New_Boards_Per_Run") + 3], ["Groq_Daily_Token_Budget", "Groq_Fallback_Daily_Token_Budget"])
@@ -775,7 +789,7 @@ class GroqSettingsTests(unittest.TestCase):
         self.assertEqual(note({"Groq_Daily_Token_Budget": "200000"}), "Groq daily token budget 200000 / 200000 per UTC day from Settings tab")
         self.assertEqual(note({}, {"GROQ_DAILY_TOKEN_BUDGET": "90000"}), "Groq daily token budget 90000 / 90000 per UTC day from environment")
         self.assertEqual(
-            note({}), "Groq daily token budget 170000 / 170000 per UTC day from default (provisional: 85% of the public 200,000 tokens/day figure)"
+            note({}), "Groq daily token budget 100000 / 100000 per UTC day from default (50% of this account's 200,000 tokens/day per model, D-53)"
         )
         self.assertIn("from Settings tab", note({"Groq_Daily_Token_Budget": " 5 "}, {"GROQ_DAILY_TOKEN_BUDGET": "90000"}))  # the Sheet wins over the environment
         self.assertIn("from default", note({"Groq_Daily_Token_Budget": "   "}))  # a blank cell is not a setting
