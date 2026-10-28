@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-10-26T19:26:59.840Z"
+stopped_at: Completed 02-08-PLAN.md
+last_updated: "2026-10-28T05:36:08.777Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: 1d5e47c8affb7e8e665c5e74b17bf34c82d6fea7
+state_head: fd3bb15c6ba51259c70494060cff6435a10a9d60
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
   percent: 17
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-25)
 ## Current Position
 
 Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 8 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Last activity: 2026-10-26 — Phase 02 execution started
 
@@ -61,6 +61,7 @@ Progress: [██░░░░░░░░] 17%
 | Phase 02 P05 | 5 min | 3 tasks | 5 files |
 | Phase 02 P06 | 12 min | 2 tasks | 7 files |
 | Phase 02 P07 | 1h | 3 tasks | 2 files |
+| Phase 02 P08 | ~1h across two invocations | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -83,7 +84,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: 02-06: scored_by_model counts only evaluations that reached scoring; Groq budget record from an earlier UTC day shows 0 used today — gate rejections never call Groq; eval_budget rolls the budget at UTC midnight
 - [Phase 02]: 02-06: public pilot log prints only x-ratelimit-* values and model ids matching strict allow patterns — T-02-16: a damaged or hand-edited Groq_Limits record must not leak text into a public log
 - [Phase 02]: 02-07: Phase 2 deployed 2026-10-26 18:25 UTC (fc197c1); first run success with no cut, pilot report and one delivery test (telegram_sent true) live; Sheet render, Telegram arrival and the missing tracker row greenhouse|nadiacare|4459849009 are owner checks
-- [Phase 02]: Owner-read Groq console figures (read 2026-10-26, for 02-08 Task 3; not yet recorded as D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer still pending at 02-08 Task 2.
+- [Phase 02]: Owner-read Groq console figures (read 2026-10-26, recorded in D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer given 2026-10-28 (D-53).
+- [Phase 02]: D-53: Groq plan free-revisit (stay free, revisit before Phase 4); resume to Groq ok; Groq_Daily_Token_Budget default 100000 per model (half the owner-read 200,000, rolling window); 20-30 a day target conditional (about 75 evaluations / 12 rows a day)
 
 ### Pending Todos
 
@@ -94,12 +96,12 @@ Roadmap decisions for v2.0 (2026-10-25):
 
 ### Blockers/Concerns
 
-- Phase 2: Groq tokens per call measured 2653.9 (n=95, live, STATUS 'Groq limits and plan'); account limits owner-read (free, 200K TPD per model); the plan decision (D-53) is pending the owner; the target stays conditional.
+- Phase 2: Groq plan decided in D-53 (2026-10-28): free-revisit, budget default 100,000 per model in code (commit 0762df7) but NOT pushed; the owner must add or edit the live Settings row `Groq_Daily_Token_Budget`; revisit the plan before Phase 4; the 20-30 target stays conditional (about 75 evaluations / 12 rows a day).
 - Phase 2: 2 ledger-kept jobs are missing from the tracker (should be 0), not investigated; MEAS-01 counts tracker rows.
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
-- 02-08 Task 1 done 2026-10-28 (wait over: complete UTC day 2026-10-27 had 24 production runs on f4a989b, docs-only on fc197c1; pilot report run 40606970912). Waiting on the owner at the Task 2 checkpoint (plan choice, resume-to-Groq answer). 02-09 still waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
+- 02-08 complete 2026-10-28. 02-09 still waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
 
 ## Deferred Items
 
@@ -119,6 +121,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-26T19:17:30.667Z
-Stopped at: Completed 02-07-PLAN.md
+Last session: 2026-10-28T05:36:08.761Z
+Stopped at: Completed 02-08-PLAN.md
 Resume file: None
