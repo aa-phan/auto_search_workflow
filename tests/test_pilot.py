@@ -165,7 +165,7 @@ if __name__ == "__main__":
 
 class DeliveryFixtureTests(unittest.TestCase):
     def cfg(self, **kw):
-        return h.replace(h.Config.from_env(), telegram_token="tok", telegram_chat_id="123", **kw)
+        return h.replace(h.Config.from_env(), **{"telegram_token": "tok", "telegram_chat_id": "123", **kw})
 
     def fake_groq(self):
         from unittest import mock
@@ -211,6 +211,20 @@ class DeliveryFixtureTests(unittest.TestCase):
         store = mock.Mock(sheet_url="")
         with mock.patch.object(h, "send_alert", return_value=False):
             self.assertEqual(h.run_delivery_test(self.cfg(), store, h.Settings.from_values({"Resume_Text": "r" * 300}), self.fake_groq(), "123"), 1)
+
+    def test_a_send_exception_never_puts_the_bot_token_in_the_log_or_escapes(self) -> None:
+        """WR-02: requests errors embed the Telegram URL, which embeds the bot token (D-49)."""
+        from unittest import mock
+
+        cfg = self.cfg(telegram_token="123456:SECRET-bot-token")
+        leak = f"401 Client Error: Unauthorized for url: https://api.telegram.org/bot{cfg.telegram_token}/sendMessage"
+        store = mock.Mock(sheet_url="")
+        with mock.patch.object(h, "send_alert", side_effect=RuntimeError(leak)), self.assertLogs(h.log, level="ERROR") as logs:
+            rc = h.run_delivery_test(cfg, store, h.Settings.from_values({"Resume_Text": "r" * 300}), self.fake_groq(), "123")
+        self.assertEqual(rc, 1)
+        text = "\n".join(logs.output)
+        self.assertNotIn(cfg.telegram_token, text)
+        self.assertIn("send failed", text)
 
 
 class TriggerRecordingTests(unittest.TestCase):

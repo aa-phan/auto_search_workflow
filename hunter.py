@@ -1884,7 +1884,11 @@ def run_delivery_test(cfg: Config, store: Any, settings: Settings, groq: Any, to
         FIXTURE_POSTING.location, f"[{FIXTURE_LABEL}] {ev.verdict}", ev.missing_gaps, FIXTURE_URL, "", FIXTURE_LABEL, FIXTURE_LABEL,
     )  # fmt: skip
     store.append_jobs([row])  # the real tracker append
-    alerted = send_alert(cfg, row, store.sheet_url)  # the real Telegram send (message title is the fixture's)
+    try:
+        alerted = send_alert(cfg, row, store.sheet_url)  # the real Telegram send (message title is the fixture's)
+    except Exception as exc:  # a requests error carries the Telegram URL, and the URL carries the bot token (D-49, WR-02)
+        log.error("Delivery test: send failed: %s", pl.redact(str(exc) or type(exc).__name__, (cfg.telegram_token, cfg.telegram_chat_id, cfg.webhook_url)))
+        return 1
     print(json.dumps({"scored": ev.score, "status": row.status, "tracker_row_appended": True, "telegram_sent": bool(alerted), "label": FIXTURE_LABEL}))
     return 0 if alerted else 1
 
