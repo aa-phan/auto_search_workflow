@@ -57,6 +57,65 @@ Pushed `main` (fc197c1) at 2026-10-26 18:25 UTC on the owner's choice `deploy-wi
 
 **Observations to carry forward (not acted on, AGENTS rule 7):** Events rows are now 189,830 (the D-03 200k review point is near, plan 02-08); the live Groq headers show `x-ratelimit-limit-tokens=8000` for gpt-oss-120b, which is a per-minute figure the budget does not govern; and the budget source note not reaching the public log means a future "which budget is in force" check needs the Sheet.
 
+## Groq limits and plan (MEAS-02)
+
+Written by plan 02-08 Task 1 on 2026-10-28 (UTC). **The Groq plan decision is not made yet (owner checkpoint, plan 02-08 Task 2); D-53 is not written and no default has changed.** Every number below is labelled live (read-only, public workflow log), derived (arithmetic on live figures) or owner-read.
+
+### Measured usage (live, read-only)
+
+Source: read-only `pilot_report` run 40606970912 (`job_hunter.yml -f pilot_report=true`, 2026-10-28 00:09:47 UTC, `success`, Code_Version f4a989bf, which is docs-only on top of fc197c17: `git diff fc197c1 HEAD` on `*.py` and `.github` is empty). Report window 2026-10-21T00:10:03Z to 2026-10-28T00:10:03Z (168 h); the Groq token columns only exist from the first run on fc197c1 (2026-10-26 19:00 UTC), so the Groq token figures cover **25 runs, about 29 hours, UTC 2026-10-26 19:00 to 2026-10-27 23:00**, not the 7 days. The complete UTC day 2026-10-27 has production runs on f4a989b on every hour (00:00 to 23:00 UTC, all `success`). Log scanned for key material: only the counts and header values below were copied.
+
+| Figure | Value | Sample | Live or derived |
+|---|---|---|---|
+| Tokens per scoring call (both models together) | **2,653.9** | **n = 95 scoring calls** in 25 runs, about 1.2 UTC days; the first run alone read 3,082.6 (n=10), so the figure is still settling | live (report line `tokens per scoring call 2653.9 (n=95)`) |
+| Tokens per UTC day, 2026-10-27 (complete day) | primary `openai/gpt-oss-120b` **171,329**, fallback `openai/gpt-oss-20b` **26,564**, total 197,893 | one full UTC day | live |
+| Tokens, 2026-10-26 (partial: from 19:00 UTC) | primary 54,224, fallback 0 | 5 h | live |
+| Scoring calls per UTC day | 2026-10-27 about **75** (197,893 / 2,653.9 = 74.6), 2026-10-26 from 19:00 about 20 | derived from tokens and the per-call mean; the two days add to 95 = n | derived. The report's own `completions per day 13.7` divides 95 calls by the whole 7-day window and so understates the rate; it is not used here (logged in deferred-items.md) |
+| Primary budget on 2026-10-27 | 171,329 used against the 170,000 budget (one call over, the check is made before the call), so the **primary model's budget was reached and the fallback took over** (26,564 tokens) | one day | live: first live sight of budget-driven fallback (it was mocked before) |
+| Groq calls / HTTP 429 | 319 calls in the window, **0 HTTP 429** | 7 days | live |
+| Cached share of prompt tokens | 9% (19% in the first run) | n = 95 calls | live |
+| Governors | budget skips 0, deadline skips 0, runs with an evaluation cut 0, boards cut by the poll deadline 0, alerts deferred 0 (budget skip stays 0 because the fallback absorbed the primary's budget) | 206 timed runs, 25 of them with the columns | live |
+| Run duration | median 135 s, p90 277 s, **p95 343 s, max 941 s (62.7% of the 1,500 s workflow timeout)** | 206 timed runs | live |
+| Scored and kept | **319 scored, 52 kept for the tracker = keep rate 16.3%** (pilot week 1: 18-20%); 27 of the 52 verified fresh; 22 alerts delivered | 7 days | live |
+| Scored per day, kept per day | 319 / 7 = 45.6 scored a day and 52 / 7 = **7.4 kept a day** over the window; 2026-10-27 alone scored about 75 (derived above) | 7 days | live / derived |
+| Events rows | 195,793, about 9,489 rows a day (was 3,355 on 2026-10-25), so the D-03 200k point arrives within about a day | report line | live |
+
+**Latest `x-ratelimit-*` header values (live, from the `Runs` columns, read by the report):**
+
+| Run (`at`) | Model | requests limit / remaining / reset | tokens limit / remaining / reset |
+|---|---|---|---|
+| 2026-10-26T19:00:30Z (report 40384832233) | `openai/gpt-oss-120b` | 1000 / 990 / **14m24s** | 8000 / 4841 / 23.692s |
+| 2026-10-27T23:00:26Z (report 40606970912) | `openai/gpt-oss-20b` | 1000 / 999 / **1m26.4s** | 8000 / 5856 / 16.08s |
+
+**Daily window: rolling, not a fixed moment (for requests).** 10 requests used (1000 - 990) gives a reset of 14m24s = 864 s = 10 x 86.4 s, and 1 request used (1000 - 999) gives 1m26.4s = 86.4 s, and 86.4 s is exactly 24 h / 1000. The reset time scales with the requests used and lands on different clock moments (19:14:54 and 23:01:52 UTC), so the requests-per-day allowance refills continuously instead of resetting at one fixed time (UTC midnight would give hours, the same instant each time). Two stamps, two models, so this rests on two points. **The tokens-per-day window is not in any header;** that it refills the same way is an inference, not a measurement. Consequence recorded for Task 3: if the window is treated as rolling, the budget default is half the limit, not 85% (the plan's rule), and the arithmetic below shows both.
+
+**Arithmetic, with the measured 2,653.9 tokens per call (n = 95) and keep rate 16.3% (52 / 319):**
+
+evaluations per day = sum over usable models of (share x daily token limit) / tokens per call; tracker rows per day = evaluations per day x keep rate. The limit is the 200K tokens per day per model that the owner read from the account page (below). Groq's public docs table shows the same 200K, but that table is **public table, not this account** and is not what the arithmetic rests on.
+
+| Case | Budget per model | Evaluations a day | Tracker rows a day (16.3%) | (at the pilot's 19.6%) |
+|---|---|---|---|---|
+| primary only, plan rule (85%) | 170,000 | about **64** | about **10** | about 12.5 |
+| primary + fallback, plan rule (85%) | 170,000 each | about **128** | about **21** | about 25 |
+| primary only, rolling window (50%) | 100,000 | about 38 | about 6 | about 7 |
+| primary + fallback, rolling window (50%) | 100,000 each | about 75 | about 12 | about 15 |
+
+The 20-30 a day target needs about 123-184 evaluations a day at 16.3% (20 / 0.163 to 30 / 0.163). With the free figures only the plan-rule case with both models at 85% reaches the bottom of the band (about 21 rows), and it does so only if scoring volume rises from today's 45.6 a day (7-day mean; about 75 on 2026-10-27) to about 128 a day; under the rolling treatment even both free models stop at about 12 rows. The RESEARCH estimate that the free tier cannot support the target rested on an assumed 3.5-4.5k tokens per call; the measured 2.65k per call is lower, which moves the free ceiling up but not to the middle of the band. **Supply caveat:** the limit that binds today is the number of jobs reaching scoring (the title gate stops 96% of new postings), not Groq: on 2026-10-27 the primary model's budget was reached, but that day's volume (about 75) was well above the week's mean, and the kept rate has been 7.4 a day. Per-minute limits (8K tokens a minute = about 3 calls a minute per model at 2.65k each) were not hit: 0 HTTP 429 in 319 calls. Phase 4 backfill competes for the same daily budget.
+
+### Account limits
+
+Owner-read from the account limits page (console.groq.com, Settings, Limits and Data controls) on **2026-10-26**, relayed by the owner in chat; figures only, no key. **Recorded here as supplied, to be confirmed at the plan 02-08 Task 2 decision; not yet a decision (D-53).**
+
+| Item | Value |
+|---|---|
+| Plan / tier | free |
+| `openai/gpt-oss-120b` | 30 requests per minute, 1,000 per day, 8,000 tokens per minute, 200,000 tokens per day |
+| `openai/gpt-oss-20b` | 30 requests per minute, 1,000 per day, 8,000 tokens per minute, 200,000 tokens per day |
+| Data retention | zero data retention **not** enabled (neither the global setting nor the inference API setting) |
+| Daily window | requests per day: rolling (see above, live headers); tokens per day: not determined (not in any header) |
+
+Still to be answered by the owner at Task 2: the plan choice (free / developer / free-revisit) and "resume to Groq: ok" or "resume to Groq: change" (the resume text is sent to Groq on every scoring call, with retention not enabled as read).
+
 ## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
 
 All figures from the read-only `pilot_report` and `rebalance_report` workflow runs against the production Sheet (**live**). Window of the report: the last 168 h.

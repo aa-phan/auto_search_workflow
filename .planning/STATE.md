@@ -94,12 +94,12 @@ Roadmap decisions for v2.0 (2026-10-25):
 
 ### Blockers/Concerns
 
-- Phase 2: Groq tier, limits and tokens per call are unverified; the target depends on them.
+- Phase 2: Groq tokens per call measured 2653.9 (n=95, live, STATUS 'Groq limits and plan'); account limits owner-read (free, 200K TPD per model); the plan decision (D-53) is pending the owner; the target stays conditional.
 - Phase 2: 2 ledger-kept jobs are missing from the tracker (should be 0), not investigated; MEAS-01 counts tracker rows.
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
-- 02-08 waits for one full UTC day of production runs on fc197c1 (owner chose wait, 2026-10-26); resume /gsd-execute-phase 2 at or after 2026-10-28 00:05 UTC. 02-09 also waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
+- 02-08 Task 1 done 2026-10-28 (wait over: complete UTC day 2026-10-27 had 24 production runs on f4a989b, docs-only on fc197c1; pilot report run 40606970912). Waiting on the owner at the Task 2 checkpoint (plan choice, resume-to-Groq answer). 02-09 still waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
 
 ## Deferred Items
 
