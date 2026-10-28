@@ -136,6 +136,13 @@ MIN_JD_CHARS = 200
 # --------------------------------------------------------------------------- settings
 
 # Key, default value, instructions shown in column C of the Settings tab.
+# Tokens per day per model, as the owner read them from this account's limits page (console.groq.com, Settings > Limits) on 2026-10-26:
+# free plan, both models 200,000 (DECISIONS D-53). Groq's daily REQUEST window was measured as rolling (reset 86.4 s per request = 24 h / 1000), and
+# the token window is assumed to roll the same way, so the budget default is half the limit: two consecutive UTC-day budgets stay below it.
+GROQ_TPD_PRIMARY = 200000  # openai/gpt-oss-120b
+GROQ_TPD_FALLBACK = 200000  # openai/gpt-oss-20b
+DEFAULT_GROQ_DAILY_TOKENS = GROQ_TPD_PRIMARY // 2  # the fallback row stays blank (= same) while both limits are equal; set its own row if they ever differ
+
 DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ("Resume_Text", "", "Paste your full resume as plain text. The AI scores every job against this."),
     (
@@ -183,9 +190,10 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ("Max_New_Boards_Per_Run", "50", "Most new boards added to the hourly checks in a single run (each one is read once as a starting point)."),
     (
         "Groq_Daily_Token_Budget",
-        "170000",
+        str(DEFAULT_GROQ_DAILY_TOKENS),
         "Most Groq AI tokens the app uses per model per UTC day; when both models reach it, scoring stops and jobs wait for the next day (nothing is lost). "
-        "170000 = 85% of the 200,000 tokens/day in Groq's public free-tier table: provisional until this account's limits page is read (STATUS).",
+        "100000 = 50% of this account's 200,000 tokens/day per model, read from Groq's limits page on 2026-10-26 (DECISIONS D-53); "
+        "half, not 85%, because Groq's daily window is rolling, not a reset at midnight.",
     ),
     (
         "Groq_Fallback_Daily_Token_Budget",
@@ -209,9 +217,6 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
     ),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
-
-
-DEFAULT_GROQ_DAILY_TOKENS = 170000  # 85% of the 200,000 tokens/day public free-tier figure; provisional until MEAS-02 reads the account's limits (D-50)
 
 
 def _split_list(value: str) -> list[str]:
@@ -326,7 +331,7 @@ def groq_budget_note(raw: dict[str, str], s: Settings) -> str:
     elif (os.getenv("GROQ_DAILY_TOKEN_BUDGET") or "").strip():
         source = "environment"
     else:
-        source = "default (provisional: 85% of the public 200,000 tokens/day figure)"
+        source = f"default (50% of this account's {GROQ_TPD_PRIMARY:,} tokens/day per model, D-53)"
     return f"Groq daily token budget {s.groq_daily_token_budget} / {s.groq_fallback_daily_token_budget} per UTC day from {source}"
 
 
