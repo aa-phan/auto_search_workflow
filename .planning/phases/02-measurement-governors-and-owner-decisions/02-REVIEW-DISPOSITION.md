@@ -5,11 +5,11 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Persisted \"spent per Groq\" flag outlasts Groq's rolling window, so a model can stay locked for up to a day"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Bot token can reach the log through the uncaught exception in `--delivery-test`; the redaction in D-49 does not cover this path"
   - id: WR-03
     severity: warning
@@ -17,7 +17,7 @@ findings:
     title: "A mistyped or unparseable budget silently becomes the default while `Runs.Notes` claims it came from the Settings tab"
   - id: WR-04
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Groq `json_validate_failed` response body is logged (240 characters) in a now-public repository"
   - id: IN-01
     severity: info
@@ -43,19 +43,19 @@ findings:
     severity: info
     disposition: open
     title: "Stored-URL fallback in `tracker_join` can pair two distinct ledger jobs with the same tracker row"
-open: 9
+open: 6
 total: 10
-recorded: 2026-10-28T22:14:56.707Z
+recorded: 2026-10-28T22:15:07.293Z
 ---
 
 # Phase 02: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
+| WR-01 | warning | fixed | 02-REVIEW-FIX.md |
+| WR-02 | warning | fixed | 02-REVIEW-FIX.md |
 | WR-03 | warning | fixed | 02-REVIEW-FIX.md |
-| WR-04 | warning | open | - |
+| WR-04 | warning | fixed | 02-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
