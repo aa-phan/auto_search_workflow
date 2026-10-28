@@ -60,6 +60,34 @@ class BudgetTests(unittest.TestCase):
         local = datetime(2026, 10, 26, 19, 0, tzinfo=timezone(timedelta(hours=-5)))  # 00:00 UTC on the 27th
         self.assertEqual(eb.day_of(local), "2026-10-27")
 
+    def test_exhaustion_expires_at_the_retry_after_instant_not_at_utc_midnight(self) -> None:
+        """WR-01: Groq's window is rolling (D-53), so a daily-limit 429 locks the model only until its own retry-after."""
+        b = load(None)
+        b.exhaust("m", D1 + timedelta(hours=2))
+        b.exhaust("n")  # no wait given: until the UTC day ends
+        raw = b.to_json()
+        self.assertEqual(json.loads(raw)["exhausted_until"], {"m": "2026-10-26T14:00:00+00:00"})
+        before = load(raw, D1 + timedelta(hours=1, minutes=59))
+        self.assertEqual(before.exhausted, {"m", "n"})
+        after = load(raw, D1 + timedelta(hours=2))
+        self.assertEqual(after.exhausted, {"n"})  # m is usable again the same UTC day; n stays spent
+        self.assertTrue(after.can_spend("m", fresh=False))
+        self.assertFalse(after.can_spend("n", fresh=False))
+        self.assertNotIn("m", after.exhausted_until)
+        restored = load(None)
+        restored.restore(raw, D1 + timedelta(hours=3))
+        self.assertEqual((restored.exhausted, restored.exhausted_until), ({"n"}, {}))
+        # the UTC-midnight rollover stays the upper bound
+        self.assertEqual(load(raw, datetime(2026, 10, 27, 0, 0, tzinfo=timezone.utc)).exhausted, set())
+
+    def test_exhaustion_expiry_tolerates_junk_and_older_records(self) -> None:
+        for until in ({"m": "not a date"}, {"m": 5}, {"m": "2026-10-26T01:00:00"}, "x", []):  # unreadable or naive: stays spent for the day
+            with self.subTest(until=until):
+                raw = json.dumps({"day": "2026-10-26", "used": {}, "exhausted": ["m"], "exhausted_until": until})
+                self.assertEqual(load(raw).exhausted, {"m"})
+        old = json.dumps({"day": "2026-10-26", "used": {}, "exhausted": ["m"]})  # a record written before the expiry existed
+        self.assertEqual(load(old, D1 + timedelta(hours=9)).exhausted, {"m"})
+
     def test_budget_tolerates_blank_invalid_and_foreign_json(self) -> None:
         for raw in (None, "", "   ", "not json", "[1]", "5", '{"day": 5}', '{"day":"2026-10-26","used":{"m":"x"}}', '{"day":"2026-10-26","used":[1],"exhausted":"m"}'):
             with self.subTest(raw=raw):

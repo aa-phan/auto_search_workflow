@@ -933,10 +933,22 @@ LIMIT_HEADERS = (
 LIMITS_JSON_CHARS = 1000
 
 
+DAILY_LIMIT_DEFAULT_LOCK_S = 3600  # a daily-limit 429 without a usable `retry-after`: try the model again after an hour (Groq's window is rolling, D-53)
+DAILY_LIMIT_MAX_LOCK_S = 86400
+
+
 def _is_daily_limit(resp: requests.Response) -> bool:
-    """A 429 that names a per-day limit (long `retry-after` or TPD/RPD wording): the model is spent until the next UTC day."""
+    """A 429 that names a per-day limit (long `retry-after` or TPD/RPD wording): the model is spent until Groq says it is usable
+    again (`_daily_lock_until`), and at the latest until the next UTC day."""
     wait = _retry_after(resp)
     return (wait is not None and wait > DAILY_LIMIT_RETRY_AFTER) or bool(_DAILY_LIMIT_TEXT.search(resp.text or ""))
+
+
+def _daily_lock_until(resp: requests.Response, now: datetime) -> datetime:
+    """When a model spent per Groq may be tried again: the `retry-after` Groq gave (capped at a day), else an hour (WR-01)."""
+    wait = _retry_after(resp)
+    seconds = wait if wait is not None and wait == wait and wait > DAILY_LIMIT_RETRY_AFTER else DAILY_LIMIT_DEFAULT_LOCK_S
+    return now + timedelta(seconds=min(seconds, DAILY_LIMIT_MAX_LOCK_S))
 
 
 class GroqClient:
@@ -1055,8 +1067,8 @@ class GroqClient:
             code = resp.status_code
             if code == 429:
                 if self.daily is not None and _is_daily_limit(resp):
-                    self.daily.exhaust(model)
-                    log.warning("Groq daily limit reached on %s; using the other model or waiting for the next UTC day", model)
+                    self.daily.exhaust(model, _daily_lock_until(resp, datetime.now(timezone.utc)))
+                    log.warning("Groq daily limit reached on %s; using the other model or waiting until Groq allows it again (at most the next UTC day)", model)
                     continue
                 if model == self.cfg.groq_model:
                     log.warning("Groq 429 on %s; switching to %s", model, self.cfg.groq_fallback_model)

@@ -636,7 +636,7 @@ def _budget_today(now: datetime, raw: str | None) -> dict[str, Any] | None:
     same_day = data["day"] == today
     used_raw = data.get("used") if isinstance(data.get("used"), dict) else {}
     budget_raw = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
-    spent = {m for m in data.get("exhausted", []) if isinstance(m, str)} if isinstance(data.get("exhausted"), list) and same_day else set()
+    spent = eval_budget.still_spent(data.get("exhausted"), data.get("exhausted_until"), now) if same_day else set()
     models = {}
     for m in sorted({str(x) for x in used_raw} | {str(x) for x in budget_raw}):
         models[m] = {"used": (_count(used_raw.get(m)) or 0) if same_day else 0, "budget": _count(budget_raw.get(m)), "exhausted": m in spent}

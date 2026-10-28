@@ -956,6 +956,12 @@ class GroqSummaryTests(unittest.TestCase):
     def budget_record(self, day: str = "2026-10-26") -> str:
         return json.dumps({"day": day, "used": {self.M120: 45210}, "exhausted": [], "budgets": {self.M120: 170000, self.M20: 170000}})
 
+    def test_a_spent_flag_past_its_expiry_is_not_shown_as_spent(self) -> None:
+        """WR-01: the lock ends at Groq's retry-after instant, so the dashboard stops saying SPENT then."""
+        raw = json.dumps({"day": "2026-10-26", "used": {self.M120: 9}, "exhausted": [self.M120, self.M20], "exhausted_until": {self.M120: "2026-10-26T14:00:00+00:00"}, "budgets": {self.M120: 100, self.M20: 100}})
+        g = summary(discovery={"groq_budget": raw}, now=self.NOW)["groq"]  # NOW is 15:00 UTC
+        self.assertEqual((g["today"]["models"][self.M120]["exhausted"], g["today"]["models"][self.M20]["exhausted"]), (False, True))
+
     def test_groq_summary_reads_today_from_the_budget_record_and_7d_from_runs(self) -> None:
         runs = [
             run_rec(self.NOW - timedelta(days=1), groq_tokens_primary=3000, groq_prompt_tokens=1000, groq_cached_tokens=200, groq_completions=1),

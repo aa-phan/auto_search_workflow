@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import tempfile
@@ -610,6 +610,22 @@ class GroqBudgetTests(unittest.TestCase):
         self.assertEqual(budget.exhausted, {c.cfg.groq_model})
         self.assertEqual(sleep.call_args_list, [])
         self.assertEqual(self.models(post), [c.cfg.groq_model, c.cfg.groq_fallback_model])
+
+    def test_daily_limit_lock_lasts_as_long_as_retry_after_or_an_hour(self) -> None:
+        """WR-01: the persisted lock follows Groq's own wait (capped at a day); with none given it is an hour, not the rest of the UTC day."""
+        now = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
+        cases = [({"retry-after": "5400"}, 5400), ({"retry-after": "999999"}, 86400), ({}, 3600), ({"retry-after": "nan"}, 3600), ({"retry-after": "7"}, 3600)]
+        for headers, seconds in cases:
+            with self.subTest(headers=headers):
+                self.assertEqual(h._daily_lock_until(FakeResponse(429, headers=headers), now), now + timedelta(seconds=seconds))
+
+    def test_daily_limit_429_records_when_the_model_may_be_tried_again(self) -> None:
+        c, _, budget = self.client([FakeResponse(429, headers={"retry-after": "5400"}), groq_ok(71)])
+        assert budget is not None
+        with mock.patch.object(h.time, "sleep"):
+            c.evaluate(settings(), posting())
+        until = datetime.fromisoformat(budget.exhausted_until[c.cfg.groq_model])
+        self.assertAlmostEqual((until - datetime.now(timezone.utc)).total_seconds(), 5400, delta=120)
 
     def test_a_per_minute_429_is_not_a_daily_limit(self) -> None:
         text = '{"error":{"message":"Rate limit reached on tokens per minute (TPM): Limit 8000"}}'
