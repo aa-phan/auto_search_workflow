@@ -627,6 +627,19 @@ class GroqBudgetTests(unittest.TestCase):
         until = datetime.fromisoformat(budget.exhausted_until[c.cfg.groq_model])
         self.assertAlmostEqual((until - datetime.now(timezone.utc)).total_seconds(), 5400, delta=120)
 
+    def test_model_output_in_groq_errors_never_reaches_the_log(self) -> None:
+        """WR-04: the log of a public repository must not carry job or resume content (a json_validate_failed body quotes the model's answer)."""
+        secret = "CANDIDATE-PRIVATE-DETAIL-xyz"
+        invalid = FakeResponse(400, text='{"error":{"code":"json_validate_failed","failed_generation":"' + secret + '"}}')
+        unusable = FakeResponse(200, {"choices": [{"message": {"content": secret + " no braces here"}}], "usage": {"total_tokens": 900}})
+        c, _, _ = self.client([invalid, unusable, groq_ok(70)])
+        with self.assertLogs(h.log, level="WARNING") as logs, mock.patch.object(h.time, "sleep"):
+            c.evaluate(settings(), posting())
+        text = "\n".join(logs.output)
+        self.assertNotIn(secret, text)
+        self.assertIn("produced invalid JSON", text)
+        self.assertIn("Unusable Groq response", text)
+
     def test_a_per_minute_429_is_not_a_daily_limit(self) -> None:
         text = '{"error":{"message":"Rate limit reached on tokens per minute (TPM): Limit 8000"}}'
         c, _, budget = self.client([FakeResponse(429, headers={"retry-after": "7"}, text=text), groq_ok(60)])

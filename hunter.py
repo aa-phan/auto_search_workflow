@@ -1123,7 +1123,7 @@ class GroqClient:
             if code >= 400:
                 if "json_validate_failed" in resp.text:  # model emitted bad JSON: just retry
                     parse_failures += 1
-                    log.warning("Groq (%s) produced invalid JSON: %s", model, resp.text[:240].replace("\n", " "))
+                    log.warning("Groq (%s) produced invalid JSON (response %d chars; content not logged, the repository is public)", model, len(resp.text))
                     self._spend(model, est)  # Groq returns no usage for this answer; over-counting is the safe direction
                     continue
                 raise ValueError(f"Groq HTTP {code}: {resp.text[:200]}")
@@ -1139,7 +1139,7 @@ class GroqClient:
                 return replace(parse_evaluation(data["choices"][0]["message"]["content"]), model=model)
             except (KeyError, IndexError, ValueError) as exc:
                 parse_failures += 1
-                log.warning("Unusable Groq response (%s): %s", model, exc)
+                log.warning("Unusable Groq response (%s): %s", model, str(exc).split(":", 1)[0])  # the reason only: the text after ':' can quote the model's output
         if parse_failures:
             raise ValueError("Groq did not return usable JSON")
         raise TransientError("Groq stayed rate-limited or unavailable")
