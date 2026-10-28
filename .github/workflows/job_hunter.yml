@@ -69,8 +69,8 @@ jobs:
       # (up to 10 minutes) instead of failing.
       TRIGGER_SOURCE: ${{ inputs.trigger_source }}
       STATE_LEASE_WAIT_SECONDS: "600"
-      # Explicit user decision for the pilot (DECISIONS D-38): poll SmartRecruiters although its robots.txt asks
-      # generic crawlers to stay out. Remove this line to park SmartRecruiters again (history is kept).
+      # Explicit owner decision (DECISIONS D-38, kept after the pilot by D-54): poll SmartRecruiters although its robots.txt
+      # asks generic crawlers to stay out. Remove this line to park SmartRecruiters again (history is kept).
       ALLOW_SMARTRECRUITERS_BULK: "1"
       SEARCH_WINDOW_DAYS: ${{ vars.SEARCH_WINDOW_DAYS }} # optional; default 3 days. Scheduled discovery is always windowed (minimum 1).
     steps:

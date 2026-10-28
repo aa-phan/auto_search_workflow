@@ -85,7 +85,7 @@ Plans:
 - [x] 02-08-PLAN.md — MEAS-02 / GOV-01: measured Groq usage, account limits read by the owner, Groq plan decision D-53, measured budget default
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 02-09-PLAN.md — GOV-01: deploy SmartRecruiters parking after the first weekly rebalance read
+- [x] 02-09-PLAN.md — GOV-01: deploy SmartRecruiters parking after the first weekly rebalance read (superseded by D-54: owner kept SmartRecruiters; nothing deployed)
 
 ### Phase 3: Compact storage
 
@@ -186,7 +186,7 @@ All are surfaced in Phase 2. Each is recorded in DECISIONS.md before the work it
 | Date-only alerts through the D-04c rule (user decision 2026-10-25) | Phase 2 record; in force before the first Oracle row (Phase 6) | Tracker only, no alert |
 | Per-ATS policy: Paycom skipped, iCIMS deferred, Teamtailor, Personio, JOIN and SuccessFactors skipped; terms for Breezy, Gem, Oracle, Workday, Rippling, BambooHR | Phase 6 start (wave 1), Phase 7 start (Workday, Rippling, BambooHR) | Build only providers with a recorded decision |
 | Rule-7 lift for board-cycling scores only | Before CYC-02 goes live (Phase 5) | The feedback score stays in shadow |
-| SmartRecruiters after the pilot (D-38 ended with the pilot) | Phase 2 | Parked (research default) |
+| SmartRecruiters after the pilot | Phase 2 | Recorded: D-54 (2026-10-28), kept and polled (reverses P2-14) |
 | Repository visibility (public now, DEPLOY.md says private) | Phase 2 | Stay public, keep logs free of job content |
 
 ## Requirement Coverage

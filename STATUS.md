@@ -28,7 +28,7 @@ Last updated 2026-10-28 (Groq plan decided, D-53: stay free, budget default 100,
 - **The `Runs` header widens by 11 columns, to 77, on the first run after deploy** (the new Groq token, limits, skip and cut columns); rows written before it stay as they are and read as unknown.
 - **The Settings rows `Groq_Daily_Token_Budget` and `Groq_Fallback_Daily_Token_Budget` are optional** and absent from the live Settings tab; the run note names the value in force.
 - **The Discovery tab gains the key `groq_budget`** (the persisted per-model budget for the UTC day).
-- **SmartRecruiters is still unparked** until plan 02-09 deploys D-48's decision.
+- **SmartRecruiters stays polled** (D-54, 2026-10-28: the owner kept it; plan 02-09's parking is superseded and was not deployed).
 - Deployed 2026-10-26 18:25 UTC (fc197c1): D-49..D-52 run in production from the 19:00 UTC run (see "Phase 2 live verification"). The Groq console figures (plan 02-08) are still to be read.
 
 ## Phase 2 live verification (2026-10-26)
