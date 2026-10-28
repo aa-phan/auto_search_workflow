@@ -180,7 +180,7 @@ All are surfaced in Phase 2. Each is recorded in DECISIONS.md before the work it
 
 | Decision | Recorded before | Default if unanswered |
 |----------|-----------------|-----------------------|
-| Groq plan and budget (free or paid, limits, D-16 model OK) | End of Phase 2 (with MEAS-02) | 20-30 a day target stays conditional (about 7-20 kept rows a day) |
+| Groq plan and budget (free or paid, limits, D-16 model OK) | Recorded: D-53 (2026-10-28): free now, revisit before Phase 4; budget 100,000 per model | Decided; the 20-30 a day target stays conditional (about 12 kept rows a day at the measured figures) |
 | Storage design (D-43 amended; closes the D-03 200k review) | Phase 3 execution (point reached about 2026-10-29) | Proceed with the D-43 design; nothing is deleted before parity |
 | D-05 amendment (backfill on first baseline and re-entry; out-of-window jobs closed without scoring) | Phase 4 (WIN-02) | No backfill; the rest of Phase 4 can proceed |
 | Date-only alerts through the D-04c rule (user decision 2026-10-25) | Phase 2 record; in force before the first Oracle row (Phase 6) | Tracker only, no alert |

@@ -1,13 +1,13 @@
 # STATUS
 
-Last updated 2026-10-26 (Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-28 (Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
 
 **Built and verified offline (mocked); deployed to production 2026-10-26 18:25 UTC (fc197c1). Live evidence is in "Phase 2 live verification" below; everything not listed there as live stays mocked.** Run `.venv/bin/python -m unittest discover -s tests` for the current count: **620 tests pass offline** at the end of plan 02-06 (612 at the end of 02-05; 520 offline tests were last recorded before this phase).
 
 - **D-49 alert recording:** `alerted` is written only when a channel accepted the message; an alert no channel accepted stays pending and the run is `degraded`; sends without an HTTP response are bounded at 5 attempts; secrets are redacted from everything stored or logged; Telegram free text is capped before escaping.
-- **D-50 Groq daily token budget per model (MEAS-03):** a persisted UTC-day budget per model (default 170,000, provisional) with the last 20% reserved for verified-fresh jobs, fallback from the primary to the second model, budget-skipped jobs left pending with nothing recorded, and seven new Runs columns for tokens, cached tokens, completions and the `x-ratelimit-*` response header values.
+- **D-50 Groq daily token budget per model (MEAS-03):** a persisted UTC-day budget per model (default was 170,000, provisional; **100,000 per model since D-53, 2026-10-28**, in code but in production only after the next push) with the last 20% reserved for verified-fresh jobs, fallback from the primary to the second model, budget-skipped jobs left pending with nothing recorded, and seven new Runs columns for tokens, cached tokens, completions and the `x-ratelimit-*` response header values.
 - **D-51 run deadlines (MEAS-04):** board polling stops starting boards 15 min after the process started, Groq calls stop at 20 min and alert sends at 22 min, inside the 25 min workflow timeout; boards are polled longest-unpolled first; a poll or alert cut makes the run `degraded`, an evaluation cut leaves it `ok`; nothing is recorded against a cut board, job or alert.
 - **D-52 Dashboard yield view (MEAS-01):** tracker rows per found-day by cohort with the 20-30 band, age when found, My_Feedback mix per cohort, and a tracker-versus-ledger reconciliation that names ledger-kept jobs missing from the tracker.
 - **Groq read-outs (this plan, MEAS-02 / MEAS-03 visibility):** a Groq SYSTEM line on the Dashboard (today's UTC-day tokens per model against its budget, the 7-day split of scored evaluations by model, tokens per scoring call with its n, cached share, budget skips, evaluation cuts, poll cuts, alerts deferred) and Groq lines in the read-only pilot report's limits audit (tokens per scoring call with n, tokens per UTC day per model, cached share, governor counters, run duration p95, latest rate-limit header values) so measured consumption can be read from the public workflow log without credentials. Runs recorded before the token columns existed are not counted as zero-token runs (figures cover only runs that recorded tokens, and the line says how many).
@@ -59,7 +59,7 @@ Pushed `main` (fc197c1) at 2026-10-26 18:25 UTC on the owner's choice `deploy-wi
 
 ## Groq limits and plan (MEAS-02)
 
-Written by plan 02-08 Task 1 on 2026-10-28 (UTC). **The Groq plan decision is not made yet (owner checkpoint, plan 02-08 Task 2); D-53 is not written and no default has changed.** Every number below is labelled live (read-only, public workflow log), derived (arithmetic on live figures) or owner-read.
+Measured by plan 02-08 Task 1 on 2026-10-28 (UTC); **decided by the owner the same day in D-53: stay on the free plan now, revisit before Phase 4 starts.** The new budget default (100,000 per model) is in the code but **not deployed: it reaches production only after a push**, and the live Settings tab keeps whatever it has until the owner edits it. Every number below is labelled live (read-only, public workflow log), derived (arithmetic on live figures) or owner-read.
 
 ### Measured usage (live, read-only)
 
@@ -87,7 +87,7 @@ Source: read-only `pilot_report` run 40606970912 (`job_hunter.yml -f pilot_repor
 | 2026-10-26T19:00:30Z (report 40384832233) | `openai/gpt-oss-120b` | 1000 / 990 / **14m24s** | 8000 / 4841 / 23.692s |
 | 2026-10-27T23:00:26Z (report 40606970912) | `openai/gpt-oss-20b` | 1000 / 999 / **1m26.4s** | 8000 / 5856 / 16.08s |
 
-**Daily window: rolling, not a fixed moment (for requests).** 10 requests used (1000 - 990) gives a reset of 14m24s = 864 s = 10 x 86.4 s, and 1 request used (1000 - 999) gives 1m26.4s = 86.4 s, and 86.4 s is exactly 24 h / 1000. The reset time scales with the requests used and lands on different clock moments (19:14:54 and 23:01:52 UTC), so the requests-per-day allowance refills continuously instead of resetting at one fixed time (UTC midnight would give hours, the same instant each time). Two stamps, two models, so this rests on two points. **The tokens-per-day window is not in any header;** that it refills the same way is an inference, not a measurement. Consequence recorded for Task 3: if the window is treated as rolling, the budget default is half the limit, not 85% (the plan's rule), and the arithmetic below shows both.
+**Daily window: rolling, not a fixed moment (for requests).** 10 requests used (1000 - 990) gives a reset of 14m24s = 864 s = 10 x 86.4 s, and 1 request used (1000 - 999) gives 1m26.4s = 86.4 s, and 86.4 s is exactly 24 h / 1000. The reset time scales with the requests used and lands on different clock moments (19:14:54 and 23:01:52 UTC), so the requests-per-day allowance refills continuously instead of resetting at one fixed time (UTC midnight would give hours, the same instant each time). Two stamps, two models, so this rests on two points. **The tokens-per-day window is not in any header;** that it refills the same way is an inference, not a measurement. Consequence (adopted in D-53): the window is treated as rolling, so the budget default is half the limit (100,000 per model), not 85%; the arithmetic below shows both.
 
 **Arithmetic, with the measured 2,653.9 tokens per call (n = 95) and keep rate 16.3% (52 / 319):**
 
@@ -98,13 +98,13 @@ evaluations per day = sum over usable models of (share x daily token limit) / to
 | primary only, plan rule (85%) | 170,000 | about **64** | about **10** | about 12.5 |
 | primary + fallback, plan rule (85%) | 170,000 each | about **128** | about **21** | about 25 |
 | primary only, rolling window (50%) | 100,000 | about 38 | about 6 | about 7 |
-| primary + fallback, rolling window (50%) | 100,000 each | about 75 | about 12 | about 15 |
+| **primary + fallback, rolling window (50%): chosen in D-53** | 100,000 each | **about 75** | **about 12** | about 15 |
 
 The 20-30 a day target needs about 123-184 evaluations a day at 16.3% (20 / 0.163 to 30 / 0.163). With the free figures only the plan-rule case with both models at 85% reaches the bottom of the band (about 21 rows), and it does so only if scoring volume rises from today's 45.6 a day (7-day mean; about 75 on 2026-10-27) to about 128 a day; under the rolling treatment even both free models stop at about 12 rows. The RESEARCH estimate that the free tier cannot support the target rested on an assumed 3.5-4.5k tokens per call; the measured 2.65k per call is lower, which moves the free ceiling up but not to the middle of the band. **Supply caveat:** the limit that binds today is the number of jobs reaching scoring (the title gate stops 96% of new postings), not Groq: on 2026-10-27 the primary model's budget was reached, but that day's volume (about 75) was well above the week's mean, and the kept rate has been 7.4 a day. Per-minute limits (8K tokens a minute = about 3 calls a minute per model at 2.65k each) were not hit: 0 HTTP 429 in 319 calls. Phase 4 backfill competes for the same daily budget.
 
 ### Account limits
 
-Owner-read from the account limits page (console.groq.com, Settings, Limits and Data controls) on **2026-10-26**, relayed by the owner in chat; figures only, no key. **Recorded here as supplied, to be confirmed at the plan 02-08 Task 2 decision; not yet a decision (D-53).**
+**Owner-read from the account limits page** (console.groq.com, Settings, Limits and Data controls) on **2026-10-26**, relayed by the owner in chat; figures only, no key; confirmed by the owner at the D-53 decision on 2026-10-28. Label: owner-read from the account limits page, 2026-10-26; not measured by the app and not seen by the agent.
 
 | Item | Value |
 |---|---|
@@ -114,7 +114,11 @@ Owner-read from the account limits page (console.groq.com, Settings, Limits and 
 | Data retention | zero data retention **not** enabled (neither the global setting nor the inference API setting) |
 | Daily window | requests per day: rolling (see above, live headers); tokens per day: not determined (not in any header) |
 
-Still to be answered by the owner at Task 2: the plan choice (free / developer / free-revisit) and "resume to Groq: ok" or "resume to Groq: change" (the resume text is sent to Groq on every scoring call, with retention not enabled as read).
+**Decision (D-53, owner, 2026-10-28):** plan **free-revisit** (stay free now, revisit before Phase 4 starts); data handling **"resume to Groq: ok"** (the resume text is sent to Groq on every scoring call, with zero data retention not enabled); budget **"100,000 (plan rule)"** per model per UTC day (half of the 200,000 limit because the window is rolling), replacing the provisional 170,000. `hunter.GROQ_TPD_PRIMARY` / `GROQ_TPD_FALLBACK` hold the owner-read limits and the default derives from them (offline-tested, mocked).
+
+**What the free plan supports, with the account's figures (live tokens per call 2,653.9, n = 95; keep rate 16.3%):** with the free plan the app can evaluate about **75** jobs a day (100,000 tokens per model, both models, tokens per call 2,653.9), which at the measured keep rate of **16.3%** supports about **12** tracker rows a day (about 15 at the pilot's 19.6%); the 20-30 a day target is **conditional, not met**: it needs about 123-184 evaluations a day, which the free plan does not supply at this budget, and the live inflow is about 7.4 tracker rows a day because scoring volume (about 45.6 a day over 7 days), not Groq, is the limit today. The target needs paid limits, a higher keep rate or a cheaper call, and the plan choice is revisited before Phase 4 starts (backfill competes for the same budget).
+
+**Not yet true in production:** the 100,000 default is committed but not pushed. Until a push, production runs on the 170000 default; the owner follow-up (add or edit the `Groq_Daily_Token_Budget` row in the live Settings tab, or ask for it through the Sheets connector) makes the note in `Runs.Notes` say "from Settings tab". Not verified live: that the token window rolls (inference from the request window), and the new default in a production run.
 
 ## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
 
@@ -322,6 +326,6 @@ Post-pilot week at 700 boards with `Rebalance_Mode` on (from 2026-10-23 20:52 UT
 - **Storage (needs action soon):** Events 186,430 rows (13.1% of the 10M-cell limit), growing about 3,355 rows/day at 700 boards: **the D-03 200k-row review point is about 4 days away**, and 84.5% of rows are baseline identities. Load time 10 s at 186k rows (slope about 4 s per 100k rows).
 - **Re-checks (D-47):** the faster re-check pass cleared the overdue queue (12,308 -> 0); 250 more boards gained relevant open jobs; 747 relevant boards wait.
 - **Reconciliation flag:** 2 ledger-kept jobs are missing from the tracker (should be 0); not yet investigated.
-- **Target status:** the 20-30 a day target stays conditional on the Groq plan decision (MEAS-02, D-48 row 1): about 7-20 kept rows a day until then.
+- **Target status (updated 2026-10-28, D-53):** the 20-30 a day target stays conditional: with the free plan (decided in D-53) the app can evaluate about 75 jobs a day, which at the measured keep rate of 16.3% supports about 12 tracker rows a day. The "about 7-20" written here on 2026-10-25 rested on assumed token costs; measured figures replaced it (the measured volume is about 45.6 scored a day over 7 days, about 75 on 2026-10-27, not about 40).
 
 No score tuning or new features until these are read (AGENTS.md rule 7).
