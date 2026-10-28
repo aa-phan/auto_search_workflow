@@ -13,7 +13,7 @@ findings:
     title: "Bot token can reach the log through the uncaught exception in `--delivery-test`; the redaction in D-49 does not cover this path"
   - id: WR-03
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A mistyped or unparseable budget silently becomes the default while `Runs.Notes` claims it came from the Settings tab"
   - id: WR-04
     severity: warning
@@ -43,9 +43,9 @@ findings:
     severity: info
     disposition: open
     title: "Stored-URL fallback in `tracker_join` can pair two distinct ledger jobs with the same tracker row"
-open: 10
+open: 9
 total: 10
-recorded: 2026-10-28T22:00:24.570Z
+recorded: 2026-10-28T22:14:56.707Z
 ---
 
 # Phase 02: Code Review Disposition
@@ -54,7 +54,7 @@ recorded: 2026-10-28T22:00:24.570Z
 |---------|----------|-------------|--------|
 | WR-01 | warning | open | - |
 | WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
+| WR-03 | warning | fixed | 02-REVIEW-FIX.md |
 | WR-04 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
