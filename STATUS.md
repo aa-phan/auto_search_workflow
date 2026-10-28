@@ -59,7 +59,7 @@ Pushed `main` (fc197c1) at 2026-10-26 18:25 UTC on the owner's choice `deploy-wi
 
 ## Groq limits and plan (MEAS-02)
 
-Measured by plan 02-08 Task 1 on 2026-10-28 (UTC); **decided by the owner the same day in D-53: stay on the free plan now, revisit before Phase 4 starts.** The new budget default (100,000 per model) is in the code but **not deployed: it reaches production only after a push**, and the live Settings tab keeps whatever it has until the owner edits it. Every number below is labelled live (read-only, public workflow log), derived (arithmetic on live figures) or owner-read.
+Measured by plan 02-08 Task 1 on 2026-10-28 (UTC); **decided by the owner the same day in D-53: stay on the free plan now, revisit before Phase 4 starts.** The new budget default (100,000 per model) was **pushed on 2026-10-28 20:02 UTC (`f4a989b..1d63416`)**; no production run after the push has been read yet, and the live Settings tab keeps whatever it has until the owner edits it. Every number below is labelled live (read-only, public workflow log), derived (arithmetic on live figures) or owner-read.
 
 ### Measured usage (live, read-only)
 
@@ -118,7 +118,7 @@ The 20-30 a day target needs about 123-184 evaluations a day at 16.3% (20 / 0.16
 
 **What the free plan supports, with the account's figures (live tokens per call 2,653.9, n = 95; keep rate 16.3%):** with the free plan the app can evaluate about **75** jobs a day (100,000 tokens per model, both models, tokens per call 2,653.9), which at the measured keep rate of **16.3%** supports about **12** tracker rows a day (about 15 at the pilot's 19.6%); the 20-30 a day target is **conditional, not met**: it needs about 123-184 evaluations a day, which the free plan does not supply at this budget, and the live inflow is about 7.4 tracker rows a day because scoring volume (about 45.6 a day over 7 days), not Groq, is the limit today. The target needs paid limits, a higher keep rate or a cheaper call, and the plan choice is revisited before Phase 4 starts (backfill competes for the same budget).
 
-**Not yet true in production:** the 100,000 default is committed but not pushed. Until a push, production runs on the 170000 default; the owner follow-up (add or edit the `Groq_Daily_Token_Budget` row in the live Settings tab, or ask for it through the Sheets connector) makes the note in `Runs.Notes` say "from Settings tab". Not verified live: that the token window rolls (inference from the request window), and the new default in a production run.
+**Deployed, not yet read live:** the 100,000 default was pushed on 2026-10-28 20:02 UTC (`1d63416`); runs from then use it unless the Settings tab says otherwise. The owner follow-up (add or edit the `Groq_Daily_Token_Budget` row in the live Settings tab, or ask for it through the Sheets connector) makes the note in `Runs.Notes` say "from Settings tab". Not verified live: that the token window rolls (inference from the request window), and the new default in a production run.
 
 ## Pilot week 1 result (2026-10-15 01:47 to 2026-10-22 01:47 UTC; measured live 2026-10-23 20:17 UTC)
 

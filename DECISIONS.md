@@ -399,7 +399,7 @@ This entry is the single list of owner decisions the v2.0 milestone needs. Decid
 
 **Data handling (D-48 row 11).** The resume text is sent to Groq on every scoring call. The owner accepts that as configured ("resume to Groq: ok"); the account's retention setting as read is "zero data retention not enabled". Not changed by this decision; revisit if the account's settings change.
 
-**Owner follow-up.** The new default reaches production only after a push of `main`; until then production keeps the 170000 default (provisional, D-50). The live Settings tab is never widened automatically: the owner adds or edits the `Groq_Daily_Token_Budget` row to 100000 (or asks for it to be written through the Sheets connector, as in D-46), after which the run note says "from Settings tab". If the row is absent the run note says "from default".
+**Owner follow-up.** The new default reaches production only after a push of `main`; until then production keeps the 170000 default (provisional, D-50). (Pushed 2026-10-28 20:02 UTC, `1d63416`.) The live Settings tab is never widened automatically: the owner adds or edits the `Groq_Daily_Token_Budget` row to 100000 (or asks for it to be written through the Sheets connector, as in D-46), after which the run note says "from Settings tab". If the row is absent the run note says "from default".
 
 **Verification.** The default and its wording are offline-tested (`GroqSettingsTests`, mocked). Live: the figures above come from one read-only `pilot_report` run and the owner-read account page; the Groq limits themselves are owner-read (not seen by the agent), and the rolling token window is an inference. Not verified live: that the new default holds in production (no push yet), that Groq's token window rolls.
 
