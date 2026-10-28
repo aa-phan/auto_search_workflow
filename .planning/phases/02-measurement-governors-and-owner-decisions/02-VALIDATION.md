@@ -2,10 +2,10 @@
 phase: "2"
 slug: "measurement-governors-and-owner-decisions"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
-# audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+# audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: true) (#2117)
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-26"
 ---
 
@@ -38,22 +38,26 @@ created: "2026-10-26"
 
 ## Per-Task Verification Map
 
-Filled in from the PLAN.md task IDs once plans exist. Requirement-level map (from 02-RESEARCH.md § Validation Architecture):
+Requirement-level map (from 02-RESEARCH.md § Validation Architecture), audited 2026-10-28 after all nine plans: every command below was run and passed offline (mocked). Named tests per row are in the plan SUMMARYs.
 
 | Requirement | Behavior | Test Type | Automated Command | File Exists | Status |
 |-------------|----------|-----------|-------------------|-------------|--------|
-| MEAS-05 | `send_alert` returning `False` records no `alerted` event; job stays pending; no attempt used | unit (Harness) | `.venv/bin/python -m unittest tests.test_core -k alert -q` | extend | ⬜ pending |
-| MEAS-05 | Failure without HTTP response: 5 failure events then `abandoned`; run 6 does not send | unit | same | extend | ⬜ pending |
-| MEAS-05 | Stored and logged error text never contains the bot token | unit | same | extend | ⬜ pending |
-| MEAS-03 | Budget: UTC-day rollover, per-model counters, verified-fresh reserve, JSON round trip | unit (pure) | `.venv/bin/python -m unittest tests.test_governors -q` | ❌ W0 | ⬜ pending |
-| MEAS-03 | `GroqClient` records total and cached tokens and limit headers; daily-limit 429 marks the model spent | unit | `.venv/bin/python -m unittest tests.test_hunter -k Groq -q` | extend | ⬜ pending |
-| MEAS-03 | Forced limit: budget 0 leaves jobs pending with no events; next day they are scored | unit (Harness) | `.venv/bin/python -m unittest tests.test_governors -k forced -q` | ❌ W0 | ⬜ pending |
-| MEAS-03 | New `Runs` columns round-trip; old short rows still load | unit | `.venv/bin/python -m unittest tests.test_pools tests.test_pilot tests.test_discovery -q` | extend | ⬜ pending |
-| MEAS-04 | `poll_boards` past the deadline marks the rest `skipped_deadline`, never fetches them; longest-unpolled first | unit | `.venv/bin/python -m unittest tests.test_governors -k poll -q` | ❌ W0 | ⬜ pending |
-| MEAS-04 | Deadline anchored at process start; verified-fresh scored first; outcome split (poll cut = degraded) | unit | `.venv/bin/python -m unittest tests.test_governors -k outcome -q` | ❌ W0 | ⬜ pending |
-| MEAS-04 | Client deadline bounds `TokenBudget.wait` and 429 loops | unit | `.venv/bin/python -m unittest tests.test_hunter -k deadline -q` | extend | ⬜ pending |
-| MEAS-01 | Yield: per-day counts by cohort, age buckets, feedback mix, unmatched rows | unit | `.venv/bin/python -m unittest tests.test_reporting -k yield -q` | extend | ⬜ pending |
-| MEAS-01 | Reconcile names missing keys; Dashboard chart and band; idempotent rerun | unit | `.venv/bin/python -m unittest tests.test_reporting -k dashboard -q` | extend | ⬜ pending |
+| MEAS-05 | `send_alert` returning `False` records no `alerted` event; job stays pending; no attempt used | unit (Harness) | `.venv/bin/python -m unittest tests.test_core -k alert -q` | ✅ | ✅ green |
+| MEAS-05 | Failure without HTTP response: 5 failure events then `abandoned`; run 6 does not send | unit | same | ✅ | ✅ green |
+| MEAS-05 | Stored and logged error text never contains the bot token | unit | same | ✅ | ✅ green |
+| MEAS-03 | Budget: UTC-day rollover, per-model counters, verified-fresh reserve, JSON round trip | unit (pure) | `.venv/bin/python -m unittest tests.test_governors -q` | ✅ | ✅ green |
+| MEAS-03 | `GroqClient` records total and cached tokens and limit headers; daily-limit 429 marks the model spent | unit | `.venv/bin/python -m unittest tests.test_hunter -k Groq -q` | ✅ | ✅ green |
+| MEAS-03 | Forced limit: budget 0 leaves jobs pending with no events; next day they are scored | unit (Harness) | `.venv/bin/python -m unittest tests.test_governors -k forced -q` | ✅ | ✅ green |
+| MEAS-03 | New `Runs` columns round-trip; old short rows still load | unit | `.venv/bin/python -m unittest tests.test_pools tests.test_pilot tests.test_discovery -q` | ✅ | ✅ green |
+| MEAS-04 | `poll_boards` past the deadline marks the rest `skipped_deadline`, never fetches them; longest-unpolled first | unit | `.venv/bin/python -m unittest tests.test_governors -k poll -q` | ✅ | ✅ green |
+| MEAS-04 | Deadline anchored at process start; verified-fresh scored first; outcome split (poll cut = degraded) | unit | `.venv/bin/python -m unittest tests.test_governors -k outcome -q` | ✅ | ✅ green |
+| MEAS-04 | Client deadline bounds `TokenBudget.wait` and 429 loops | unit | `.venv/bin/python -m unittest tests.test_hunter -k deadline -q` | ✅ | ✅ green |
+| MEAS-01 | Yield: per-day counts by cohort, age buckets, feedback mix, unmatched rows | unit | `.venv/bin/python -m unittest tests.test_reporting -k yield -q` | ✅ | ✅ green |
+| MEAS-01 | Reconcile names missing keys; Dashboard chart and band; idempotent rerun | unit | `.venv/bin/python -m unittest tests.test_reporting -k dashboard -q` | ✅ | ✅ green |
+| MEAS-05 | Telegram free text capped before escaping, tags whole, fits 4,096 UTF-16 units | unit | `.venv/bin/python -m unittest tests.test_hunter -k alert_message -q` | ✅ | ✅ green |
+| MEAS-02 | Groq line on the Dashboard; pilot limits audit prints tokens per call (n), per UTC day per model, cached share, counts-only `x-ratelimit-*` | unit | `.venv/bin/python -m unittest tests.test_reporting tests.test_pilot -k groq -q` | ✅ | ✅ green |
+| MEAS-02 | Budget default is half the owner-read daily limit (rolling window, D-53) | unit | `.venv/bin/python -m unittest tests.test_hunter -k groq_budget_default -q` | ✅ | ✅ green |
+| GOV-01 | SmartRecruiters override kept in both workflows, 1.0 s spacing, parked code default (D-54) | unit | `.venv/bin/python -m unittest tests.test_deployment -k smartrecruiters -q` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -61,10 +65,10 @@ Filled in from the PLAN.md task IDs once plans exist. Requirement-level map (fro
 
 ## Wave 0 Requirements
 
-- [ ] `tests/test_governors.py` — budget, forced-limit, poll deadline and order, outcome split, process-start anchoring
-- [ ] Fake monotonic clock helper shared by `poll_boards`, `Deps` and `GroqClient` tests
-- [ ] `Harness` in `tests/test_core.py` — `send_alert` can return `False` and raise typed exceptions
-- [ ] No framework install needed
+- [x] `tests/test_governors.py` — budget, forced-limit, poll deadline and order, outcome split, process-start anchoring
+- [x] Fake monotonic clock helper shared by `poll_boards`, `Deps` and `GroqClient` tests
+- [x] `Harness` in `tests/test_core.py` — `send_alert` can return `False` and raise typed exceptions
+- [x] No framework install needed
 
 ---
 
@@ -82,11 +86,19 @@ Filled in from the PLAN.md task IDs once plans exist. Requirement-level map (fro
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 10s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 10s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** validated 2026-10-28 (validate-phase audit; offline suite 621 tests OK). Manual-only rows above stay with the owner; see STATUS "Phase 2 live verification" and "Groq limits and plan (MEAS-02)" for what is live-verified.
+
+## Validation Audit 2026-10-28
+
+| Metric | Count |
+|---|---|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
