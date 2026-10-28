@@ -22,7 +22,7 @@ status: all_fixed
 
 ## Fixed Issues
 
-### WR-01: Persisted "spent per Groq" flag outlasts Groq's rolling window
+### WR-01: Persisted "spent per Groq" flag outlasts Groq's rolling window, so a model can stay locked for up to a day
 
 **Files modified:** `eval_budget.py`, `hunter.py`, `reporting.py`, `tests/test_governors.py`, `tests/test_hunter.py`, `tests/test_reporting.py`, `DECISIONS.md`
 **Commit:** 60c6ad1
@@ -31,7 +31,7 @@ status: all_fixed
 **Not applied:** the review's second suggestion, narrowing `_is_daily_limit` so a long `retry-after` alone does not count. D-50 documents that detector explicitly (retry-after over 60 s, or per day / TPD / RPD wording). With the expiry in place the lock is now exactly as long as Groq's own wait, so the overlong-lock harm is gone without changing the documented detector.
 **Docs:** D-50 "Counting basis" gets an amendment sentence (consistent with D-53's rolling window; no D-53 headroom or budget value changed). In-run behavior is unchanged: a model locked during a run stays locked until the next run restores the budget.
 
-### WR-02: Bot token can reach the log through the uncaught exception in `--delivery-test`
+### WR-02: Bot token can reach the log through the uncaught exception in `--delivery-test`; the redaction in D-49 does not cover this path
 
 **Files modified:** `hunter.py`, `tests/test_pilot.py`
 **Commit:** 5c6ae3f
@@ -43,7 +43,7 @@ status: all_fixed
 **Commit:** 0878ce6
 **Applied fix:** `_int_or` now also catches `OverflowError` (`"inf"` no longer ends the run as "Startup failed"). The budget settings accept thousands separators such as `150,000` (only the strict `1,234,567` pattern; `1,5` is still unreadable). `groq_budget_note` now detects an unreadable Settings or environment value and says `<source> value 'X' is not a number, default 100000 in force` instead of "from Settings tab"; an unreadable fallback value is named too ("the primary budget applies to both models"). The note text for valid values is unchanged. The thousands-separator acceptance is the review's "optional" part; it is a small parsing leniency and does not change any default, budget or decision value.
 
-### WR-04: Groq `json_validate_failed` response body is logged in a now-public repository
+### WR-04: Groq `json_validate_failed` response body is logged (240 characters) in a now-public repository
 
 **Files modified:** `hunter.py`, `tests/test_hunter.py`
 **Commit:** 3fc4e21
