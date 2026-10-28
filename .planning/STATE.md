@@ -6,15 +6,15 @@ current_phase: 02
 current_phase_name: Measurement, governors and owner decisions
 status: executing
 stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-10-28T05:36:08.777Z"
+last_updated: "2026-10-28T20:58:44.312Z"
 last_activity: 2026-10-26
 last_activity_desc: Phase 02 execution started
-state_head: fd3bb15c6ba51259c70494060cff6435a10a9d60
+state_head: 7907e707ff2ab47b83e15514813871761e37c22a
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
   percent: 17
 ---
 
@@ -86,6 +86,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: 02-07: Phase 2 deployed 2026-10-26 18:25 UTC (fc197c1); first run success with no cut, pilot report and one delivery test (telegram_sent true) live; Sheet render, Telegram arrival and the missing tracker row greenhouse|nadiacare|4459849009 are owner checks
 - [Phase 02]: Owner-read Groq console figures (read 2026-10-26, recorded in D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer given 2026-10-28 (D-53).
 - [Phase 02]: D-53: Groq plan free-revisit (stay free, revisit before Phase 4); resume to Groq ok; Groq_Daily_Token_Budget default 100000 per model (half the owner-read 200,000, rolling window); 20-30 a day target conditional (about 75 evaluations / 12 rows a day)
+- [Phase 02]: D-54 (2026-10-28): owner keeps SmartRecruiters polled; P2-14 parking withdrawn; plan 02-09 superseded, nothing deployed.
 
 ### Pending Todos
 
@@ -101,7 +102,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
-- 02-08 complete 2026-10-28. 02-09 still waits for the first weekly rebalance (~2026-10-29 01:00 UTC).
+- 02-08 complete 2026-10-28. 02-09 superseded 2026-10-28 by D-54 (owner kept SmartRecruiters); no deployment.
 
 ## Deferred Items
 
