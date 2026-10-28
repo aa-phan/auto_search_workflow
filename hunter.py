@@ -227,8 +227,25 @@ def _split_list(value: str) -> list[str]:
 def _int_or(value: str, default: int) -> int:
     try:
         return int(float(value.strip()))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, OverflowError):  # OverflowError: "inf" typed into a Settings cell (WR-03)
         return default
+
+
+_THOUSANDS = re.compile(r"\d{1,3}(,\d{3})+")
+
+
+def _budget_text(value: str) -> str:
+    """A token budget as typed by the owner: "150,000" is accepted as 150000 (D-53 writes the figure that way). Anything else is unchanged."""
+    text = (value or "").strip()
+    return text.replace(",", "") if _THOUSANDS.fullmatch(text) else text
+
+
+def _budget_number(value: str) -> int | None:
+    """The whole number a budget cell holds, or None when it is not one (so the run note can say the default is in force)."""
+    try:
+        return int(float(_budget_text(value)))
+    except (ValueError, OverflowError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -270,8 +287,8 @@ class Settings:
         def pick(key: str) -> str:
             return (raw.get(key) or "").strip() or (os.getenv(key.upper()) or "").strip() or SETTING_DEFAULTS[key]
 
-        groq_budget = max(0, _int_or(pick("Groq_Daily_Token_Budget"), DEFAULT_GROQ_DAILY_TOKENS))
-        groq_fallback = pick("Groq_Fallback_Daily_Token_Budget")  # blank = same as the primary
+        groq_budget = max(0, _int_or(_budget_text(pick("Groq_Daily_Token_Budget")), DEFAULT_GROQ_DAILY_TOKENS))
+        groq_fallback = _budget_text(pick("Groq_Fallback_Daily_Token_Budget"))  # blank = same as the primary
         return cls(
             resume=(raw.get("Resume_Text") or "").strip() or resume_fallback,
             roles=_split_list(pick("Target_Roles")),
@@ -325,14 +342,22 @@ def settings_notes(raw: dict[str, str]) -> list[str]:
 
 def groq_budget_note(raw: dict[str, str], s: Settings) -> str:
     """Which daily Groq token budget applies and where it came from, for Runs.Notes. The live Settings tab is never widened
-    automatically, so a row that was never added there silently means the default: every run says which value is in force."""
-    if (raw.get("Groq_Daily_Token_Budget") or "").strip():
-        source = "Settings tab"
-    elif (os.getenv("GROQ_DAILY_TOKEN_BUDGET") or "").strip():
-        source = "environment"
-    else:
-        source = f"default (50% of this account's {GROQ_TPD_PRIMARY:,} tokens/day per model, D-53)"
-    return f"Groq daily token budget {s.groq_daily_token_budget} / {s.groq_fallback_daily_token_budget} per UTC day from {source}"
+    automatically, so a row that was never added there silently means the default: every run says which value is in force.
+    A value that is not a number is named, with the default that replaced it (WR-03)."""
+    sheet = (raw.get("Groq_Daily_Token_Budget") or "").strip()
+    env = (os.getenv("GROQ_DAILY_TOKEN_BUDGET") or "").strip()
+    default_source = f"default (50% of this account's {GROQ_TPD_PRIMARY:,} tokens/day per model, D-53)"
+    source, typed = ("Settings tab", sheet) if sheet else ("environment", env) if env else (default_source, "")
+    note = f"Groq daily token budget {s.groq_daily_token_budget} / {s.groq_fallback_daily_token_budget} per UTC day from {source}"
+    if typed and _budget_number(typed) is None:
+        note = (
+            f"Groq daily token budget {s.groq_daily_token_budget} / {s.groq_fallback_daily_token_budget} per UTC day: "
+            f"{source} value '{typed[:40]}' is not a number, default {DEFAULT_GROQ_DAILY_TOKENS} in force"
+        )
+    fallback = (raw.get("Groq_Fallback_Daily_Token_Budget") or "").strip() or (os.getenv("GROQ_FALLBACK_DAILY_TOKEN_BUDGET") or "").strip()
+    if fallback and _budget_number(fallback) is None:
+        note += f"; fallback value '{fallback[:40]}' is not a number, the primary budget applies to both models"
+    return note
 
 
 def excluded_title_regex(words: list[str]) -> re.Pattern[str] | None:

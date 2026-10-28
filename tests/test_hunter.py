@@ -810,6 +810,28 @@ class GroqSettingsTests(unittest.TestCase):
         self.assertIn("from Settings tab", note({"Groq_Daily_Token_Budget": " 5 "}, {"GROQ_DAILY_TOKEN_BUDGET": "90000"}))  # the Sheet wins over the environment
         self.assertIn("from default", note({"Groq_Daily_Token_Budget": "   "}))  # a blank cell is not a setting
 
+    def test_groq_budget_accepts_thousands_separators_and_the_note_names_an_unreadable_value(self) -> None:
+        """WR-03: "150,000" is how the owner writes the figure; a value that is still not a number must not look like it came from the sheet."""
+
+        def note(raw: dict[str, str]) -> tuple[tuple[int, int], str]:
+            s = self.parse(raw)
+            with mock.patch.dict(os.environ):
+                os.environ.pop("GROQ_DAILY_TOKEN_BUDGET", None)
+                os.environ.pop("GROQ_FALLBACK_DAILY_TOKEN_BUDGET", None)
+                return (s.groq_daily_token_budget, s.groq_fallback_daily_token_budget), h.groq_budget_note(raw, s)
+
+        self.assertEqual(note({"Groq_Daily_Token_Budget": "150,000"}), ((150000, 150000), "Groq daily token budget 150000 / 150000 per UTC day from Settings tab"))
+        self.assertEqual(note({"Groq_Daily_Token_Budget": "100,000", "Groq_Fallback_Daily_Token_Budget": "50,000"})[0], (100000, 50000))
+        self.assertEqual(note({"Groq_Daily_Token_Budget": "1,5"})[0], (100000, 100000))  # not a thousands pattern: unreadable, so the default
+        for bad in ("100k", "inf", "-inf", "nan", "lots"):
+            with self.subTest(bad=bad):
+                budgets, text = note({"Groq_Daily_Token_Budget": bad})  # "inf" used to raise OverflowError out of Settings.from_values
+                self.assertEqual(budgets, (100000, 100000))
+                self.assertIn(f"Settings tab value '{bad}' is not a number, default 100000 in force", text)
+                self.assertNotIn("from Settings tab", text)
+        self.assertIn("fallback value 'xyz' is not a number", note({"Groq_Daily_Token_Budget": "5000", "Groq_Fallback_Daily_Token_Budget": "xyz"})[1])
+        self.assertEqual(h._int_or("inf", 7), 7)
+
     def test_main_runs_with_a_per_model_budget_wired_into_client_and_pipeline(self) -> None:
         fake = mock.Mock()
         fake.state = mock.Mock()
