@@ -100,7 +100,35 @@ Plans:
   3. Only after parity: baseline and identity-only rows are retired by swapping the old tab to `Events_Legacy` (kept and restorable), Events is back well below the D-03 review point, and the storage report shows rows, allocated cells and load time before and after with the daily growth in cells falling by an order of magnitude (D-43 estimate: about 26,200 to about 1,300 cells a day).
   4. A run interrupted in the middle of a board's baseline never makes that board's old postings look new on the next run (a board counts as baselined only after its last chunk is written).
 
-**Plans**: TBD
+**Plans**: 9 plans (waves 1-9, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner)
+
+Plans:
+**Wave 1**
+- [ ] 03-01-PLAN.md — Dual-write core: compact.py (Identity codec, Tally, merged view), Identity/Tally tabs, Events -> Identity -> Tally -> Boards, interrupted baseline (SC4), D-57
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 03-02-PLAN.md — Seed and repair, in-run parity layers 1-3, the 3-day parity clock, degraded on a difference (P3-05, P3-07, P3-09)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 03-03-PLAN.md — Every report from the merged view (Dashboard, pilot reconciliation, storage counts) and parity layer 4 (P3-10, P3-11)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 03-04-PLAN.md — Dashboard Storage line / READY TO CUT OVER / NEEDS ATTENTION, read-only --storage-parity and its input, docs and STATUS before deploy
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 03-05-PLAN.md — Deploy dual writing with the owner's consent; live seed and first parity result
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 03-06-PLAN.md — Owner-triggered cutover (copy, verify, atomic tab swap to Events_Legacy) and the pre-fold restore (P3-06, P3-08, P3-14)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 03-07-PLAN.md — 7-day fold, storage report before/after with allocated cells, compact-mode integrity check (P3-01, P3-03, P3-12)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 03-08-PLAN.md — Deploy the cutover tooling with the owner's consent (dual mode unchanged)
+
+**Wave 9** *(blocked on Wave 8 completion and the parity bar)*
+- [ ] 03-09-PLAN.md — Owner's cutover, first fold and the measured before/after (live)
 
 ### Phase 4: 72-hour window and recent backfill
 
@@ -210,7 +238,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
 | 2. Measurement, governors and owner decisions | v2.0 | 9/9 | Complete    | 2026-10-28 |
-| 3. Compact storage | v2.0 | 0/TBD | Not started | - |
+| 3. Compact storage | v2.0 | 0/9 | Planned | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
 | 6. Adapter registry and first-wave adapters | v2.0 | 0/TBD | Not started | - |

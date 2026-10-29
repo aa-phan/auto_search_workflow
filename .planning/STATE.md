@@ -4,16 +4,16 @@ milestone: v2.0
 milestone_name: Search-substitute volume
 current_phase: 3
 current_phase_name: Compact storage
-status: planning
+status: executing
 stopped_at: Phase 3 context gathered
-last_updated: "2026-10-29T07:54:46.714Z"
+last_updated: "2026-10-29T15:13:14.577Z"
 last_activity: 2026-10-28
 last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: cd2d9ff1f767313c3983963f06f76dae6b690d0d
+state_head: 47d68d45a570fc1c398670ee64ecc5983df05bed
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 9
+  total_plans: 18
   completed_plans: 9
   percent: 33
 ---
@@ -29,9 +29,9 @@ See: `.planning/PROJECT.md` (updated 2026-10-28)
 
 ## Current Position
 
-Phase: 3 — Compact storage
+Phase: 3 (Compact storage) — READY TO EXECUTE
 Plan: Not started
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-10-28 — Phase 02 complete, transitioned to Phase 3
 
 Progress: [███░░░░░░░] 33%
@@ -104,6 +104,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
+- [Phase 3] Decision coverage gate overridden at plan time (2026-10-29): `check.decision-coverage-plan` cannot parse `P3-NN` IDs (could-not-parse). A manual check found all 14 (P3-01..P3-14) cited in the plans' must_haves and in the D-57 entry (03-01). The owner chose to proceed; verify-phase should re-check this by hand.
 
 ## Deferred Items
 
