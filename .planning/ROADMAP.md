@@ -100,7 +100,7 @@ Plans:
   3. Only after parity: baseline and identity-only rows are retired by swapping the old tab to `Events_Legacy` (kept and restorable), Events is back well below the D-03 review point, and the storage report shows rows, allocated cells and load time before and after with the daily growth in cells falling by an order of magnitude (D-43 estimate: about 26,200 to about 1,300 cells a day).
   4. A run interrupted in the middle of a board's baseline never makes that board's old postings look new on the next run (a board counts as baselined only after its last chunk is written).
 
-**Plans**: 2/9 plans executed (waves 1-9, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner)
+**Plans**: 3/9 plans executed (waves 1-9, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner)
 
 Plans:
 **Wave 1**
@@ -110,7 +110,7 @@ Plans:
 - [x] 03-02-PLAN.md — Seed and repair, in-run parity layers 1-3, the 3-day parity clock, degraded on a difference (P3-05, P3-07, P3-09)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 03-03-PLAN.md — Every report from the merged view (Dashboard, pilot reconciliation, storage counts) and parity layer 4 (P3-10, P3-11)
+- [x] 03-03-PLAN.md — Every report from the merged view (Dashboard, pilot reconciliation, storage counts) and parity layer 4 (P3-10, P3-11)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 03-04-PLAN.md — Dashboard Storage line / READY TO CUT OVER / NEEDS ATTENTION, read-only --storage-parity and its input, docs and STATUS before deploy
@@ -238,7 +238,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
 | 2. Measurement, governors and owner decisions | v2.0 | 9/9 | Complete    | 2026-10-28 |
-| 3. Compact storage | v2.0 | 2/9 | In Progress | - |
+| 3. Compact storage | v2.0 | 3/9 | In Progress | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
 | 6. Adapter registry and first-wave adapters | v2.0 | 0/TBD | Not started | - |

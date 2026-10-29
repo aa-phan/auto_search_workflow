@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 03
 current_phase_name: Compact storage
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-10-29T17:09:20.424Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-10-29T17:28:41.605Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 03 execution started
-state_head: 7c7a64ec177d724e57efb33e501a97b74fad54ae
+state_head: 258b6389d69a3d39584d455d4370e2d17063b40f
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 18
-  completed_plans: 11
+  completed_plans: 12
   percent: 33
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-28)
 ## Current Position
 
 Phase: 03 (Compact storage) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 03 execution started
 
@@ -64,6 +64,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P08 | ~1h across two invocations | 3 tasks | 6 files |
 | Phase 03 P01 | 12 min | 3 tasks | 10 files |
 | Phase 03 P02 | 15 min | 3 tasks | 9 files |
+| Phase 03 P03 | 17 min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,9 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 03]: 03-02: a difference found today blocks the bar until three clean complete days follow it — P3-07: any difference restarts the clock; today never counts
 - [Phase 03]: 03-02: parity check runs after the alert stage on the start-of-run snapshot; a raised check is check_failed; a check skipped past 22 min is not recorded — Events stays authoritative; unknown is never zero differences
 - [Phase 03]: 03-02: declared (listed, not counted) differences are unkeyable keys and duplicate seen rows — Both stay in Events or are counted first-seen only, so nothing is lost
+- [Phase 03]: 03-03: a folded Tally count passes through the same counting code as real jobs (weight n), has a synthetic key, is never in facts and is never pending — P3-10: no forked counter; a Tally count is never a freshness, latency or alert fact
+- [Phase 03]: 03-03: parity layer 4 compares summary, 7-day and all-time reconciliation and logical counts; a differing leaf is a counted figure named by dotted path with numbers only — Identity or Tally damage that changes a figure is counted beside its own kind
+- [Phase 03]: 03-03: declared classes added: tracker_identity_job (Pitfall 9) and the three row-count figures when a folded key has a duplicate seen row — Both leave nothing lost and must not flap the parity clock
 
 ### Pending Todos
 
@@ -132,6 +136,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-29T17:09:20.372Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-10-29T17:28:41.551Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
