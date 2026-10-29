@@ -1048,14 +1048,14 @@ class SheetTests(unittest.TestCase):
     def test_bootstrap_creates_user_tabs_and_hidden_state_tabs(self) -> None:
         sh = FakeSpreadsheet([FakeWorksheet("Sheet1", [])])
         sheet_store(sh).bootstrap("MY RESUME")
-        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory", "Discovery", "Lock"})
+        self.assertEqual(set(sh.tabs), {"Settings", "Job Tracker", "Boards", "Events", "Runs", "Inventory", "Discovery", "Lock", "Identity", "Tally"})
         self.assertEqual(sh.deleted, ["Sheet1"])
         by_key = {r[0]: r[1] for r in sh.tabs["Settings"].values[1:]}
         self.assertEqual((by_key["Resume_Text"], by_key["Min_Alert_Score"], by_key["Fresh_Window_Hours"], by_key["Discovery_Every_Hours"]), ("MY RESUME", "70", "12", "12"))
         self.assertEqual(sh.tabs["Job Tracker"].values[0], h.TRACKER_COLUMNS)
         self.assertEqual(h.TRACKER_COLUMNS[8], "Apply_URL")  # column I
         self.assertEqual(h.TRACKER_COLUMNS[-3:], ["Freshness", "Source", "My_Feedback"])
-        for hidden in ("Boards", "Events", "Runs", "Inventory", "Discovery", "Lock"):
+        for hidden in ("Boards", "Events", "Runs", "Inventory", "Discovery", "Lock", "Identity", "Tally"):
             self.assertTrue(sh.tabs[hidden].hidden, hidden)
         self.assertFalse(sh.tabs["Job Tracker"].hidden or sh.tabs["Settings"].hidden)
 

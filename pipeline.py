@@ -3,8 +3,10 @@
 All side effects go through `Deps` (state store, tracker, ATS fetch, hydration/scoring, alerts,
 clock), so every stage and every failure case can be tested without a network.
 Ordering rules that protect correctness (SPEC.md "State model"):
-  1. `seen` events are written BEFORE the Boards registry is saved (a baselined board must
-     always have its baseline events, or its backlog would later look new).
+  1. Observations are durable BEFORE the Boards registry is saved (a baselined board must
+     always have its baseline recorded, or its backlog would later look new): Events, then
+     Identity (the posting IDs of identity-only observations, D-57), then Tally (their counts),
+     then Boards. In compact storage mode a baseline observation lives in Identity and Tally only.
   2. The tracker row is appended BEFORE the `evaluated` event, guarded by a tracker-key check.
   3. `alerted` is written only after a channel accepted the message (send_alert returned True).
 """
@@ -21,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
+import compact
 import discovery as dsc
 import eval_budget as eb
 import freshness as fr
@@ -35,7 +38,7 @@ from boards import (
 )  # fmt: skip
 from discovery import SearchJob  # noqa: F401  (re-exported: hunter and the tests import it from here)
 from state import (
-    CREDIT_NONE, CREDIT_REPORTED, CREDIT_UNRESOLVED, KIND_PRODUCTION, OUTCOME_DEGRADED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED, RunRecord,
+    EVENTS_LEGACY_TAB, CREDIT_NONE, CREDIT_REPORTED, CREDIT_UNRESOLVED, KIND_PRODUCTION, OUTCOME_DEGRADED, OUTCOME_FAILED, OUTCOME_OK, OUTCOME_STARTED, RunRecord,
 )  # fmt: skip
 
 log = logging.getLogger("hunter")
@@ -181,6 +184,8 @@ def degraded_reason(run: RunRecord) -> str:
         reasons.append("discovery")
     if "final write failed" in run.notes or "run-start record not written" in run.notes:
         reasons.append("persistence")
+    if "storage write failed" in run.notes:
+        reasons.append("storage")
     if run.alerts_failed:
         reasons.append("alerts")
     if run.eval_transient:
@@ -204,8 +209,16 @@ def run_cycle(d: Deps) -> RunRecord:
     meter0 = METER.snapshot()
     d.state.ensure()
     boards = d.state.load_boards()
-    events_loaded = d.state.load_events()
+    ledger = d.state.load_ledger()  # Events (row numbers kept), Identity and Tally, read once
+    events_loaded = ledger.events
     states = lg.replay(events_loaded)
+    identity_seen = ledger.identity_keys()  # job keys whose only record is an Identity entry; never mutated (a job observed this run is in `states`)
+
+    def seen(key: str) -> bool:
+        """Has this job ID been observed before: an Events row says so, or an Identity entry does."""
+        return key in identity_seen or bool((st := states.get(key)) and st.seen)
+
+    mode = compact.MODE_DUAL  # decided once the Discovery state is loaded
     runs = d.state.load_runs()
     run = RunRecord(lg.stamp(now), run_id=f"{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}", outcome=OUTCOME_STARTED, run_kind=d.run_kind, code_version=d.code_version)
     run.load_s, run.events_rows, run.boards_rows = round(time.monotonic() - t_start), len(events_loaded), len(boards)
@@ -231,6 +244,42 @@ def run_cycle(d: Deps) -> RunRecord:
         if pending_events:
             d.state.append_events(pending_events)
             pending_events = []
+
+    observations_started = False  # set when the observation write point is reached
+    split: compact.Split | None = None  # the run's observations, split once between Events, Identity and Tally
+    identity_done = tally_done = False
+
+    def persist_observations(*, save_registry: bool) -> None:
+        """The one observation write point (rule 1, extended): Events, then Identity, then Tally, then (when asked) Boards.
+        In dual mode an Identity or Tally failure is contained: Events stays authoritative and the next run repairs it. In
+        compact mode an Identity failure propagates BEFORE the registry is saved, so the board is baselined again next run;
+        a Tally failure is contained in both modes (a count is not a seen fact, AGENTS rule 4). One Tally row per run."""
+        nonlocal pending_events, observations_started, split, identity_done, tally_done
+        observations_started = True
+        if split is None:
+            split = compact.split_observations(pending_events, mode)
+            pending_events = split.events
+        if pending_events:
+            d.state.append_events(pending_events)
+            pending_events = []
+        if not identity_done:
+            try:
+                d.state.write_identity(split.identity, lg.stamp(now))
+            except Exception as exc:
+                if mode == compact.MODE_COMPACT:
+                    raise
+                log.error("Could not write Identity (Events stays authoritative): %s", exc)
+                run.notes += f"storage write failed: {type(exc).__name__}; "
+            identity_done = True
+        if not tally_done:
+            try:
+                d.state.append_tally([compact.TallyRow(run.run_id, lg.stamp(now), sum(split.tally.values()), dict(sorted(split.tally.items())))])
+            except Exception as exc:
+                log.error("Could not write Tally: %s", exc)
+                run.notes += f"storage write failed: {type(exc).__name__}; "
+            tally_done = True
+        if save_registry:
+            d.state.save_boards(dirty.values())
 
     budget_loaded = False  # set once this run holds the Discovery tab's rows; save_budget does nothing before that
 
@@ -283,6 +332,7 @@ def run_cycle(d: Deps) -> RunRecord:
         found_keys: list[str] = []
         discovery_state = d.state.load_discovery_state()
         budget_loaded = True
+        mode = compact.effective_mode(discovery_state.get(compact.STORAGE_KEY), legacy_present=d.state.tab_exists(EVENTS_LEGACY_TAB))
         if d.groq_budget is not None:
             d.groq_budget.restore(discovery_state.get(eb.GROQ_BUDGET_KEY), now)
             if d.groq_budget.rolled_from:
@@ -317,7 +367,7 @@ def run_cycle(d: Deps) -> RunRecord:
                 ctx = DiscoveryContext(
                     now, rotation,
                     is_new_board=lambda b: b.key not in boards,
-                    is_unseen_job=lambda i: not (states.get(i.key) and states[i.key].seen),
+                    is_unseen_job=lambda i: not seen(i.key),
                     budget=budget, scheduled=scheduled,
                 )  # fmt: skip
                 found = d.discover(ctx)
@@ -416,7 +466,7 @@ def run_cycle(d: Deps) -> RunRecord:
             run.boards_ok += 1
             if gap is not None and (max_gap is None or gap > max_gap):
                 max_gap = gap
-            unseen = [j for j in res.jobs if not (states.get(j.ident.key) and states[j.ident.key].seen)]
+            unseen = [j for j in res.jobs if not seen(j.ident.key)]
             baseline_pass = not was_baselined
             if was_baselined and not reentry and len(unseen) >= FLOOD_MIN_JOBS and len(unseen) > len(res.jobs) / 2:
                 log.warning("Board %s: %d of %d IDs unseen; treating as a re-baseline", rec.key, len(unseen), len(res.jobs))
@@ -425,9 +475,9 @@ def run_cycle(d: Deps) -> RunRecord:
             pass_kind = "baseline" if baseline_pass else "reentry" if reentry else ""
             obs = lg.Observation(now, gap, was_baselined, baseline_pass, "poll", d.fresh_window, d.max_age_days, pass_kind, reentry, run.run_id)
             for job in res.jobs:
-                st = states.get(job.ident.key)
-                if st and st.seen:
-                    if st.evaluated is not None:
+                if seen(job.ident.key):
+                    st = states.get(job.ident.key)  # an identity-only job has no state: nothing to update, nothing to evaluate
+                    if st and st.seen and st.evaluated is not None:
                         pending_events += lg.observe_known(job, st, now)
                     continue
                 ev = lg.observe_new(job, obs, d.title_gate)
@@ -528,8 +578,7 @@ def run_cycle(d: Deps) -> RunRecord:
         pending_changed = False
         skipped_by_policy = 0
         for key, sj in candidates.items():
-            st = states.get(key)
-            if (st and st.seen) or not d.hydrate_listed:
+            if seen(key) or not d.hydrate_listed:
                 if key in pending:
                     pending.pop(key)
                     pending_changed = True  # already observed (e.g. the board poll listed it): nothing to retry
@@ -592,11 +641,9 @@ def run_cycle(d: Deps) -> RunRecord:
                 run.result_awaiting_validation, run.promoted_boards, run.verified_fresh_matches,
             )  # fmt: skip
 
-        # Rule 1: observations are durable BEFORE the registry says "baselined".
+        # Rule 1: observations are durable BEFORE the registry says "baselined": Events, Identity, Tally, then Boards.
         if not d.dry_run:
-            d.state.append_events(pending_events)
-            pending_events = []
-            d.state.save_boards(dirty.values())
+            persist_observations(save_registry=True)
             # Rotation moves only after the boards it found are saved: a crash repeats a search
             # (harmless, results are deduplicated) instead of skipping one for a whole cycle.
             save_values = dict(discovery_state)
@@ -725,6 +772,8 @@ def run_cycle(d: Deps) -> RunRecord:
         # Reached on success and on failure. A failing flush must not hide the original error
         # or skip the run record; the run record is what shows the user that something broke.
         try:
+            if not d.dry_run and not observations_started and pending_events:
+                persist_observations(save_registry=False)  # a crash before the write point: its observations still go through the split
             write()
         except Exception as exc:
             log.error("Final state write failed: %s", exc)

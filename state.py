@@ -20,12 +20,18 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Iterable
 
+import compact
 from boards import STAMP, BoardRecord, merge_provenance
 from ledger import EVENT_COLUMNS, Event
 
 log = logging.getLogger("hunter")
 
 BOARDS_TAB, EVENTS_TAB, RUNS_TAB = "Boards", "Events", "Runs"
+EVENTS_LEGACY_TAB, EVENTS_NEW_TAB = "Events_Legacy", "Events_New"  # the tab swap of D-57: the old ledger kept whole, the compact one being built
+IDENTITY_TAB = "Identity"
+IDENTITY_COLUMNS = ["Board_Key", "Chunk", "Baselined_At", "Count", "IDs"]  # posting IDs already seen, per job-key stem (D-57)
+TALLY_TAB = "Tally"
+TALLY_COLUMNS = ["Run_ID", "Run_At", "Total", "Counts"]  # one row per run: counts of its identity-only observations (D-57)
 BOARD_COLUMNS = [
     "Board_Key", "ATS", "Board", "Status", "Discovered_At", "Source", "Baselined_At",
     "Last_Attempt_At", "Last_Success_At", "Consecutive_Failures", "Last_Job_Count", "Last_Error",
@@ -275,6 +281,7 @@ class SheetState:
         for title, columns, rows in (
             (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
             (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20), (LOCK_TAB, LOCK_COLUMNS, 5),
+            (IDENTITY_TAB, IDENTITY_COLUMNS, 1000), (TALLY_TAB, TALLY_COLUMNS, 1000),
         ):  # fmt: skip
             if title in tabs:
                 continue
@@ -482,6 +489,7 @@ class CsvState:
 
     def __init__(self, directory: Path) -> None:
         self.dir = directory
+        self._identity: compact.IdentitySet | None = None  # the Identity rows as loaded and written by this store
 
     def _path(self, name: str) -> Path:
         return self.dir / f"{name.lower()}.csv"
@@ -490,7 +498,7 @@ class CsvState:
         self.dir.mkdir(parents=True, exist_ok=True)
         for title, columns in (
             (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS),
-            (DISCOVERY_TAB, DISCOVERY_COLUMNS),
+            (DISCOVERY_TAB, DISCOVERY_COLUMNS), (IDENTITY_TAB, IDENTITY_COLUMNS), (TALLY_TAB, TALLY_COLUMNS),
         ):
             p = self._path(title)
             if not p.exists() or p.stat().st_size == 0:
@@ -537,6 +545,53 @@ class CsvState:
     def append_events(self, events: list[Event]) -> None:
         with self._path(EVENTS_TAB).open("a", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(e.to_row() for e in events)
+
+    def tab_exists(self, title: str) -> bool:
+        return self._path(title).exists()
+
+    def load_ledger(self) -> compact.Ledger:
+        """Events (each with its row number: header = row 1, an unreadable row still advances the count), Identity and Tally.
+        The Identity set is kept as this store's cache for `write_identity`."""
+        events: list[Event] = []
+        event_rows: list[int] = []
+        for n, row in enumerate(self._rows(EVENTS_TAB), start=2):
+            if ev := Event.from_row(row):
+                events.append(ev)
+                event_rows.append(n)
+        identity_rows = [r for n, row in enumerate(self._rows(IDENTITY_TAB), start=2) if (r := compact.IdentityRow.from_row(row, n))]
+        self._identity = compact.IdentitySet.from_rows(identity_rows)
+        tally = [t for row in self._rows(TALLY_TAB) if (t := compact.TallyRow.from_row(row))]
+        return compact.Ledger(events, event_rows, self._identity, tally)
+
+    def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
+        """Add the entries (grouped by stem) to Identity; returns the number of rows written. The file is replaced atomically."""
+        if self._identity is None:
+            self.load_ledger()
+        assert self._identity is not None
+        planned = self._identity.plan_additions(additions, stamp)
+        if not planned:
+            return 0
+        rows = self._rows(IDENTITY_TAB)
+        at = {(r[0], r[1]): i for i, r in enumerate(rows) if len(r) > 1}
+        for pr in planned:
+            row = pr.to_row()
+            if (pr.stem, str(pr.chunk)) in at:
+                rows[at[(pr.stem, str(pr.chunk))]] = row
+            else:
+                rows.append(row)
+        p = self._path(IDENTITY_TAB)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(IDENTITY_COLUMNS)
+            w.writerows(rows)
+        os.replace(tmp, p)  # atomic
+        self._identity.apply(planned)
+        return len(planned)
+
+    def append_tally(self, rows: list[compact.TallyRow]) -> None:
+        with self._path(TALLY_TAB).open("a", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(r.to_row() for r in rows)
 
     def append_run(self, run: RunRecord) -> None:
         with self._path(RUNS_TAB).open("a", newline="", encoding="utf-8") as fh:
