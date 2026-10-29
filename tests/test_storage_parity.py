@@ -8,6 +8,7 @@ Groq or Telegram; the real seed size and the check's seconds at about 200,000 ro
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import unittest
 from collections import defaultdict
@@ -241,6 +242,187 @@ class SimulationTests(unittest.TestCase):
         self.assertFalse(compact.repair_plan(done))
         partial = compact.Ledger(self.w.events, [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally[:2])
         self.assertEqual((compact.repair_plan(partial).ids, len(compact.repair_plan(partial).tally)), (0, len(self.w.tally) - 2))
+
+
+# --------------------------------------------------------------------------- the parity clock
+
+
+def utc(day: int, hour: int = 0, minute: int = 0, second: int = 0, month: int = 10) -> datetime:
+    return datetime(2026, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+
+def fill(state: compact.StorageState, day: int, runs: int, *, diffs: int = 0, admissions: int = 0, failed: bool = False) -> None:
+    """Record `runs` checked runs on October `day`; the first `diffs` of them found a counted difference, the first run saw `admissions`."""
+    for i in range(runs):
+        state.record_check(
+            utc(day, hour=i % 24, minute=5), counted=1 if i < diffs else 0, declared=0,
+            admissions=admissions if i == 0 else 0, failed=failed and i < diffs, diffs=["identity_missing greenhouse|acme|1"] if i < diffs else [],
+        )  # fmt: skip
+
+
+def seeded(at: datetime | None = None) -> compact.StorageState:
+    return compact.StorageState(seeded_at=lg.stamp(at or utc(1, 10)))
+
+
+class ClockTests(unittest.TestCase):
+    def test_three_clean_complete_days_with_an_admission_meet_the_bar_and_bar_met_at_is_set_once(self) -> None:
+        state = seeded()
+        for day, admissions in ((2, 0), (3, 1), (4, 0)):
+            fill(state, day, 12, admissions=admissions)
+        self.assertIsNone(state.bar_met_at)
+        bar = state.bar(utc(5, 8))
+        self.assertEqual((bar.met, bar.days_counted, bar.admission_seen, bar.streak), (True, 3, True, 3))
+        state.record_check(utc(5, 0, 7), counted=0, declared=0, admissions=0)
+        self.assertEqual(state.bar_met_at, "2026-10-05T00:07:00Z")  # the first checked run after the third day completed
+        state.record_check(utc(5, 6), counted=0, declared=0, admissions=0)
+        self.assertEqual(state.bar_met_at, "2026-10-05T00:07:00Z")  # set once
+
+    def test_without_an_admission_in_the_three_days_the_bar_is_not_met(self) -> None:
+        state = seeded()
+        for day in (2, 3, 4):
+            fill(state, day, 12)
+        bar = state.bar(utc(5, 8))
+        self.assertEqual((bar.met, bar.days_counted, bar.admission_seen), (False, 3, False))
+        state.record_check(utc(5, 1), counted=0, declared=0, admissions=0)
+        self.assertIsNone(state.bar_met_at)
+
+    def test_an_admission_before_the_three_days_does_not_help(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=3)
+        for day in (3, 4, 5):
+            fill(state, day, 12)
+        bar = state.bar(utc(6, 8))
+        self.assertEqual((bar.met, bar.admission_seen, bar.streak), (False, False, 4))  # the three most recent days saw none
+
+    def test_eleven_checked_runs_on_a_day_do_not_count_and_twelve_do(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=1)
+        fill(state, 3, 11)
+        fill(state, 4, 12)
+        bar = state.bar(utc(5, 8))
+        self.assertEqual((bar.met, bar.days_counted, bar.streak), (False, 1, 1))
+        state.record_check(utc(3, 23, 30), counted=0, declared=0, admissions=0)  # the twelfth
+        self.assertEqual((state.bar(utc(5, 8)).met, state.bar(utc(5, 8)).days_counted), (True, 3))
+
+    def test_the_seed_day_never_counts_however_many_clean_runs_it_has(self) -> None:
+        state = seeded(utc(1, 10))
+        fill(state, 1, 20, admissions=1)
+        fill(state, 2, 12)
+        fill(state, 3, 12)
+        bar = state.bar(utc(4, 8))
+        self.assertEqual((bar.met, bar.days_counted), (False, 2))
+        midnight = seeded(utc(1, 0))  # seeded at the first instant of the day: the day did not start AFTER the seed
+        fill(midnight, 1, 20, admissions=1)
+        fill(midnight, 2, 12)
+        fill(midnight, 3, 12)
+        self.assertEqual(midnight.bar(utc(4, 8)).days_counted, 2)
+
+    def test_a_difference_on_the_middle_day_means_three_new_clean_complete_days_are_needed(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=1)
+        fill(state, 3, 12)
+        fill(state, 4, 12)
+        state.record_check(utc(5, 0, 7), counted=0, declared=0, admissions=0)
+        self.assertIsNotNone(state.bar_met_at)
+        fill(state, 5, 12, diffs=1)  # a difference on day 4 of the streak clears bar_met_at at once
+        self.assertIsNone(state.bar_met_at)
+        for day in (6, 7):
+            fill(state, day, 12, admissions=1 if day == 6 else 0)
+        self.assertFalse(state.bar(utc(8, 8)).met)  # days 5, 6 and 7 are the last three complete days, and day 5 is dirty
+        fill(state, 8, 12)
+        bar = state.bar(utc(9, 8))
+        self.assertEqual((bar.met, bar.streak, bar.admission_seen), (True, 3, True))
+        state.record_check(utc(9, 0, 7), counted=0, declared=0, admissions=0)
+        self.assertEqual(state.bar_met_at, "2026-10-09T00:07:00Z")
+
+    def test_a_difference_today_blocks_the_bar_even_though_the_three_complete_days_before_it_are_clean(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=1)
+        fill(state, 3, 12)
+        fill(state, 4, 12)
+        self.assertTrue(state.bar(utc(5, 8)).met)
+        state.record_check(utc(5, 8), counted=2, declared=0, admissions=0, diffs=["identity_missing greenhouse|acme|1"])
+        self.assertFalse(state.bar(utc(5, 9)).met)  # P3-07: a difference restarts the clock; today can never be a counted day
+        self.assertEqual(state.bar(utc(5, 9)).streak, 3)
+
+    def test_a_run_at_exactly_midnight_utc_belongs_to_the_new_day(self) -> None:
+        state = compact.StorageState()
+        state.record_check(datetime(2026, 11, 2, 0, 0, 0, tzinfo=timezone.utc), counted=0, declared=0, admissions=0)
+        state.record_check(datetime(2026, 11, 1, 23, 59, 59, tzinfo=timezone.utc), counted=0, declared=0, admissions=0)
+        state.record_check(datetime(2026, 11, 1, 19, 0, 0, tzinfo=timezone(timedelta(hours=-5))), counted=0, declared=0, admissions=0)  # 00:00:00Z on the 2nd
+        self.assertEqual({d: r["runs"] for d, r in state.days.items()}, {"2026-11-01": 1, "2026-11-02": 2})
+
+    def test_the_current_incomplete_utc_day_never_counts(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=1)
+        fill(state, 3, 12)
+        fill(state, 4, 30, admissions=2)  # today, still running
+        bar = state.bar(utc(4, 23, 59))
+        self.assertEqual((bar.met, bar.days_counted, bar.streak), (False, 2, 2))
+        self.assertTrue(state.bar(utc(5, 0, 0)).met)  # a second later the day is complete
+
+    def test_a_failed_check_counts_as_a_difference_and_restarts_the_clock(self) -> None:
+        state = seeded()
+        fill(state, 2, 12, admissions=1)
+        fill(state, 3, 12)
+        fill(state, 4, 11)
+        state.record_check(utc(4, 23, 50), counted=1, declared=0, admissions=0, failed=True, diffs=["check_failed RuntimeError"])
+        day = state.days["2026-10-04"]
+        self.assertEqual((day["runs"], day["diff_runs"], day["failed"]), (12, 1, 1))
+        self.assertEqual(state.last_diffs, ["check_failed RuntimeError"])
+        self.assertEqual(state.bar(utc(5, 8)).streak, 0)  # twelve checked runs, but one of them is a difference
+
+    def test_a_run_that_was_not_checked_is_not_recorded_at_all(self) -> None:
+        state = seeded()
+        fill(state, 2, 12)
+        before = state.to_json()
+        # the pipeline skips the check past the cutoff and never calls record_check: nothing about the day changes
+        self.assertEqual(state.to_json(), before)
+        self.assertEqual(state.days["2026-10-02"]["runs"], 12)
+
+    def test_twenty_days_are_pruned_to_the_last_fourteen(self) -> None:
+        state = seeded(utc(1, 0, 0, 1, month=9))
+        for day in range(1, 21):
+            state.record_check(utc(day, 12), counted=0, declared=0, admissions=0)
+        self.assertEqual(sorted(state.days), [f"2026-10-{d:02d}" for d in range(7, 21)])
+        self.assertEqual(len(state.days), compact.STORAGE_DAYS_KEPT)
+
+    def test_a_thousand_offered_differences_keep_ten_and_each_text_is_capped(self) -> None:
+        state = seeded()
+        state.record_check(utc(2, 12), counted=1000, declared=0, admissions=0, diffs=[f"identity_missing greenhouse|acme|{'9' * 400}{i}" for i in range(1000)])
+        self.assertEqual(len(state.last_diffs), compact.MAX_LISTED_DIFFS)
+        self.assertTrue(all(len(text) <= 200 for text in state.last_diffs))
+
+    def test_the_json_of_a_full_state_stays_far_below_the_discovery_cell_cap(self) -> None:
+        state = seeded(utc(1, 0, 0, 1, month=9))
+        for day in range(1, 21):
+            for i in range(24):
+                state.record_check(utc(day, i, 5), counted=1, declared=2, admissions=1, diffs=[f"identity_missing greenhouse|acme|{'x' * 300}"] * 10, compared=190_000, seconds=12.3)
+        text = state.to_json()
+        self.assertLess(len(text), 10_000)  # the cell cap is 45,000 characters
+        again = compact.StorageState.load(text)
+        self.assertEqual((again.seeded_at, again.days, again.last_diffs, again.last_check), (state.seeded_at, state.days, state.last_diffs, state.last_check))
+
+    def test_truncated_or_hand_edited_json_gives_a_fresh_state_that_assumes_nothing_met(self) -> None:
+        state = seeded()
+        for day in (2, 3, 4):
+            fill(state, day, 12, admissions=1)
+        text = state.to_json()
+        for broken in (text[:-25], "", "[]", "null", '{"days": "x", "seeded_at": 5, "bar_met_at": 7, "last_diffs": "no"}'):
+            fresh = compact.StorageState.load(broken)
+            self.assertIsNone(fresh.seeded_at, broken)
+            self.assertEqual((fresh.days, fresh.last_diffs), ({}, []))
+            self.assertFalse(fresh.bar(utc(5, 8)).met)
+            self.assertIsNone(fresh.bar_met_at)
+        kept = compact.StorageState.load(text)
+        self.assertEqual(kept.to_json(), text)
+
+    def test_later_plans_fields_survive_a_load_and_save(self) -> None:
+        text = '{"cutover":{"at":"2026-11-01T00:00:00Z"},"fold":{"last":"x"},"future":[1,2],"mode":"compact","restore":{"n":1},"seeded_at":"2026-10-01T10:00:00Z"}'
+        state = compact.StorageState.load(text)
+        state.record_check(utc(5, 8), counted=0, declared=0, admissions=0)
+        data = json.loads(state.to_json())
+        self.assertEqual((data["cutover"], data["fold"], data["restore"], data["future"], data["mode"]), ({"at": "2026-11-01T00:00:00Z"}, {"last": "x"}, {"n": 1}, [1, 2], "compact"))
 
 
 # --------------------------------------------------------------------------- the pipeline
