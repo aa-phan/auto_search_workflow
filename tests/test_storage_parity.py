@@ -7,7 +7,9 @@ Groq or Telegram; the real seed size and the check's seconds at about 200,000 ro
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import json
 import re
 import sys
@@ -24,11 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import compact  # noqa: E402
 import freshness as fr  # noqa: E402
+import hunter as h  # noqa: E402
 import ledger as lg  # noqa: E402
 import parity  # noqa: E402
 import pipeline as pl  # noqa: E402
+import reporting as rp  # noqa: E402
 import state as stm  # noqa: E402
 from test_core import T0, HarnessCase, ago, job  # noqa: E402
+from test_hunter import settings  # noqa: E402
+from test_storage_cutover import FOLD_DAY, FoldCase  # noqa: E402
 from test_reporting import CHI, UTC, ZONES, compact_world  # noqa: E402
 from test_storage_pipeline import history_event, read_csv, storage_of  # noqa: E402
 
@@ -699,6 +705,223 @@ class FigurePipelineTests(HarnessCase):
         with mock.patch.object(parity, "check_dual", wraps=parity.check_dual) as spy:
             self.w.run(minutes_later=60)
         self.assertEqual((list(spy.call_args.kwargs["tracker"]), spy.call_args.kwargs["tz"]), ([], timezone.utc))
+
+
+# --------------------------------------------------------------------------- compact mode: the integrity check (plan 03-07)
+
+
+class IntegrityCheckTests(unittest.TestCase):
+    """`parity.check_compact` on a compact view (the Events rows a store still holds, with the Identity and Tally the pipeline wrote): pure."""
+
+    def setUp(self) -> None:
+        self.w = Synthetic()
+        self.events = compact.simulate_compact(self.w.events, NOW)  # no baseline row and no gated row older than 7 days is left
+
+    def ledger(self, *, rows: list[compact.IdentityRow] | None = None, tally: list[compact.TallyRow] | None = None, events: list[lg.Event] | None = None) -> compact.Ledger:
+        kept = self.events if events is None else events
+        return compact.Ledger(kept, list(range(2, len(kept) + 2)), compact.IdentitySet.from_rows(self.w.rows if rows is None else rows), self.w.tally if tally is None else tally)
+
+    def check(self, **kw: object) -> parity.ParityReport:
+        return parity.check_compact(self.ledger(**kw), now=NOW)  # type: ignore[arg-type]
+
+    def kinds(self, report: parity.ParityReport) -> list[str]:
+        return sorted(d.kind for d in report.diffs if not d.declared)
+
+    def entry_row(self, entry: str, edit: object) -> list[compact.IdentityRow]:
+        row = self.w.row_with(entry)
+        return self.w.with_row(row, edit(row))  # type: ignore[operator]
+
+    def test_a_consistent_compact_view_counts_nothing_and_says_what_it_compared(self) -> None:
+        report = self.check()
+        self.assertEqual((report.counted, report.declared), (0, 0), [d.text() for d in report.diffs])
+        self.assertLess(len(self.events), len(self.w.events))  # the baselines and the old gated rows really are gone from Events
+        self.assertGreater(report.compared["seen_keys"], 5)
+        self.assertEqual(report.compared["identity_entries"], 24)
+        self.assertGreaterEqual(report.compared["tally_groups"], 8)
+
+    def test_an_identity_id_removed_for_a_kept_gated_row_is_counted_identity_missing(self) -> None:
+        report = self.check(rows=self.entry_row("f2", lambda r: replace(r, ids=",".join(e for e in r.entries() if e != "f2"), count=len(r.entries()) - 1)))
+        self.assertEqual(self.kinds(report), ["identity_missing"])
+        self.assertEqual([d.ref for d in report.diffs], ["greenhouse|acme|f2"])
+
+    def test_an_id_that_only_identity_holds_cannot_be_compared_and_is_not_counted(self) -> None:
+        """A baseline or folded row has no Events row any more: nothing to compare its ID with (a known limit, D-57), so removing it is not seen here."""
+        report = self.check(rows=self.entry_row("b3", lambda r: replace(r, ids=",".join(e for e in r.entries() if e != "b3"), count=len(r.entries()) - 1)))
+        self.assertEqual(report.counted, 0)
+
+    def test_a_kind_letter_changed_for_a_kept_key_is_counted(self) -> None:
+        self.assertEqual(self.kinds(self.check(rows=self.entry_row("f2", lambda r: replace(r, ids=r.ids.replace("f2", "s2"))))), ["identity_kind"])
+
+    def test_the_identity_codec_invariants_are_counted_by_name(self) -> None:
+        cases = {
+            "identity_count": self.entry_row("f2", lambda r: replace(r, count=r.count + 3)),
+            "identity_cell": self.entry_row("f2", lambda r: replace(r, ids=r.ids + "," + "x" * (compact.IDENTITY_CELL_CHARS + 1), count=r.count + 1)),
+            "identity_marker": self.entry_row("f2", lambda r: replace(r, baselined_at="")),
+            "identity_duplicate": self.entry_row("f2", lambda r: replace(r, ids=r.ids + ",f2", count=r.count + 1)),
+            "identity_entry": self.entry_row("f2", lambda r: replace(r, ids=r.ids + ",x9", count=r.count + 1)),  # `x` is no kind letter
+        }
+        for kind, rows in cases.items():
+            with self.subTest(kind):
+                self.assertIn(kind, self.kinds(self.check(rows=rows)))
+
+    def test_a_tally_group_below_its_retained_count_is_counted_tally_negative_with_numbers_only(self) -> None:
+        lowered = [compact.TallyRow(t.run_id, t.run_at, 0, {}) if t.run_id == "steady-2" else t for t in self.w.tally]
+        report = self.check(tally=lowered)
+        self.assertEqual(self.kinds(report), ["tally_negative", "tally_negative"])  # the gated and the stale row of that run
+        self.assertIn("steady-2@", report.diffs[0].ref)
+        self.assertRegex(report.diffs[0].detail, r"^\d+ vs \d+$")
+
+    def test_a_kept_group_missing_in_tally_is_counted_tally_missing_once(self) -> None:
+        report = self.check(tally=[t for t in self.w.tally if t.run_id != "steady-2"])
+        self.assertEqual(self.kinds(report), ["tally_missing"])
+
+    def test_a_tally_total_that_is_not_the_sum_of_its_counts_is_counted(self) -> None:
+        wrong = [replace(t, total=t.total + 5) if t.run_id == "steady-2" else t for t in self.w.tally]
+        self.assertEqual(self.kinds(self.check(tally=wrong)), ["tally_count"])
+
+    def test_a_tally_with_more_than_the_events_retain_is_what_a_fold_leaves_and_is_not_a_difference(self) -> None:
+        report = parity.check_compact(self.ledger(events=[e for e in self.events if e.key != "greenhouse|acme|f2"]), now=NOW)  # f2's row folded: Tally still counts it
+        self.assertEqual(report.counted, 0)
+
+    def test_the_summary_consistency_checks_are_counted_figure_checks(self) -> None:
+        with mock.patch.object(rp, "_checks", return_value=["today: job outcomes do not add up to the unique jobs observed"]):
+            report = self.check()
+        self.assertEqual(self.kinds(report), ["figure_checks"])
+        self.assertEqual(report.diffs[0].ref, "checks.today")
+
+    def test_an_unkeyable_kept_row_is_declared_not_counted(self) -> None:
+        odd = history_event("greenhouse|acme", at(days=1), lg.FILTERED, "odd-run")
+        report = self.check(events=self.events + [odd])
+        self.assertEqual((report.counted, report.declared), (1, 1))  # its Tally group is missing: counted; the key cannot be keyed: declared
+        self.assertEqual([d.kind for d in report.diffs if d.declared], ["unkeyable"])
+
+    def test_no_difference_text_holds_a_title_or_a_url(self) -> None:
+        report = self.check(rows=self.entry_row("f2", lambda r: replace(r, ids="")), tally=self.w.tally[:2])
+        text = "\n".join(d.text() for d in report.diffs)
+        self.assertTrue(text)
+        for forbidden in ("http", "title", "Remote"):
+            self.assertNotIn(forbidden, text)
+
+
+class IntegrityTests(FoldCase):
+    """Compact mode in the poller and in `--storage-parity`: after the cutover and the first fold every run still checks that Identity and Tally
+    agree with what Events keeps (MOCKED: the Sheets fake; the in-run check is the pure check above on the start-of-run snapshot)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.seeded_with_met_bar()
+        self.assertEqual(self.cutover()[0], 0)
+        self.run_at(FOLD_DAY)  # the first fold; every later run of these tests is on the same UTC day, so none folds again
+        self.assertEqual(self.storage().fold["rows_total"], 4)
+        self.minute = 0
+
+    def next_run(self, **kw: object) -> pl.RunRecord:
+        self.minute += 10
+        return self.run_at(FOLD_DAY + timedelta(minutes=self.minute), **kw)
+
+    def parity_command(self, now: datetime | None = None) -> tuple[int, str]:
+        out = io.StringIO()
+        with mock.patch.object(h.fr, "utcnow", return_value=now or FOLD_DAY + timedelta(hours=3)), contextlib.redirect_stdout(out):
+            code = h.run_storage_parity(self.store, settings())
+        return code, out.getvalue()
+
+    def test_a_clean_compact_state_counts_zero_in_the_run_and_the_command_exits_zero(self) -> None:
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        last = self.storage().last_check
+        self.assertEqual((last["counted"], last["declared"]), (0, 0))
+        self.assertGreater(last["compared"], 0)
+        code, text = self.parity_command()
+        self.assertEqual(code, 0, text)
+        self.assertIn("mode compact", text)
+        self.assertIn("0 counted differences", text)
+
+    def test_compact_runs_record_a_check_but_no_clock_day_and_never_touch_the_bar(self) -> None:
+        before = self.storage()
+        days, bar = json.dumps(before.days, sort_keys=True), before.bar_met_at
+        checked_at = before.last_check["at"]
+        for _ in range(2):
+            self.next_run()
+        after = self.storage()
+        self.assertEqual(json.dumps(after.days, sort_keys=True), days)  # the bar is not used after the cutover
+        self.assertEqual(after.bar_met_at, bar)
+        self.assertGreater(after.last_check["at"], checked_at)
+        self.assertEqual(after.mode, compact.MODE_COMPACT)
+
+    def test_an_identity_id_removed_for_a_kept_gated_row_degrades_the_run_and_the_next_runs_repair_clears_it(self) -> None:
+        self.edit_identity("f33")  # job 33 is a kept gated row (one second younger than the 7-day cut)
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage", pl.degraded_reason(run))
+        self.assertIn("storage parity: 1 differences (identity_missing 1); ", run.notes)
+        self.assertEqual(self.storage().last_diffs, ["identity_missing greenhouse|acme|33"])
+        self.assertEqual(self.storage().last_check["counted"], 1)
+        self.assertEqual(self.w.state.load_ledger().identity.kind("greenhouse|acme|33"), "f")  # the repair at run start put it back
+        clean = self.next_run()
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+
+    def test_a_tally_group_lowered_below_its_retained_count_is_counted_tally_negative_until_someone_repairs_it(self) -> None:
+        def lower(row: list[str]) -> None:
+            row[2], row[3] = "0", "{}"
+
+        self.edit_tally("run-f4", lower)  # job 33's group
+        for _ in range(2):  # nothing repairs a lowered count: a lost count is reported on every run
+            run = self.next_run()
+            self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+            self.assertIn("storage parity: 1 differences (tally_negative 1); ", run.notes)
+        self.assertTrue(self.storage().last_diffs[0].startswith("tally_negative run-f4@2026-10-12T00:00:01Z "))
+
+    def test_a_kept_group_missing_in_tally_is_counted_and_the_next_run_has_it_back(self) -> None:
+        self.sh.sheets[stm.TALLY_TAB].values[:] = [r for r in self.sh.sheets[stm.TALLY_TAB].values if r[0] != "run-f4"]
+        run = self.next_run()
+        self.assertIn("tally_missing 1", run.notes)
+        self.assertEqual(self.next_run().outcome, stm.OUTCOME_OK)
+
+    def test_failing_consistency_checks_of_the_merged_summary_are_counted_figure_checks(self) -> None:
+        with mock.patch.object(rp, "_checks", return_value=["7d: periods are not nested"]):
+            run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("figure_checks 1", run.notes)
+
+    def test_a_check_that_raises_is_a_counted_difference_and_adds_the_failed_note(self) -> None:
+        with mock.patch.object(parity, "check_compact", side_effect=RuntimeError("boom with a secret")):
+            run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage check failed: RuntimeError", run.notes)
+        self.assertNotIn("secret", run.notes + self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (1, ["check_failed RuntimeError"]))
+
+    def test_a_check_past_the_cutoff_is_skipped_and_not_recorded(self) -> None:
+        before = self.storage().last_check
+        run = self.next_run(process_t0=0.0, clock=lambda: pl.STORAGE_CHECK_CUTOFF_S + 1.0)
+        self.assertEqual(self.storage().last_check, before)
+        self.assertNotIn("storage parity", run.notes)
+
+    def test_the_command_in_compact_mode_exits_one_on_a_difference_and_writes_nothing(self) -> None:
+        self.edit_identity("f33")
+        before = self.snapshot()
+        code, text = self.parity_command()
+        self.assertEqual(code, 1, text)
+        self.assertIn("identity_missing greenhouse|acme|33", text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_command_still_refuses_restored_and_unseeded_states_with_exit_two(self) -> None:
+        self.set_storage(lambda s: setattr(s, "mode", compact.MODE_RESTORED))
+        before = self.snapshot()
+        code, text = self.parity_command()
+        self.assertEqual((code, self.snapshot()), (2, before), text)
+        self.set_storage(lambda s: (setattr(s, "mode", compact.MODE_COMPACT), setattr(s, "seeded_at", None)))
+        self.assertEqual(self.parity_command()[0], 2)
+
+    def test_the_notes_the_key_and_the_log_of_a_compact_run_hold_no_job_text(self) -> None:
+        self.edit_identity("f33")
+        with self.assertLogs("hunter", level="INFO") as logs:
+            run = self.next_run()
+        text = "\n".join([run.notes, self.w.state.load_discovery_state()[compact.STORAGE_KEY], *logs.output])
+        for forbidden in ("Marketing", "http", "Remote"):
+            self.assertNotIn(forbidden, text)
+        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=compact, 1 counted") for line in logs.output), logs.output)
 
 
 if __name__ == "__main__":
