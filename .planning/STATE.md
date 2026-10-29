@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 03
 current_phase_name: Compact storage
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-10-29T16:53:17.738Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-10-29T17:09:20.424Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 03 execution started
-state_head: f36a142eb5fbd664b208cee3cd6b9b66d64f6444
+state_head: 7c7a64ec177d724e57efb33e501a97b74fad54ae
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 18
-  completed_plans: 10
+  completed_plans: 11
   percent: 33
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-28)
 ## Current Position
 
 Phase: 03 (Compact storage) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 03 execution started
 
@@ -63,6 +63,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P07 | 1h | 3 tasks | 2 files |
 | Phase 02 P08 | ~1h across two invocations | 3 tasks | 6 files |
 | Phase 03 P01 | 12 min | 3 tasks | 10 files |
+| Phase 03 P02 | 15 min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,10 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: D-54 (2026-10-28): owner keeps SmartRecruiters polled; P2-14 parking withdrawn; plan 02-09 superseded, nothing deployed.
 - [Phase 03]: Identity is keyed by the job-key stem ats|board_lowercased, never BoardRecord.key or a URL
 - [Phase 03]: Compact mode needs the Discovery key storage=compact AND Events_Legacy; a Tally failure is contained in both modes; a compact-mode Identity failure stops the run before save_boards
+- [Phase 03]: 03-02: parity bar = 3 complete UTC days after the seed day, 12 checked runs each, no difference, one admission; a run belongs to the UTC day it started in — P3-05; constants in compact.py, recorded in D-57
+- [Phase 03]: 03-02: a difference found today blocks the bar until three clean complete days follow it — P3-07: any difference restarts the clock; today never counts
+- [Phase 03]: 03-02: parity check runs after the alert stage on the start-of-run snapshot; a raised check is check_failed; a check skipped past 22 min is not recorded — Events stays authoritative; unknown is never zero differences
+- [Phase 03]: 03-02: declared (listed, not counted) differences are unkeyable keys and duplicate seen rows — Both stay in Events or are counted first-seen only, so nothing is lost
 
 ### Pending Todos
 
@@ -127,6 +132,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-29T16:53:17.686Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-10-29T17:09:20.372Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None

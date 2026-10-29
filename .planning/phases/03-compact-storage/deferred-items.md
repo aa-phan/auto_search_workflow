@@ -4,3 +4,5 @@
   status: open
 - `storage_report.py` repeats `COMPACT_CELL_CHARS` and `classify()`, now also defined as `compact.IDENTITY_CELL_CHARS` and `compact.identity_class` (plan 03-01 did not list `storage_report.py`). Make it import them in a later Phase 3 plan.
   status: open
+- Compact-mode count loss (from plan 03-01, left by plan 03-02): an interrupted compact-mode Identity write leaves durable IDs with no Tally count, and a compact-mode baseline has no Events row to re-derive it from. The in-run repair and check (plan 03-02) cover dual mode only. Decide in plans 03-06/03-07 how the compact-mode checks use `Ledger.negative()` and how a lost count is reported.
+  status: open
