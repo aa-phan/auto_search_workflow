@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 03
 current_phase_name: Compact storage
 status: executing
-stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-10-29T18:28:32.859Z"
+stopped_at: Completed 03-07-PLAN.md
+last_updated: "2026-10-29T19:37:37.664Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 03 execution started
-state_head: ebe4cb9295d56248ea295b73105bff16708724ab
+state_head: 2c1234cc5d1823ef60c1eb21dedcee4bd2556631
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 18
-  completed_plans: 15
+  completed_plans: 16
   percent: 33
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-28)
 ## Current Position
 
 Phase: 03 (Compact storage) — EXECUTING
-Plan: 7 of 9
+Plan: 8 of 9
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 03 execution started
 
@@ -68,6 +68,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P04 | 10 min | 3 tasks | 15 files |
 | Phase 03 P05 | 22 min | 3 tasks | 2 files |
 | Phase 03 P06 | 18 min | 3 tasks | 12 files |
+| Phase 03 P07 | 66min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 03]: 03-05: dual writing deployed (f8c8263, 2026-10-29 17:46 UTC); parity clock first countable day 2026-10-30, earliest READY TO CUT OVER 2026-11-02
 - [Phase 03]: 03-06: P3-06 refined: --storage-restore appends the post-cutover rows to Events_Legacy before the rename pair (a hand rename would lose them and could alert old jobs twice); refused after the first fold; flagged for the plan 03-08 deploy decision
 - [Phase 03]: 03-06: a cutover re-run finishes an interrupted swap only when Events_Legacy is the old ledger (rows at least as many as any run loaded, seen keys held, no older missing row); restored mode is terminal
+- [Phase 03]: 03-07: the fold is the costly point of no return; it acts only in compact mode on a UTC day after the cutover day; fold.first_day is set only by the first fold that deleted a row — P3-01 and P3-03; a zero-row fold changes nothing irreversible and must not block the restore
+- [Phase 03]: 03-07: fold_events refuses the whole fold when a planned row no longer holds its key in a seen row (checked on a fresh read before the first deleteDimension) — T-03-29: row numbers come from the start-of-run load; a hand edit must never make a delete hit another row
+- [Phase 03]: 03-07: compact-mode integrity check (parity.check_compact) runs in every poller run and in --storage-parity; limits stated: IDs only Identity holds and lost baseline-only counts cannot be detected — Resolves the open 03-01 item on Ledger.negative(); the check can only compare what Events still keeps
 
 ### Pending Todos
 
@@ -145,6 +149,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-29T18:28:32.803Z
-Stopped at: Completed 03-06-PLAN.md
+Last session: 2026-10-29T19:37:37.606Z
+Stopped at: Completed 03-07-PLAN.md
 Resume file: None

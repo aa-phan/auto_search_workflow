@@ -100,7 +100,7 @@ Plans:
   3. Only after parity: baseline and identity-only rows are retired by swapping the old tab to `Events_Legacy` (kept and restorable), Events is back well below the D-03 review point, and the storage report shows rows, allocated cells and load time before and after with the daily growth in cells falling by an order of magnitude (D-43 estimate: about 26,200 to about 1,300 cells a day).
   4. A run interrupted in the middle of a board's baseline never makes that board's old postings look new on the next run (a board counts as baselined only after its last chunk is written).
 
-**Plans**: 6/9 plans executed (waves 1-9, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner)
+**Plans**: 7/9 plans executed (waves 1-9, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner)
 
 Plans:
 **Wave 1**
@@ -122,7 +122,7 @@ Plans:
 - [x] 03-06-PLAN.md — Owner-triggered cutover (copy, verify, atomic tab swap to Events_Legacy) and the pre-fold restore (P3-06, P3-08, P3-14)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 03-07-PLAN.md — 7-day fold, storage report before/after with allocated cells, compact-mode integrity check (P3-01, P3-03, P3-12)
+- [x] 03-07-PLAN.md — 7-day fold, storage report before/after with allocated cells, compact-mode integrity check (P3-01, P3-03, P3-12)
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 03-08-PLAN.md — Deploy the cutover tooling with the owner's consent (dual mode unchanged)
@@ -238,7 +238,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
 | 2. Measurement, governors and owner decisions | v2.0 | 9/9 | Complete    | 2026-10-28 |
-| 3. Compact storage | v2.0 | 6/9 | In Progress | - |
+| 3. Compact storage | v2.0 | 7/9 | In Progress | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
 | 6. Adapter registry and first-wave adapters | v2.0 | 0/TBD | Not started | - |
