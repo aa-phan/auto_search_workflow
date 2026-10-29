@@ -96,6 +96,19 @@ Start: the first scheduled run after step 7 (note its `Run_At`). Keep unchanged 
 
 To see the D-51 cutoffs fire, run **Job Hunter** by hand with `poll_cutoff_minutes` and/or `eval_cutoff_minutes` set (whole minutes, at least 1; for example both `1`). Leave every other box unticked and both fields empty for normal runs. A poll cut records the run `degraded` and leaves the cut boards for the next run; an evaluation cut leaves jobs pending with no attempt used. Read the result in that run's `Runs` row (`Boards_Skipped_Deadline`, `Eval_Cut`, `Eval_Deadline_Skipped`, Notes "poll cutoff" / "evaluation cutoff") and add a PILOT_LOG row naming the run, because its numbers are not a normal measurement. The alert cutoff and the 5-attempt alert bound have no test input on purpose.
 
+## Compact storage (D-57)
+
+Phase 3 adds two hidden tabs that the hourly run writes beside `Events` (dual writing; nothing is deleted):
+
+- **`Identity`**: the posting IDs of baseline, title-gated and stale observations, per board (`ats|board`). It carries a warning-only protection: Sheets asks for confirmation before a hand edit. **Do not edit it**; a removed ID can make an old job look new. The service account writes it normally (not yet verified live: STATUS "Phase 3 compact storage", assumption A2).
+- **`Tally`**: one row per run with counts of what that run observed, which the Dashboard and the pilot report use once old `Events` rows are compacted.
+
+The Discovery tab gains one key, `storage` (the mode, the seed time and the parity days). On the first run after a deploy the program seeds both tabs from the ledger it loads, under the writer lease; every later run checks the previous runs' writes against `Events` and records the result.
+
+**Reading it.** The Dashboard's SYSTEM line **Storage** shows the mode, the seed date, the last check's differences, `k of 3 clean complete days` and whether a board admission was seen. A difference appears under NEEDS ATTENTION as `storage parity difference` (the old `Events` rows stay authoritative, nothing was deleted, the 3-day clock restarted). **`READY TO CUT OVER`** means three clean complete UTC days (each with at least 12 checked runs) including one board admission, recomputed from the recorded days; it never appears from elapsed time alone. The cutover itself is a separate owner step, documented here when its workflow input exists (plan 03-06); nothing retires automatically.
+
+**Checking on demand.** Run **Job Hunter** with `storage_parity` ticked (or `python hunter.py --storage-parity`). It is read only: it takes no lock, writes nothing and needs no Groq key (the workflow's configuration step still asks for the usual secrets). It prints the compared counts, up to 50 differences and the parity clock, and exits 0 (no counted differences), 1 (differences) or 2 (it cannot be checked: not seeded yet, or the mode is not dual).
+
 ## Watchdog (missed-run alerts; D-42)
 
 The **Watchdog** workflow (`.github/workflows/watchdog.yml`) checks every 15 minutes (GitHub schedule) that a production polling run finished successfully within **2 hours**, and sends **one** Telegram message when it did not and **one** when polling recovers, to `TELEGRAM_CHAT_ID`. It reads the `Runs` tab only, keeps its own incident record in a hidden `Watchdog` tab, and never restarts anything or changes Settings. No new secret is needed.

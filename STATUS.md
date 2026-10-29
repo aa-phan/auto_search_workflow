@@ -1,6 +1,39 @@
 # STATUS
 
-Last updated 2026-10-28 (Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-29 (Phase 3 compact storage, plans 03-01..03-04, built and verified offline only, not deployed, D-57; before that 2026-10-28: Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+
+## Phase 3 compact storage (D-57; plans 03-01..03-04)
+
+Written 2026-10-29. **Built and verified offline (mocked); not deployed.** Nothing here has touched the real Google Sheet, Groq or Telegram: every check below ran against the CSV store, the in-memory Sheets fake (`tests/fake_sheets.py`), hand-built ledgers and fake ATS listings. `.venv/bin/python -m unittest discover -s tests` printed `Ran 787 tests ... OK` at the end of plan 03-04 (767 after 03-03; 20 new tests in this plan).
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Identity and Tally write order (Events, Identity, Tally, Boards), the Identity codec (kind letters, `%` escapes), the 40,000-character cell and 1,000,000-character request limits (plan 03-01) | pass | **mocked** |
+| Compact-mode write (no baseline Events row) and the interrupted baseline: a cut-off Identity write is a baseline pass again, nothing alerted, each ID once (ROADMAP success criterion 4) | pass | **mocked** |
+| Seed and repair: the first run builds Identity and the historical Tally from the loaded ledger; an interrupted seed is completed without writing an ID or a run twice | pass | **mocked** |
+| Parity layers 1 to 4 (seen set, Tally recount, state counts, reported figures) with a mutation test per named difference kind; declared classes listed, not counted | pass | **mocked** (synthetic ledgers up to 194,000 rows; real size untested) |
+| The parity clock: 3 complete UTC days, 12 checked runs each, one admission, a difference restarts it, today never counts | pass | **mocked** |
+| Reports read the merged view (Dashboard, pilot reconciliation, storage counts): same figures from all Events rows and from Identity + Tally + kept rows, in UTC and America/Chicago | pass | **mocked** |
+| Dashboard Storage line, `READY TO CUT OVER` (dual mode, bar met only), NEEDS ATTENTION row `storage parity difference`, the P3-11 note (plan 03-04) | pass | **mocked** (rendered grid inspected as data; not rendered in a Sheet) |
+| `--storage-parity` read-only command: exit 0 / 1 / 2, zero writes asserted by a full snapshot of the Sheets fake, no writer lease (plan 03-04) | pass | **mocked** |
+| Workflow input `storage_parity` (boolean, fixed command, excluded from the poller and from `REQUIRE_TELEGRAM`) | pass | **mocked** (static test of the workflow file; the workflow was never run) |
+
+**Mutation checks** (each applied with the bytecode cache off, observed failing, then reverted): listed per plan in the 03-01..03-04 SUMMARY files. Plan 03-04's: readiness without the dual-mode condition, all stored differences shown instead of three, the sanitiser removed, the P3-11 note always shown, a row for declared-only differences, the exit code always 0, a Discovery write inside `--storage-parity`, a writer lease taken, the 50-line limit raised, the not-seeded refusal removed. One mutant survived: dropping `seeded is not None` from the readiness test, because `StorageState.bar` already returns not met for an unseeded state (a redundant guard, kept on purpose).
+
+**Not verified live (each is a plan 03-05 observation or an owner check):**
+- Whether a warning-only protection on `Identity` still lets the service account write (research assumption A2). If it does not, the first run after deploy fails its Identity write: in dual mode the run is `degraded` and `Events` stays authoritative.
+- The seed's size and time at about 200,000 rows (about 190,000 IDs, a few hundred cells) and how Sheets stores a 40,000-character `IDs` cell.
+- The parity check's seconds and memory at about 200,000 rows, plus its extra Job Tracker read per run (an offline scale check took 6.4 s on a synthetic 194,000-row ledger).
+- The Sheet render of the new Storage line and of the NEEDS ATTENTION row.
+- That the `storage_parity` input appears and runs in GitHub Actions. Its `Check configuration` step still lists `GROQ_API_KEY` as required (as for every other report), although `--storage-parity` itself needs no Groq key.
+- Everything after the dual-writing deploy: the cutover, the fold and the restore are plans 03-06 and 03-07 and are not built yet.
+
+**Migration notes for the first run after deploy (plan 03-05):**
+- Two hidden tabs appear, `Identity` and `Tally`. `Identity` is protected with a warning, so Sheets asks for confirmation before a hand edit; do not edit it (a removed ID can make an old job look new).
+- The `Discovery` tab gains the key `storage` (JSON: mode, seed time, the parity days, the last check). Do not edit it; a damaged key restarts the clock and is never read as ready.
+- The first run seeds about 200,000 IDs into `Identity` and the historical `Tally` (one row per run and run time) from the ledger it already loads, under the writer lease. Nothing in `Events` is changed or deleted, and detection, evaluation and alerts do not depend on the new tabs.
+- The parity clock starts the next full UTC day after the seed day (the seed day never counts). Three clean complete days, each with at least 12 checked runs, and one board admission among them are needed before the Dashboard says `READY TO CUT OVER`; the cutover is a separate owner step (plan 03-06).
+- `Events` keeps growing at today's rate until the cutover, plus `Identity` and `Tally`.
 
 ## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
 
