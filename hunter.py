@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -51,7 +51,7 @@ from meter import METER
 import pools
 from boards import BoardId, JobIdentity, ListedJob, parse_board_url, parse_job_url
 from freshness import parse_posted
-from state import KIND_PRODUCTION, KIND_REHEARSAL, CsvState, SheetState
+from state import EVENTS_FAILED_TAB, EVENTS_LEGACY_TAB, EVENTS_NEW_TAB, EVENTS_TAB, KIND_PRODUCTION, KIND_REHEARSAL, CsvState, SheetState
 
 try:  # optional: load .env for local runs
     from dotenv import load_dotenv
@@ -1982,6 +1982,23 @@ def run_storage_report(store: Any) -> int:
     return 0
 
 
+def _read_tracker(store: Any) -> list[dict[str, str]]:
+    """The Job Tracker rows for the parity check. An unreadable tracker is compared as empty on both sides, exactly as in the poller's check."""
+    try:
+        return list(store.tracker_rows())
+    except Exception as exc:
+        log.warning("Storage parity: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
+        return []
+
+
+def _parity_report(
+    store: Any, ledger: compact.Ledger, view_events: list[lg.Event], *, now: datetime, runs: list[Any], boards: dict[str, Any], discovery: dict[str, str], tracker: list[dict[str, str]],
+) -> parity.ParityReport:  # fmt: skip
+    """All four parity layers: the full Events rows of `ledger` against the compact view made of `view_events`, its Identity and its Tally."""
+    view = compact.Ledger(view_events, [], ledger.identity, ledger.tally)
+    return parity.check_dual(ledger.events, view, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=runs, boards=boards, discovery=discovery, tracker=tracker)
+
+
 def run_storage_parity(store: Any, settings: Settings) -> int:
     """`--storage-parity` (D-57): does Identity plus Tally reproduce what the Events rows say? Read only: it takes no writer lease, writes no
     Sheet row, no Discovery key and no tab, and needs no Groq key. Exit 0: zero counted differences; 1: some; 2: it cannot be checked (the
@@ -1997,17 +2014,162 @@ def run_storage_parity(store: Any, settings: Settings) -> int:
         print(f"STORAGE PARITY cannot run: the stored mode is {storage.mode}, and this check compares the Events rows with the compact stores in dual mode only. Nothing was written.")
         return 2
     ledger = state.load_ledger()
-    try:
-        tracker = list(store.tracker_rows())
-    except Exception as exc:  # an unreadable tracker is compared as empty on both sides, exactly as in the poller's check
-        log.warning("Storage parity: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
-        tracker = []
-    view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
-    report = parity.check_dual(
-        ledger.events, view, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=tracker,
-    )  # fmt: skip
+    report = _parity_report(store, ledger, compact.simulate_compact(ledger.events, now), now=now, runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
     print(parity.format_report(report, storage, now))
     return 0 if not report.counted else 1
+
+
+LEGACY_PROTECTION = "Events_Legacy: the ledger as it was before the compact cutover, kept so the cutover can be undone. Do not edit it (DECISIONS D-57)."
+
+
+def _before_text(before: dict[str, Any]) -> str:
+    """The before snapshot as one counts-only line."""
+    load, growth = before.get("median_load_s"), before.get("median_daily_events_growth")
+    cells = before.get("cells", {})
+    return (
+        f"before: {before.get('events_rows', 0):,} Events rows, {before.get('cells_total', 0):,} allocated cells in total ({cells.get(EVENTS_TAB, 0):,} in Events), "
+        f"median load {'not measured' if load is None else f'{load:g} s'} over the last runs, median daily growth {'not measured' if growth is None else f'{growth:g} rows'}"
+    )
+
+
+def run_storage_cutover(store: Any, settings: Settings, *, dry_run: bool, now: datetime | None = None) -> int:
+    """`--storage-cutover` (D-57, P3-06, P3-14): replace Events by its compact copy. Owner step; it deletes nothing.
+
+    Refuses (exit 1, nothing written) unless the stored mode is `dual`, the stores are seeded, no `Events_Legacy` exists, `StorageState.bar(now)`
+    is met and a fresh four-layer parity check in this run counts no difference. Then it writes the retained rows to a hidden `Events_New`, reads
+    them back and verifies the row count and a SHA-256 checksum, runs parity on the would-be state, and only then renames Events -> Events_Legacy and
+    Events_New -> Events in ONE spreadsheet batch (the Sheet is never without an Events tab). Exit 0: done (or a dry run whose gate passes); 1:
+    refused; 2: an error (a copy that failed to build or a record that was not saved). A tab swap done but not recorded is finished by running the
+    command again: it verifies that Events and Identity reproduce the seen set of Events_Legacy and writes the record without copying again."""
+    now = now or fr.utcnow()
+    state = store.state
+
+    def refuse(why: str, *, scratch: bool = False) -> int:
+        print(f"STORAGE CUTOVER refused: {why} " + ("Events and Events_Legacy were not changed (the scratch tab Events_New may remain and is replaced by the next attempt)." if scratch else "Nothing was written."))
+        return 1
+
+    swapped = False
+    try:
+        discovery = state.load_discovery_state()
+        storage = compact.StorageState.load(discovery.get(compact.STORAGE_KEY))
+        legacy = state.tab_exists(EVENTS_LEGACY_TAB)
+        if storage.mode == compact.MODE_RESTORED:
+            return refuse("the stored mode is restored: compacting again needs a new owner decision (and a new seed of the parity clock).")
+        if storage.mode == compact.MODE_COMPACT:
+            return refuse("the stored mode is already compact.")
+        if storage.seeded_at is None:
+            return refuse("Identity and Tally are not seeded yet (the first poller run after the dual-write deployment seeds them).")
+        ledger = state.load_ledger()
+        runs = state.load_runs()
+        if legacy:
+            return _finish_cutover(store, settings, state, storage, discovery, ledger, runs, now=now, dry_run=dry_run, refuse=refuse)
+        bar = storage.bar(now)
+        if not bar.met:
+            return refuse(
+                f"the parity bar is not met ({bar.days_counted} of {compact.PARITY_DAYS} clean complete UTC days, admission seen {'yes' if bar.admission_seen else 'no'}); "
+                "the Dashboard says READY TO CUT OVER when it is."
+            )
+        boards = state.load_boards()
+        tracker = _read_tracker(store)
+        report = _parity_report(store, ledger, compact.simulate_compact(ledger.events, now), now=now, runs=runs, boards=boards, discovery=discovery, tracker=tracker)
+        if report.counted:
+            kinds = ", ".join(f"{k} {n}" for k, n in report.kinds().items())
+            return refuse(f"a fresh parity check counted {report.counted} differences ({kinds}); Events stays authoritative and the 3-day clock restarts when the poller records them.")
+        retained = compact.retained_events(ledger, now)
+        checksum = compact.rows_checksum(retained)
+        before = storage_report.before_snapshot(runs, state.sheet_grid(), len(ledger.events), now)
+        lines = [
+            f"gate: stored mode dual, seeded {storage.seeded_at}, bar met ({bar.days_counted} of {compact.PARITY_DAYS} clean complete UTC days, admission seen {'yes' if bar.admission_seen else 'no'}), "
+            f"no {EVENTS_LEGACY_TAB} tab, fresh parity {report.counted} counted differences ({report.declared} declared)",
+            f"plan: {len(retained):,} of {len(ledger.events):,} Events rows stay in Events; the old tab is kept whole as {EVENTS_LEGACY_TAB} ({len(ledger.events):,} rows, hidden, warning-protected); nothing is deleted",
+            f"checksum of the retained rows: {checksum}",
+            _before_text(before),
+        ]
+        if dry_run:
+            print("\n".join(["STORAGE CUTOVER (dry run; nothing was written)", *lines]))
+            return 0
+        read_back = state.build_events_new(retained)
+        if len(read_back) != len(retained) or compact.rows_checksum(read_back) != checksum:
+            return refuse(f"the copy read back from {EVENTS_NEW_TAB} differs from the rows that were written ({len(read_back):,} rows read back, {len(retained):,} written, or a different checksum).", scratch=True)
+        would = _parity_report(store, ledger, read_back, now=now, runs=runs, boards=boards, discovery=discovery, tracker=tracker)
+        if would.counted:
+            kinds = ", ".join(f"{k} {n}" for k, n in would.kinds().items())
+            return refuse(f"parity on the would-be state (the copied rows, Identity and Tally) counted {would.counted} differences ({kinds}).", scratch=True)
+        state.swap_events("cutover")
+        swapped = True
+        state.protect_tab(EVENTS_LEGACY_TAB, LEGACY_PROTECTION)
+        storage.mode = compact.MODE_COMPACT
+        storage.cutover = compact.cutover_record(now, retained_rows=len(retained), legacy_rows=len(ledger.events), checksum=checksum, before=before)
+        discovery[compact.STORAGE_KEY] = storage.to_json()
+        state.save_discovery_state(discovery, lg.stamp(now))
+    except Exception as exc:  # the exception type only: its text may carry an API response, and the log is public
+        log.error("Storage cutover failed: %s", type(exc).__name__)
+        if swapped:
+            print(
+                f"STORAGE CUTOVER failed after the tab swap ({type(exc).__name__}): Events is now the compact copy and {EVENTS_LEGACY_TAB} holds the old ledger, but the storage key was not saved. "
+                "The poller writes as dual and notes `storage cutover incomplete`; run the cutover again to finish the record. Nothing was deleted."
+            )
+        else:
+            print(f"STORAGE CUTOVER failed ({type(exc).__name__}): Events and {EVENTS_LEGACY_TAB} were not changed; nothing was deleted. Run the cutover again.")
+        return 2
+    dashboard.refresh(store, settings)  # contained: a failure here is logged and ignored
+    print("\n".join([
+        f"STORAGE CUTOVER done at {lg.stamp(now)}: mode compact",
+        f"{len(retained):,} rows now in Events, {len(ledger.events):,} rows kept in {EVENTS_LEGACY_TAB} (hidden, warning-protected); nothing was deleted",
+        f"checksum of the retained rows: {checksum}",
+        _before_text(before),
+        "Until the first fold deletes rows from Events, `python hunter.py --storage-restore` (input storage_restore) undoes this cutover.",
+    ]))
+    return 0
+
+
+def _finish_cutover(
+    store: Any, settings: Settings, state: Any, storage: compact.StorageState, discovery: dict[str, str], ledger: compact.Ledger, runs: list[Any], *,
+    now: datetime, dry_run: bool, refuse: Callable[..., int],
+) -> int:  # fmt: skip
+    """`Events_Legacy` exists while the stored mode is still dual: a cutover that was interrupted between the rename and the key write (or a tab
+    that does not belong here). Verify that Events plus Identity hold every job key that Events_Legacy saw; if so, write the compact record without
+    copying again; if not, refuse and change nothing."""
+    legacy_rows = state.load_events_from(EVENTS_LEGACY_TAB)
+    legacy_seen = {ev.key for ev in legacy_rows if ev.event == lg.SEEN}
+    held = {ev.key for ev in ledger.events if ev.event == lg.SEEN} | ledger.identity.keys()
+    missing = legacy_seen - held
+    if missing:
+        return refuse(
+            f"{EVENTS_LEGACY_TAB} exists, but Events and Identity do not hold {len(missing):,} of its {len(legacy_seen):,} seen job keys, so this is not a finished swap and "
+            "the stored mode stays dual. Rename the ledger tab back to Events (DECISIONS D-57); nothing was changed."
+        )
+    in_legacy = Counter(tuple(ev.to_row()) for ev in legacy_rows)
+    after = []  # the rows Events holds that Events_Legacy does not: written after the swap
+    for ev in ledger.events:
+        row = tuple(ev.to_row())
+        if in_legacy[row] > 0:
+            in_legacy[row] -= 1
+        else:
+            after.append(ev)
+    at = min((ev.time for ev in after if compact.event_time(ev) is not None), default=lg.stamp(now))  # the first row written after the swap bounds the cutover time from below
+    grid = state.sheet_grid()
+    grid[EVENTS_TAB] = grid.pop(EVENTS_LEGACY_TAB, grid.get(EVENTS_TAB, (0, 0)))  # the old Events grid is the one the legacy tab holds now
+    before = dict(storage_report.before_snapshot(runs, grid, len(legacy_rows), now), reconstructed=True)
+    checksum = compact.rows_checksum(ledger.events)
+    plan = f"finish the record: {len(ledger.events):,} rows in Events, {len(legacy_rows):,} rows in {EVENTS_LEGACY_TAB}, cutover time {at}; no rows are copied"
+    if dry_run:
+        print("\n".join(["STORAGE CUTOVER (dry run; nothing was written)", f"gate: {EVENTS_LEGACY_TAB} exists and Events plus Identity hold all {len(legacy_seen):,} of its seen job keys", plan, _before_text(before)]))
+        return 0
+    try:
+        state.protect_tab(EVENTS_LEGACY_TAB, LEGACY_PROTECTION)
+        storage.mode = compact.MODE_COMPACT
+        at_dt = compact.event_time(lg.Event(at, "k", lg.SEEN)) or now
+        storage.cutover = dict(compact.cutover_record(at_dt, retained_rows=len(ledger.events), legacy_rows=len(legacy_rows), checksum=checksum, before=before), completed_at=lg.stamp(now))
+        discovery[compact.STORAGE_KEY] = storage.to_json()
+        state.save_discovery_state(discovery, lg.stamp(now))
+    except Exception as exc:
+        log.error("Storage cutover failed: %s", type(exc).__name__)
+        print(f"STORAGE CUTOVER failed ({type(exc).__name__}): the storage key was not saved; run the cutover again. Nothing was deleted.")
+        return 2
+    dashboard.refresh(store, settings)
+    print(f"STORAGE CUTOVER done at {lg.stamp(now)}: mode compact (an interrupted cutover was finished from the existing tabs)\n{plan}\n{_before_text(before)}")
+    return 0
 
 
 def run_dashboard(cfg: Config, store: Any, settings: Settings, *, dry_run: bool) -> int:
@@ -2081,10 +2243,11 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
     parser.add_argument("--storage-report", action="store_true", help="print what the Events ledger is made of and a sized proposal for compact baselines / archiving; read only, changes nothing")
     parser.add_argument("--storage-parity", action="store_true", help="check that Identity and Tally reproduce the Events rows and print the 3-day parity clock; read only, writes nothing (exit 0 no counted differences, 1 differences, 2 cannot be checked)")
+    parser.add_argument("--storage-cutover", action="store_true", help="OWNER STEP (D-57): replace Events by its compact copy once the parity bar is met; refuses otherwise; deletes nothing, the old tab is kept hidden as Events_Legacy (with --dry-run: print the gate and the plan, write nothing)")
     parser.add_argument("--dashboard", action="store_true", help="rebuild the Dashboard tab from the state now (writes only that tab); with --dry-run print the text version and write nothing")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.storage_parity or args.pilot_report is not None
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.storage_parity or args.storage_cutover or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -2125,13 +2288,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.rebalance_report:
         allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
         return run_rebalance_report(store, settings, allow_sr)
-    writes = not args.dry_run and (bool(args.import_inventory or args.validate) if inventory_mode else not (args.url or args.delivery_test))
+    writes = not args.dry_run and (bool(args.import_inventory or args.validate or args.storage_cutover) if inventory_mode else not (args.url or args.delivery_test))
     if writes and (why := local_write_refusal(
         uses_sheet=bool(cfg.sheet_id), in_actions=(os.getenv("GITHUB_ACTIONS") or "").strip() == "true",
         allow_local=(os.getenv("ALLOW_LOCAL_SHEET_WRITES") or "").strip() == "1",
     )):  # fmt: skip
         log.error("%s", why)
         return 4
+    if args.storage_cutover:  # the owner's tab swap: the poller's lease (same workflow, same 25-minute window), none for a dry run
+        try:
+            with writer_lease(store, "poller", enabled=not args.dry_run):
+                return run_storage_cutover(store, settings, dry_run=args.dry_run)
+        except WriterBusy as exc:
+            log.error("Not started: another process is writing this registry (%s). Nothing was changed.", exc)
+            return 3
     if inventory_mode:
         try:
             with writer_lease(store, "inventory", enabled=bool(args.import_inventory or args.validate) and not args.dry_run):

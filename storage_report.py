@@ -18,7 +18,7 @@ import compact
 import freshness as fr
 import ledger as lg
 from boards import MONITORED, STATUS_VALIDATED, BoardRecord, admission_order
-from state import RunRecord
+from state import KIND_REHEARSAL, RunRecord
 
 EVENT_COLUMNS = 7
 SHEET_CELL_LIMIT = 10_000_000
@@ -227,6 +227,37 @@ def analyze(
         "projection": projection,
         "ledger_rows_logged_in_runs": (runs[0].events_rows, runs[-1].events_rows) if runs else None,
         **({"logical": logical_counts(ledger.events, folded=ledger.folded(), identity=ledger.identity)} if ledger is not None else {}),
+    }  # fmt: skip
+
+
+BEFORE_LOAD_RUNS = 24  # completed production runs whose Load_S the cutover's before snapshot takes the median of
+BEFORE_GROWTH_DAYS = 7  # complete UTC days whose growth of Runs.Events_Rows the snapshot takes the median of
+
+
+def before_snapshot(runs: list[RunRecord], grid: dict[str, tuple[int, int]], events_rows: int, now: datetime) -> dict[str, Any]:
+    """What the ledger cost before the cutover, so the owner can compare it with the compact ledger afterwards (P3-06): the Events rows,
+    the allocated grid per tab and in cells (`grid` maps a tab title to its (rows, columns) as the sheet metadata reports them), the
+    median `Runs.Load_S` of the last 24 completed production runs and the median daily growth of `Runs.Events_Rows` over the last 7
+    complete UTC days (the day's last run decides the day's row count; a day that does not follow a day with data has no growth figure).
+    Anything not measured is None, never 0. Counts only: the snapshot goes into the Discovery key `storage`."""
+    cells = {tab: rows * cols for tab, (rows, cols) in sorted(grid.items())}
+    done = [r for r in runs if r.completed and r.run_kind != KIND_REHEARSAL]
+    loads = [r.load_s for r in done[-BEFORE_LOAD_RUNS:]]
+    today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    last_of_day: dict[str, int] = {}
+    for r in done:  # runs are in write order: the last one of a day overwrites the earlier ones
+        day = r.run_at[:10]
+        if day < today and r.events_rows:
+            last_of_day[day] = r.events_rows
+    growth: dict[str, int] = {}
+    for day in sorted(last_of_day):
+        before = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        if before in last_of_day:
+            growth[day] = last_of_day[day] - last_of_day[before]
+    recent = [growth[day] for day in sorted(growth)[-BEFORE_GROWTH_DAYS:]]
+    return {
+        "events_rows": events_rows, "grid": {tab: [rows, cols] for tab, (rows, cols) in sorted(grid.items())}, "cells": cells, "cells_total": sum(cells.values()),
+        "median_load_s": statistics.median(loads) if loads else None, "median_daily_events_growth": statistics.median(recent) if recent else None,
     }  # fmt: skip
 
 

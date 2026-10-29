@@ -29,6 +29,7 @@ log = logging.getLogger("hunter")
 
 BOARDS_TAB, EVENTS_TAB, RUNS_TAB = "Boards", "Events", "Runs"
 EVENTS_LEGACY_TAB, EVENTS_NEW_TAB = "Events_Legacy", "Events_New"  # the tab swap of D-57: the old ledger kept whole, the compact one being built
+EVENTS_FAILED_TAB = "Events_Failed"  # what a restore (D-57) renames the compact Events to: kept, never deleted
 IDENTITY_TAB = "Identity"
 IDENTITY_COLUMNS = ["Board_Key", "Chunk", "Baselined_At", "Count", "IDs"]  # posting IDs already seen, per job-key stem (D-57)
 TALLY_TAB = "Tally"
@@ -255,12 +256,23 @@ def _events_missing_message(other: str) -> str:
     )
 
 
+def _warning_protection(sheet_id: int, description: str) -> dict[str, Any]:
+    """Whole-sheet, warning-only protection: a hand edit asks for confirmation, the service account still writes."""
+    return {"addProtectedRange": {"protectedRange": {"range": {"sheetId": sheet_id}, "warningOnly": True, "description": description}}}
+
+
 def _identity_protection(sheet_id: int) -> dict[str, Any]:
-    """Whole-sheet, warning-only protection: a hand edit of Identity asks for confirmation, the service account still writes."""
-    return {"addProtectedRange": {"protectedRange": {
-        "range": {"sheetId": sheet_id}, "warningOnly": True,
-        "description": "Identity: posting IDs used to recognise jobs already seen. A hand edit can make old jobs look new (DECISIONS D-57).",
-    }}}  # fmt: skip
+    return _warning_protection(sheet_id, "Identity: posting IDs used to recognise jobs already seen. A hand edit can make old jobs look new (DECISIONS D-57).")
+
+
+def _swap_pairs(kind: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """The two renames of a tab swap, in the order they must be applied (the first frees the name the second takes): a cutover turns
+    Events into Events_Legacy and Events_New into Events; a restore turns Events into Events_Failed and Events_Legacy into Events."""
+    if kind == "cutover":
+        return (EVENTS_TAB, EVENTS_LEGACY_TAB), (EVENTS_NEW_TAB, EVENTS_TAB)
+    if kind == "restore":
+        return (EVENTS_TAB, EVENTS_FAILED_TAB), (EVENTS_LEGACY_TAB, EVENTS_TAB)
+    raise ValueError(f"unknown tab swap {kind!r}")
 
 
 # --------------------------------------------------------------------------- advisory writer lease
@@ -471,6 +483,65 @@ class SheetState:
             self._titles = {w.title for w in self.sh.worksheets()}
         return title in self._titles
 
+    # -- the tab swap of the cutover and the restore (D-57): nothing here deletes, clears or rewrites an Events or Events_Legacy row
+    def sheet_grid(self) -> dict[str, tuple[int, int]]:
+        """Every tab's allocated grid (rows, columns), as the spreadsheet's own metadata reports it."""
+        meta = self.sh.fetch_sheet_metadata()
+        out: dict[str, tuple[int, int]] = {}
+        for sheet in meta.get("sheets", []):
+            props = sheet.get("properties", {})
+            grid = props.get("gridProperties", {})
+            out[str(props.get("title", ""))] = (int(grid.get("rowCount", 0)), int(grid.get("columnCount", 0)))
+        return out
+
+    def build_events_new(self, events: list[Event]) -> list[Event]:
+        """Write `events` to a new hidden `Events_New` tab (a leftover one from an earlier attempt is replaced: it is only ever a scratch
+        copy) and return what a fresh read of that tab holds, so the caller verifies the copy and not its own list."""
+        tabs = {w.title: w for w in self.sh.worksheets()}
+        if EVENTS_NEW_TAB in tabs:
+            self.sh.del_worksheet(tabs[EVENTS_NEW_TAB])
+        ws = self.sh.add_worksheet(title=EVENTS_NEW_TAB, rows=len(events) + 1, cols=len(EVENT_COLUMNS))
+        ws.append_rows([EVENT_COLUMNS], value_input_option="RAW")
+        for chunk in _chunks([e.to_row() for e in events]):
+            ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
+        try:
+            ws.freeze(rows=1)
+            ws.hide()  # like the Events tab it will become
+        except Exception as exc:
+            log.warning("Could not tidy the %s tab: %s", EVENTS_NEW_TAB, exc)
+        self._titles = None
+        return [e for e in (Event.from_row(r) for r in ws.get_all_values()[1:]) if e]
+
+    def swap_events(self, kind: str) -> None:
+        """Rename two tabs in ONE `spreadsheets.batchUpdate` (applied together, in the order given), so the Sheet never has no `Events`
+        tab: `cutover` = Events -> Events_Legacy, Events_New -> Events; `restore` = Events -> Events_Failed, Events_Legacy -> Events."""
+        pairs = _swap_pairs(kind)
+        tabs = {w.title: w for w in self.sh.worksheets()}
+        for source, _ in pairs:
+            if source not in tabs:
+                raise RuntimeError(f"Cannot swap tabs: {source} does not exist")
+        if pairs[0][1] in tabs:  # the second rename takes the name the first one frees; only the first target must be free already
+            raise RuntimeError(f"Cannot swap tabs: {pairs[0][1]} already exists")
+        requests = [{"updateSheetProperties": {"properties": {"sheetId": tabs[source].id, "title": target}, "fields": "title"}} for source, target in pairs]
+        self.sh.batch_update({"requests": requests})
+        self._titles = {w.title for w in self.sh.worksheets()}
+
+    def append_events_to(self, title: str, events: list[Event]) -> None:
+        """Append rows to the named ledger tab (the restore adds the post-cutover rows to Events_Legacy). Rows are only ever added."""
+        ws = self.sh.worksheet(title)
+        for chunk in _chunks([e.to_row() for e in events]):
+            ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
+
+    def load_events_from(self, title: str) -> list[Event]:
+        return [e for e in (Event.from_row(r) for r in self.sh.worksheet(title).get_all_values()[1:]) if e]
+
+    def protect_tab(self, title: str, description: str) -> None:
+        """Warning-only protection of the whole tab. Cosmetic like the tab tidy-up: a failure is logged and the tab works without it."""
+        try:
+            self.sh.batch_update({"requests": [_warning_protection(self.sh.worksheet(title).id, description)]})
+        except Exception as exc:
+            log.warning("Could not protect the %s tab: %s", title, exc)
+
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its sheet row: header = row 1, an unreadable row still advances the count), Identity and Tally,
         one read each. The Identity set is kept as this store's cache for `write_identity`; the returned ledger holds a copy."""
@@ -658,6 +729,54 @@ class CsvState:
 
     def tab_exists(self, title: str) -> bool:
         return self._path(title).exists()
+
+    # -- the tab swap of the cutover and the restore (D-57): nothing here deletes, clears or rewrites an Events or Events_Legacy row
+    def sheet_grid(self) -> dict[str, tuple[int, int]]:
+        """Every state file's size as a grid: its data rows plus the header, and the header's width (there is no allocated grid locally)."""
+        out: dict[str, tuple[int, int]] = {}
+        for title in (BOARDS_TAB, EVENTS_TAB, RUNS_TAB, INVENTORY_TAB, DISCOVERY_TAB, IDENTITY_TAB, TALLY_TAB, EVENTS_LEGACY_TAB, EVENTS_NEW_TAB, EVENTS_FAILED_TAB):
+            p = self._path(title)
+            if p.exists():
+                with p.open(newline="", encoding="utf-8") as fh:
+                    rows = list(csv.reader(fh))
+                out[title] = (len(rows), len(rows[0]) if rows else 0)
+        return out
+
+    def _write_events(self, title: str, events: list[Event]) -> None:
+        p = self._path(title)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(EVENT_COLUMNS)
+            w.writerows(e.to_row() for e in events)
+        os.replace(tmp, p)  # atomic
+
+    def build_events_new(self, events: list[Event]) -> list[Event]:
+        """Write `events` to `events_new.csv` (replacing a leftover one) and return what a fresh read of the file holds."""
+        self._write_events(EVENTS_NEW_TAB, events)
+        return [e for e in (Event.from_row(r) for r in self._rows(EVENTS_NEW_TAB)) if e]
+
+    def swap_events(self, kind: str) -> None:
+        """Two `os.replace` calls in the order of the Sheet's two renames. Unlike the Sheet's single batch this is NOT atomic (the local
+        fallback is for development: production writes go to the Sheet, and local Sheet writes are refused, D-37)."""
+        pairs = _swap_pairs(kind)
+        for source, _ in pairs:
+            if not self._path(source).exists():
+                raise RuntimeError(f"Cannot swap tabs: {source} does not exist")
+        if self._path(pairs[0][1]).exists():
+            raise RuntimeError(f"Cannot swap tabs: {pairs[0][1]} already exists")
+        for source, target in pairs:
+            os.replace(self._path(source), self._path(target))
+
+    def append_events_to(self, title: str, events: list[Event]) -> None:
+        with self._path(title).open("a", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(e.to_row() for e in events)
+
+    def load_events_from(self, title: str) -> list[Event]:
+        return [e for e in (Event.from_row(r) for r in self._rows(title)) if e]
+
+    def protect_tab(self, title: str, description: str) -> None:
+        """A local file has no protection: nothing to do."""
 
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its row number: header = row 1, an unreadable row still advances the count), Identity and Tally.

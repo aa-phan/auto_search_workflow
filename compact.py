@@ -12,6 +12,7 @@ text (the repository and its logs are public).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
@@ -344,6 +345,43 @@ def simulate_compact(events: list[lg.Event], now: datetime) -> list[lg.Event]:
     return [ev for ev in events if not (ev.event == lg.SEEN and ev.key in dropped)]
 
 
+def retained_events(ledger: "Ledger", now: datetime) -> list[lg.Event]:
+    """The Events rows a cutover keeps (P3-06): all of them except every `seen` row of a key whose first observation is a keyable
+    baseline, or a keyable filtered or stale row at or before `now - FOLD_AGE`, and only when the key is in Identity (a row whose ID
+    Identity does not hold is never dropped, so a cutover can only lose what Identity can give back). Unkeyable rows, operational rows
+    and the last seven days of gated rows stay, and the rows keep their order. This is `simulate_compact` plus the Identity condition;
+    the parity bar guarantees that the two agree, and the cutover checks it again on the copy."""
+    cutoff = now - FOLD_AGE
+    held = ledger.identity.keys()
+    dropped: set[str] = set()
+    for key, ev in first_seen_identity(ledger.events).items():
+        if identity_entry(ev) is None or key not in held:
+            continue
+        when = event_time(ev)
+        if identity_class(ev) == lg.BASELINED or (when is not None and when <= cutoff):
+            dropped.add(key)
+    return [ev for ev in ledger.events if not (ev.event == lg.SEEN and ev.key in dropped)]
+
+
+def rows_checksum(events: Iterable[lg.Event]) -> str:
+    """SHA-256 (hex) of the newline-joined `key|time|event` lines of these rows, in order: what the cutover compares between the rows it
+    meant to copy and the rows it read back from the new tab."""
+    digest = hashlib.sha256()
+    digest.update("\n".join(f"{ev.key}|{ev.time}|{ev.event}" for ev in events).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def cutover_record(now: datetime, *, retained_rows: int, legacy_rows: int, checksum: str, before: dict[str, Any]) -> dict[str, Any]:
+    """The `cutover` record of the `storage` key: when, how many rows stayed in Events and how many the old tab holds, the checksum of
+    the copy and the before snapshot (`storage_report.before_snapshot`). Counts and hashes only."""
+    return {"at": lg.stamp(now.astimezone(timezone.utc)), "retained_rows": retained_rows, "legacy_rows": legacy_rows, "checksum": checksum, "before": before}
+
+
+def restore_record(now: datetime, *, appended_rows: int) -> dict[str, Any]:
+    """The `restore` record: when the cutover was undone and how many post-cutover rows were appended to the old ledger first."""
+    return {"at": lg.stamp(now.astimezone(timezone.utc)), "appended_rows": appended_rows}
+
+
 def parse_dim(dim: str) -> dict[str, Any]:
     """The inverse of `tally_dim`: ats, source, disposition, pass, freshness and whether the publication date was known."""
     ats, source, disposition, pass_kind, freshness, date = (dim.split("|") + [""] * 6)[:6]
@@ -440,19 +478,38 @@ def repair_plan(ledger: Ledger) -> Repair:
     return Repair(dict(identity), tally)
 
 
-def effective_mode(raw: str | None, *, legacy_present: bool) -> str:
-    """The storage mode a run writes in. `compact` applies only when the `storage` key says so AND `Events_Legacy` exists;
-    otherwise the run writes as `dual`, the safe direction (everything still goes to Events)."""
+NOTE_CUTOVER_INCOMPLETE = "storage cutover incomplete: run storage_cutover again; "  # the run note when Events_Legacy exists but the `storage` key still says dual
+NOTE_COMPACT_WITHOUT_LEGACY = "storage state: compact without Events_Legacy, writing as dual; "  # the run note when the key says compact but the old tab is gone
+
+
+class ModeDecision(str):
+    """The storage mode a run writes in (a `str`, so every caller that compares it with MODE_DUAL, MODE_COMPACT or MODE_RESTORED keeps
+    working) plus `note`: the run note that says why the stored state was not taken at its word (empty when it was)."""
+
+    note: str
+
+    def __new__(cls, mode: str, note: str = "") -> "ModeDecision":
+        out = super().__new__(cls, mode)
+        out.note = note
+        return out
+
+
+def effective_mode(raw: str | None, *, legacy_present: bool) -> ModeDecision:
+    """The storage mode a run writes in. `compact` applies only when the `storage` key says so AND `Events_Legacy` exists; every
+    state that does not add up writes as `dual`, the safe direction (everything still goes to Events), and says why in `note`:
+    the key says compact but the old tab is gone (`NOTE_COMPACT_WITHOUT_LEGACY`), or the old tab exists while the key still says
+    dual, a cutover that was interrupted between the tab rename and the key write (`NOTE_CUTOVER_INCOMPLETE`). In both the run
+    records no parity check and no clock (the pipeline skips them) until the owner repairs the state. `restored` is kept as it is."""
     try:
         data = json.loads(raw) if raw else {}
     except ValueError:
-        return MODE_DUAL
+        data = {}
     mode = data.get("mode") if isinstance(data, dict) else None
-    if mode == MODE_COMPACT and legacy_present:
-        return MODE_COMPACT
     if mode == MODE_RESTORED:
-        return MODE_RESTORED
-    return MODE_DUAL
+        return ModeDecision(MODE_RESTORED)
+    if mode == MODE_COMPACT:
+        return ModeDecision(MODE_COMPACT) if legacy_present else ModeDecision(MODE_DUAL, NOTE_COMPACT_WITHOUT_LEGACY)
+    return ModeDecision(MODE_DUAL, NOTE_CUTOVER_INCOMPLETE if legacy_present else "")
 
 
 # --------------------------------------------------------------------------- the `storage` key (parity bookkeeping)
