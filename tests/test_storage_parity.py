@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 import unittest
 from collections import defaultdict
@@ -16,6 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,6 +29,7 @@ import parity  # noqa: E402
 import pipeline as pl  # noqa: E402
 import state as stm  # noqa: E402
 from test_core import T0, HarnessCase, ago, job  # noqa: E402
+from test_reporting import CHI, UTC, ZONES, compact_world  # noqa: E402
 from test_storage_pipeline import history_event, read_csv, storage_of  # noqa: E402
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
@@ -528,6 +531,170 @@ class PipelineDifferenceTests(HarnessCase):
         self.assertIn("tally_missing", run.notes)
         self.assertEqual(len(read_csv(self, "tally")) - 1, 3 + 0)  # repaired at run start: the group is back exactly once
         self.assertEqual(self.w.run(minutes_later=60).outcome, stm.OUTCOME_OK)
+
+
+# --------------------------------------------------------------------------- layer 4: the reported figures
+
+FIGURE_TEXT = re.compile(r"^figure [A-Za-z0-9_.:|@?-]+ \(old (?:-?\d+(?:\.\d+)?|none|text) new (?:-?\d+(?:\.\d+)?|none|text)\)$")
+
+
+def dual_world(events: list[lg.Event]) -> tuple[list[lg.Event], compact.IdentitySet, list[compact.TallyRow]]:
+    """The stored side of a dual-write world for these Events rows, built per run through `split_observations`."""
+    by_run: dict[tuple[str, str], list[lg.Event]] = defaultdict(list)
+    for ev in events:
+        by_run[(str(ev.detail.get("run") or ""), ev.time)].append(ev)
+    identity, tally = compact.IdentitySet(), []
+    for (run_id, run_at), group in sorted(by_run.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        split = compact.split_observations(group, compact.MODE_DUAL)
+        identity.apply(identity.plan_additions(split.identity, "2026-10-12T00:00:00Z"))
+        if split.tally:
+            tally.append(compact.TallyRow(run_id, run_at, sum(split.tally.values()), dict(sorted(split.tally.items()))))
+    return sorted(events, key=lambda e: e.time), identity, tally
+
+
+class FigureTests(unittest.TestCase):
+    """Layer 4: the Dashboard, both reconciliation windows and the storage logical counts, computed from all Events rows and again
+    from the compact view, must be the same figures. A difference names its dotted path and holds numbers only."""
+
+    def world(self, tz: object = UTC, now: datetime | None = None):  # type: ignore[no-untyped-def]
+        now = now or ZONES[0][1]
+        world = compact_world(tz, now)
+        return world, world.compact_view(now), now
+
+    def figures(self, report: parity.ParityReport) -> list[parity.Diff]:
+        return [d for d in report.diffs if d.layer == 4]
+
+    def test_a_consistent_world_has_zero_counted_differences_in_both_time_zones_and_says_what_it_compared(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world, view, _ = self.world(tz, now)
+                report = parity.check_dual(world.events, view, now=now, tz=tz, runs=world.runs, boards={}, discovery={}, tracker=[])
+                self.assertEqual((report.counted, report.declared), (0, 0), [d.text() for d in report.diffs[:5]])
+                for name in ("figures_summary", "figures_reconcile_7d", "figures_reconcile_all", "figures_logical"):
+                    self.assertGreater(report.compared[name], 10, name)
+
+    def test_a_tally_date_letter_flipped_is_a_counted_figure_difference_named_by_its_path(self) -> None:
+        world, view, now = self.world()
+        row = next(t for t in world.tally if any("|filtered|" in dim and dim.endswith("|k") for dim in t.counts) and t.run_at < "2026-10-15")
+        dim = next(dim for dim in row.counts if "|filtered|" in dim and dim.endswith("|k"))
+        flipped = {(dim[:-1] + "u" if k == dim else k): n for k, n in row.counts.items()}
+        view = compact.Ledger(view.events, [], view.identity, [replace(t, counts=flipped) if t is row else t for t in world.tally])
+        report = parity.check_dual(world.events, view, now=now)
+        figures = self.figures(report)
+        self.assertTrue(any(d.kind == "figure" and "new_postings_date" in d.ref and not d.declared for d in figures), [d.text() for d in figures][:8])
+        self.assertTrue(any(d.kind == "tally_count" for d in report.diffs))  # layer 2 names the same damage
+
+    def test_a_tally_run_at_moved_back_one_day_names_the_affected_days(self) -> None:
+        world, view, now = self.world()
+        row = next(t for t in world.tally if t.run_id == world.wave_run)
+        moved = lg.stamp(datetime.strptime(row.run_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) - timedelta(days=1))
+        view = compact.Ledger(view.events, [], view.identity, [replace(t, run_at=moved) if t is row else t for t in world.tally])
+        report = parity.check_dual(world.events, view, now=now)
+        refs = {d.ref for d in self.figures(report) if d.kind == "figure"}
+        self.assertIn("trend.20.baselined", refs)  # the wave's real day lost its 80 baselines ...
+        self.assertIn("trend.21.baselined", refs)  # ... and the day before gained them
+        self.assertTrue({d.kind for d in report.diffs} >= {"tally_missing", "tally_orphan"})
+
+    def test_figure_differences_hold_numbers_and_paths_only(self) -> None:
+        world, view, now = self.world()
+        noisy = lg.Event("2026-10-28T10:00:00Z", "greenhouse|acme|p1-0-0", lg.ERROR, detail={"stage": "evaluate", "message": "SECRET ZZQ Remote title", "attempt": 1, "run": "x"})
+        events = sorted([*world.events, noisy], key=lambda e: e.time)
+        report = parity.check_dual(events, view, now=now)  # the view lacks the error row: failures, error counts and trend rows differ
+        figures = [d for d in self.figures(report) if d.kind == "figure"]
+        self.assertGreater(len(figures), 1)
+        for d in figures:
+            self.assertRegex(d.text(), FIGURE_TEXT, d.text())
+            self.assertNotIn("ZZQ", d.text())
+        self.assertNotIn("ZZQ", " ".join(report.named(10)))
+
+    def test_compare_figures_names_nested_paths_lists_and_skips_presentation_keys(self) -> None:
+        old = {"periods": {"7d": {"results": {"new_postings": 120, "label": "a"}}}, "checks": [], "rows": [{"n": 1}, {"n": 2}], "storage": {"mode": "dual"}}
+        new = {"periods": {"7d": {"results": {"new_postings": 118, "label": "b"}}}, "checks": ["x"], "rows": [{"n": 1}, {"n": 3}], "storage": {"mode": "compact"}}
+        diffs = parity.compare_figures(old, new)
+        self.assertEqual(
+            sorted((d.ref, d.detail) for d in diffs),
+            [("checks.length", "old 0 new 1"), ("periods.7d.results.label", "old text new text"), ("periods.7d.results.new_postings", "old 120 new 118"), ("rows.1.n", "old 2 new 3")],
+        )
+        self.assertTrue(all(d.kind == "figure" and d.layer == 4 and not d.declared for d in diffs))
+        self.assertEqual(parity.compare_figures(old, old), [])
+
+    def test_a_hand_added_tracker_row_for_a_baseline_job_is_declared_not_counted(self) -> None:
+        events, identity, tally = dual_world([
+            history_event("greenhouse|acme|3", at(days=9), lg.BASELINED, "wave"),
+            history_event("greenhouse|acme|custom1", at(days=9), lg.BASELINED, "wave", url="https://careers.example.org/job/777"),
+            history_event("greenhouse|acme|9", at(days=2), lg.PENDING, "steady"),
+        ])
+        view = compact.Ledger(compact.simulate_compact(events, NOW), [], identity, tally)
+        rows = [
+            {"Apply_URL": "https://boards.greenhouse.io/acme/jobs/3", "Freshness": "Recent", "My_Status": "To Apply"},  # matches a baseline job by identity
+            {"Apply_URL": "https://careers.example.org/job/777", "Freshness": "Recent", "My_Status": "To Apply"},  # matches it only by its exact stored URL
+            {"Apply_URL": "https://boards.greenhouse.io/acme/jobs/9", "Freshness": "Verified fresh", "My_Status": "To Apply"},  # an ordinary kept job: stays on both sides
+        ]
+        report = parity.check_dual(events, view, now=NOW, tracker=rows)
+        declared = [(d.kind, d.ref) for d in report.diffs if d.declared]
+        self.assertEqual(sorted(declared), [("tracker_identity_job", "greenhouse|acme|3"), ("tracker_identity_job", "greenhouse|acme|custom1")])
+        self.assertEqual(report.counted, 0, [d.text() for d in report.diffs])
+        without = parity.check_dual(events, view, now=NOW)
+        self.assertEqual((without.counted, without.declared), (0, 0))  # nothing declared when the tracker has no such row
+
+    def test_a_duplicate_seen_row_of_a_folded_key_declares_the_row_count_figures_only(self) -> None:
+        events, identity, tally = dual_world([
+            history_event("greenhouse|acme|3", at(days=9), lg.BASELINED, "wave"),
+            history_event("greenhouse|acme|9", at(days=2), lg.PENDING, "steady"),
+        ])
+        again = history_event("greenhouse|acme|3", at(days=8), lg.FILTERED, "steady")
+        events = sorted([*events, again], key=lambda e: e.time)
+        view = compact.Ledger(compact.simulate_compact(events, NOW), [], identity, tally)
+        report = parity.check_dual(events, view, now=NOW)
+        self.assertEqual(report.counted, 0, [d.text() for d in report.diffs if not d.declared])
+        self.assertIn(("figure", "source_freshness.ledger_events_read"), [(d.kind, d.ref) for d in report.diffs if d.declared])
+        self.assertIn(("duplicate_seen", "greenhouse|acme|3"), [(d.kind, d.ref) for d in report.diffs if d.declared])
+
+
+class FigurePipelineTests(HarnessCase):
+    """Every dual-mode poller run's check includes layer 4 and reads the tracker through `Deps.tracker_rows`."""
+
+    def test_the_check_reads_the_tracker_once_and_compares_the_figures_in_the_display_time_zone(self) -> None:
+        self.w.listings[self.board.key] = [job("acme", "1"), job("acme", "2")]
+        self.w.run(seeds=[self.board])
+        calls: list[int] = []
+
+        def tracker() -> list[dict[str, str]]:
+            calls.append(1)
+            return [{"Apply_URL": "https://boards.greenhouse.io/acme/jobs/1", "Freshness": "Recent", "My_Status": "To Apply"}]  # a hand-added row for a baseline job
+
+        tz = ZoneInfo("America/Chicago")
+        with mock.patch.object(parity, "check_dual", wraps=parity.check_dual) as spy:
+            run = self.w.run(minutes_later=60, tracker_rows=tracker, display_tz=tz)
+        self.assertEqual(run.outcome, stm.OUTCOME_OK)
+        self.assertEqual(len(calls), 1)
+        kwargs = spy.call_args.kwargs
+        self.assertEqual((kwargs["tz"], len(kwargs["tracker"]), kwargs["boards"] is not None), (tz, 1, True))
+        self.assertTrue(kwargs["runs"] is not None and len(kwargs["runs"]) >= 1)
+        state = storage_of(self)
+        self.assertEqual(state.last_check["counted"], 0)  # the baseline job's tracker row is declared, not a flap of the clock
+        self.assertGreaterEqual(state.last_check["declared"], 0)
+
+    def test_a_tracker_that_cannot_be_read_is_compared_as_empty_and_the_check_still_completes(self) -> None:
+        self.w.listings[self.board.key] = [job("acme", "1")]
+        self.w.run(seeds=[self.board])
+
+        def broken() -> list[dict[str, str]]:
+            raise RuntimeError("tracker tab unreadable ZZQ")
+
+        with mock.patch.object(parity, "check_dual", wraps=parity.check_dual) as spy:
+            run = self.w.run(minutes_later=60, tracker_rows=broken)
+        self.assertEqual(list(spy.call_args.kwargs["tracker"]), [])
+        self.assertEqual(run.outcome, stm.OUTCOME_OK)
+        self.assertNotIn("ZZQ", run.notes + self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+        self.assertEqual(storage_of(self).last_check["counted"], 0)
+
+    def test_without_tracker_rows_the_check_runs_with_an_empty_tracker(self) -> None:
+        self.w.listings[self.board.key] = [job("acme", "1")]
+        self.w.run(seeds=[self.board])
+        with mock.patch.object(parity, "check_dual", wraps=parity.check_dual) as spy:
+            self.w.run(minutes_later=60)
+        self.assertEqual((list(spy.call_args.kwargs["tracker"]), spy.call_args.kwargs["tz"]), ([], timezone.utc))
 
 
 if __name__ == "__main__":
