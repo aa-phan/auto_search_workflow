@@ -287,3 +287,26 @@ def check_dual(
     diffs = _seen_set(events, ledger, compared) + _tally(events, ledger, compared) + _state_counts(events, ledger, now, compared)
     diffs += _figures(events, ledger, now, tz, list(runs), boards or {}, discovery or {}, list(tracker), compared)
     return ParityReport(diffs, compared, round(time.monotonic() - t0, 2))
+
+
+MAX_REPORT_LINES = 50  # differences `format_report` lists (the full count is always printed)
+
+
+def format_report(report: ParityReport, state: compact.StorageState, now: datetime) -> str:
+    """The text of `--storage-parity` (read only): the mode, what was compared, the counted and declared differences (at most
+    MAX_REPORT_LINES listed, counted first, `layer kind ref detail`; refs are job keys, run ids and figure paths and details are
+    numbers only) and the parity clock as the poller recorded it. Printing this changes nothing."""
+    bar = state.bar(now)
+    lines = [
+        "STORAGE PARITY (read only; nothing was written)",
+        f"mode {state.mode}, seeded {state.seeded_at or 'never'}",
+        "compared: " + (", ".join(f"{name} {n}" for name, n in sorted(report.compared.items())) or "nothing"),
+        f"{report.counted} counted differences, {report.declared} declared (listed, never counted); the check took {report.seconds:g} s",
+    ]
+    ordered = sorted(report.diffs, key=lambda d: (d.declared, d.layer, d.kind, d.ref))
+    for d in ordered[:MAX_REPORT_LINES]:
+        lines.append(f"  {d.layer} {d.kind} {d.ref}" + (f" {d.detail}" if d.detail else "") + (" [declared]" if d.declared else ""))
+    if len(ordered) > MAX_REPORT_LINES:
+        lines.append(f"  and {len(ordered) - MAX_REPORT_LINES} more not listed")
+    lines.append(f"clock: {bar.days_counted} of {compact.PARITY_DAYS} clean complete UTC days, admission seen {'yes' if bar.admission_seen else 'no'}, bar met {'yes' if bar.met else 'no'}")
+    return "\n".join(lines)

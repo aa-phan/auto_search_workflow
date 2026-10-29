@@ -36,8 +36,8 @@ import search  # noqa: E402
 import state as stm  # noqa: E402
 from fake_sheets import FakeSpreadsheet as SharedSheet  # noqa: E402
 from meter import METER  # noqa: E402
-from test_core import Harness  # noqa: E402
-from test_storage_pipeline import historical_ledger  # noqa: E402
+from test_core import Harness, ago as lg_ago  # noqa: E402
+from test_storage_pipeline import historical_ledger, history_event  # noqa: E402
 
 
 def settings(**kw: object) -> h.Settings:
@@ -1344,8 +1344,8 @@ class StorageParityCommandTests(unittest.TestCase):
         lease.start()
         self.addCleanup(lease.stop)
 
-    def seeded_and_checked(self) -> None:
-        self.w.state.append_events(historical_ledger())
+    def seeded_and_checked(self, extra_baselines: int = 0) -> None:
+        self.w.state.append_events(historical_ledger() + [history_event(f"greenhouse|acme|{900 + i}", lg_ago(days=3), lg.BASELINED, "run-1") for i in range(extra_baselines)])
         self.w.run()
         self.w.run(minutes_later=60)
 
@@ -1384,15 +1384,16 @@ class StorageParityCommandTests(unittest.TestCase):
         self.assertNotIn("0 counted differences", text)
 
     def test_at_most_fifty_differences_are_listed_and_the_rest_are_counted(self) -> None:
-        self.seeded_and_checked()
+        self.seeded_and_checked(extra_baselines=70)
         ws = self.sh.sheets[stm.IDENTITY_TAB]
         for row in ws.values[1:]:
             row[4] = ""  # every stored ID is gone: far more than 50 differences
         code, text = self.command()
         self.assertEqual(code, 1)
         listed = [ln for ln in text.splitlines() if ln.startswith("  ")]
-        self.assertLessEqual(len(listed), 51)  # 50 differences and one "and N more" line
-        self.assertIn("more not listed", text)
+        self.assertEqual(len(listed), 51)  # 50 differences and one "and N more" line
+        self.assertRegex(text, r"\n  and [1-9]\d* more not listed\n")
+        self.assertRegex(text, r"[5-9]\d counted differences")
 
     def test_not_seeded_or_not_in_dual_mode_exits_two_with_one_line_and_writes_nothing(self) -> None:
         code, text = self.command()  # nothing run yet: no `storage` key

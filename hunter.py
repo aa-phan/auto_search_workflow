@@ -33,12 +33,14 @@ import requests
 from bs4 import BeautifulSoup
 
 import boards as boards_mod
+import compact
 import eligibility
 import inventory
 import discovery as dsc
 import eval_budget as eb
 import freshness as fr
 import ledger as lg
+import parity
 import pipeline as pl
 import search
 import dashboard
@@ -1980,6 +1982,34 @@ def run_storage_report(store: Any) -> int:
     return 0
 
 
+def run_storage_parity(store: Any, settings: Settings) -> int:
+    """`--storage-parity` (D-57): does Identity plus Tally reproduce what the Events rows say? Read only: it takes no writer lease, writes no
+    Sheet row, no Discovery key and no tab, and needs no Groq key. Exit 0: zero counted differences; 1: some; 2: it cannot be checked (the
+    stores are not seeded, or the stored mode is not dual, where this comparison of Events with the compact stores no longer applies)."""
+    now = fr.utcnow()
+    state = store.state
+    discovery = state.load_discovery_state()
+    storage = compact.StorageState.load(discovery.get(compact.STORAGE_KEY))
+    if storage.seeded_at is None:
+        print("STORAGE PARITY cannot run: Identity and Tally are not seeded yet (the first run after deployment seeds them). Nothing was written.")
+        return 2
+    if storage.mode != compact.MODE_DUAL:
+        print(f"STORAGE PARITY cannot run: the stored mode is {storage.mode}, and this check compares the Events rows with the compact stores in dual mode only. Nothing was written.")
+        return 2
+    ledger = state.load_ledger()
+    try:
+        tracker = list(store.tracker_rows())
+    except Exception as exc:  # an unreadable tracker is compared as empty on both sides, exactly as in the poller's check
+        log.warning("Storage parity: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
+        tracker = []
+    view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
+    report = parity.check_dual(
+        ledger.events, view, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=tracker,
+    )  # fmt: skip
+    print(parity.format_report(report, storage, now))
+    return 0 if not report.counted else 1
+
+
 def run_dashboard(cfg: Config, store: Any, settings: Settings, *, dry_run: bool) -> int:
     """`--dashboard`: rebuild the generated Dashboard tab (the only thing written). `--dry-run` prints instead."""
     if dry_run:
@@ -2050,10 +2080,11 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--allow-smartrecruiters", action="store_true", help="also bulk-validate SmartRecruiters boards (its robots.txt disallows generic crawlers)")
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
     parser.add_argument("--storage-report", action="store_true", help="print what the Events ledger is made of and a sized proposal for compact baselines / archiving; read only, changes nothing")
+    parser.add_argument("--storage-parity", action="store_true", help="check that Identity and Tally reproduce the Events rows and print the 3-day parity clock; read only, writes nothing (exit 0 no counted differences, 1 differences, 2 cannot be checked)")
     parser.add_argument("--dashboard", action="store_true", help="rebuild the Dashboard tab from the state now (writes only that tab); with --dry-run print the text version and write nothing")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.pilot_report is not None
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.storage_parity or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -2087,6 +2118,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_pilot_report(store, settings, max(1, args.pilot_report))
     if args.storage_report:
         return run_storage_report(store)
+    if args.storage_parity:
+        return run_storage_parity(store, settings)
     if args.dashboard:
         return run_dashboard(cfg, store, settings, dry_run=args.dry_run)
     if args.rebalance_report:

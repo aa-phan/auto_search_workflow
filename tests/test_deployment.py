@@ -252,7 +252,7 @@ class RepositoryHygieneTests(unittest.TestCase):
         poller = next(ln for ln in text.splitlines() if ln.strip().startswith("if:") and "!inputs.delivery_test" in ln)
         self.assertIn("!inputs.storage_parity", poller)  # the poller step never runs beside it
         require = next(ln for ln in text.splitlines() if "REQUIRE_TELEGRAM:" in ln)
-        self.assertIn("inputs.storage_report || inputs.storage_parity) && 'no' || 'yes'", require)  # it never delivers, so Telegram is not required
+        self.assertIn("inputs.storage_parity) && 'no'", require)  # it never delivers, so Telegram is not required (the whole expression is pinned in the test above)
         self.assertEqual(text.count("--storage-parity"), 1)
 
     def test_smartrecruiters_override_is_explicit_in_both_workflows_slowed_and_announced(self) -> None:
