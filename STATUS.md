@@ -1,10 +1,10 @@
 # STATUS
 
-Last updated 2026-10-29 (Phase 3 compact storage, plans 03-01..03-04, built and verified offline only, not deployed, D-57; before that 2026-10-28: Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-29 (Phase 3 dual-write storage deployed 17:46 UTC (f8c8263), first live evidence in "Phase 3 live verification (dual write)", D-57; before that 2026-10-29: plans 03-01..03-04 built and verified offline only; before that 2026-10-28: Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## Phase 3 compact storage (D-57; plans 03-01..03-04)
 
-Written 2026-10-29. **Built and verified offline (mocked); not deployed.** Nothing here has touched the real Google Sheet, Groq or Telegram: every check below ran against the CSV store, the in-memory Sheets fake (`tests/fake_sheets.py`), hand-built ledgers and fake ATS listings. `.venv/bin/python -m unittest discover -s tests` printed `Ran 787 tests ... OK` at the end of plan 03-04 (767 after 03-03; 20 new tests in this plan).
+Written 2026-10-29. **Built and verified offline (mocked); deployed to production 2026-10-29 17:46 UTC (f8c8263): what the live runs showed is in "Phase 3 live verification (dual write)" below, and every row of this table stays mocked unless that section says otherwise.** Nothing in the table below touched the real Google Sheet, Groq or Telegram: every check below ran against the CSV store, the in-memory Sheets fake (`tests/fake_sheets.py`), hand-built ledgers and fake ATS listings. `.venv/bin/python -m unittest discover -s tests` printed `Ran 787 tests ... OK` at the end of plan 03-04 (767 after 03-03; 20 new tests in this plan).
 
 | Check | Result | Live or mocked |
 |---|---|---|
@@ -34,6 +34,35 @@ Written 2026-10-29. **Built and verified offline (mocked); not deployed.** Nothi
 - The first run seeds about 200,000 IDs into `Identity` and the historical `Tally` (one row per run and run time) from the ledger it already loads, under the writer lease. Nothing in `Events` is changed or deleted, and detection, evaluation and alerts do not depend on the new tabs.
 - The parity clock starts the next full UTC day after the seed day (the seed day never counts). Three clean complete days, each with at least 12 checked runs, and one board admission among them are needed before the Dashboard says `READY TO CUT OVER`; the cutover is a separate owner step (plan 03-06).
 - `Events` keeps growing at today's rate until the cutover, plus `Identity` and `Tally`.
+
+## Phase 3 live verification (dual write)
+
+Pushed `main` (`c8c559d..f8c8263`) at 2026-10-29 17:46:37 UTC on the owner's choice `deploy-and-dispatch`. Everything marked **live** below was read from public GitHub Actions logs (`gh`) of runs on f8c8263; the agent has no Sheet credentials, so anything inside the Sheet is an **owner check pending**. Log values below are counts, run ids and setting names only; the three logs were scanned for secret patterns before quoting (0 matches each). The workflow conclusion is the only outcome read: the run outcome cell (`ok` / `degraded`) lives in `Runs` and is not in the public log.
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Deployment | `main` fast-forwarded and pushed 17:46:37 UTC; first run on f8c8263 is the dispatch below | **live** (git, `gh run list` headSha) |
+| Seed run 40924656021 (manual dispatch 17:47:21 UTC, finished about 17:52) | workflow `success`; log: `Created the hidden Identity tab`, `Created the hidden Tally tab`, `Storage seed: 201789 IDs written in 991 Identity rows for 947 boards, 424 Tally runs written`; the seed took about 30 s (log time 17:47:47 to 17:48:16 UTC); `Run: boards 693 ok / 7 failed of 700, new jobs 211 (190 verified fresh), evaluated 4, alerts 0 sent / 0 failed`; no `storage write failed` or `storage repair failed` note anywhere in the log; no storage check line (a seed run does not check). The process ran about 4 min 25 s (17:47:31 to 17:51:56), inside the 15 min poll cutoff | **live** (public log) |
+| Research assumption A2 (the warning-only protection on `Identity` does not block the service account) | the seed wrote 991 Identity rows without a write-failure note and the next run's check read all of them back (203,200 job keys compared, 0 differences), so the writes succeeded; the **confirmation prompt itself** is a Sheet-side fact | **live** for the service account's writes; prompt: owner check pending |
+| First check run 40926644214 (the hourly external dispatch, 18:00:08 UTC, finished about 18:05) | workflow `success`; log line `Storage: mode=dual, 0 counted and 0 declared differences, 203200 job keys and 425 Tally runs compared, 1 checked runs today, 0 of 3 complete days toward the bar, admission seen no, check took 24.6 s`; `Run: boards 695 ok / 5 failed of 700, new jobs 34 (32 verified fresh), evaluated 2, alerts 0 sent / 0 failed`; no storage note. Counted differences as read: **0**; declared as read: **0** | **live** (public log) |
+| Read-only parity run 40927423338 (`storage_parity=true`, 18:05:01 UTC) | workflow `success` (exit 0); report: `mode dual, seeded 2026-10-29T17:47:52Z`; compared: figures_logical 981, figures_reconcile_7d 46, figures_reconcile_all 46, figures_summary 1023, identity_entries 202028, seen_keys 203234, state_counters 4, tally_groups 426; `0 counted differences, 0 declared (listed, never counted); the check took 24.75 s`; `clock: 0 of 3 clean complete UTC days, admission seen no, bar met no`. Nothing was written (no poll, no lease) | **live** (public log) |
+| Seconds the check adds | 24.6 s in the poller run and 24.75 s in the read-only run, both against the 22 min skip limit (`STORAGE_CHECK_CUTOFF_S`), well inside it; the offline estimate was 6.4 s on a synthetic 194,000-row ledger, so the live figure is about four times higher (the real Sheet read and the extra Job Tracker read are in it) | **live** |
+| Whole-run time | the seed run and the first check run both took about 4 min 25 s of process time (the check run: 18:00:19 to 18:04:43 UTC); no poll, evaluation or alert cutoff note in either log | **live** |
+| Storage line, NEEDS ATTENTION row, `Storage` Dashboard render, hidden tabs, Events row count | not readable from a public log | owner check pending (below) |
+
+**The parity clock.** The seed time is 2026-10-29T17:47:52Z. The seed day never counts, so the first countable UTC day is **2026-10-30**. The bar needs three clean complete UTC days (2026-10-30, 2026-10-31, 2026-11-01), each with at least 12 checked runs and no counted difference, and one board admission among them; the earliest the Dashboard can say `READY TO CUT OVER` is therefore 2026-11-02 00:00 UTC, and any counted difference restarts it. The first check counted no differences, so the clock is running.
+
+**Owner checks pending in the real Sheet (the agent cannot see the Sheet):**
+1. `Identity` and `Tally` exist as hidden tabs (right-click a tab name, "Show hidden sheets").
+2. Editing a cell in `Identity` asks for a confirmation (the warning-only protection). Do not actually change it.
+3. The `Events` row count did not go down (it keeps growing; nothing in `Events` was shortened).
+4. Dashboard: the Storage line shows dual mode with 0 differences and there is no `storage parity difference` row under NEEDS ATTENTION; no `READY TO CUT OVER` yet.
+5. `Discovery` has the key `storage` (mode `dual`, `seeded_at` 2026-10-29T17:47:52Z). Do not edit it.
+6. `Runs.Notes` of the 17:47 and 18:00 UTC runs contain no `storage` note.
+
+**Not verified live:** the seed's behaviour when interrupted, repair of a removed ID, a counted difference (each only ever produced by mutation tests), the Dashboard render, and the cutover, fold and restore (plans 03-06 and 03-07, not built).
+
+**Observations to carry forward (not acted on, AGENTS rule 7):** the parity run read 202,028 Identity entries and 203,234 seen keys against the seed's 201,789 IDs (the difference is the new postings the runs since the seed observed, as the zero-difference check implies; the entry and key counts are not the same unit as the seed's ID count and were not reconciled further here); two runs were dispatched by hand (the seed run at 17:47 and the parity run at 18:05), so the run statistics for 2026-10-29 17:00 to 18:10 UTC include them.
 
 ## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
 
