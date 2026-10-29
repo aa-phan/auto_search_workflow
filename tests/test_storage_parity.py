@@ -96,11 +96,13 @@ class MutationTests(unittest.TestCase):
         self.w = Synthetic()
 
     def assertOnly(self, report: parity.ParityReport, *kinds: str, ref: str | None = None) -> None:
-        counted = [d for d in report.diffs if not d.declared]
+        """The counted differences of layers 1 to 3 are exactly `kinds`. Layer 4 (plan 03-03) reads the same damage again as a
+        figure, so it is looked at in `FigureTests`, not here."""
+        counted = [d for d in report.diffs if not d.declared and d.layer < 4]
         self.assertEqual(sorted({d.kind for d in counted}), sorted(kinds), [d.text() for d in counted])
         if ref is not None:
             self.assertIn(ref, [d.ref for d in counted])
-        self.assertEqual(report.counted, len(counted))
+        self.assertEqual(report.counted, len([d for d in report.diffs if not d.declared]))
 
     def test_the_consistent_world_has_zero_counted_differences_and_says_what_it_compared(self) -> None:
         report = self.w.check()
@@ -180,7 +182,8 @@ class MutationTests(unittest.TestCase):
         events = self.w.events
         view = compact.Ledger([ev for ev in compact.simulate_compact(events, NOW) if not (ev.event == lg.ERROR)], [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally)
         report = parity.check_dual(events, view, now=NOW)
-        self.assertEqual([(d.kind, d.ref) for d in report.diffs if not d.declared], [("state_counts", "error_attempts:evaluate")])
+        self.assertEqual([(d.kind, d.ref) for d in report.diffs if not d.declared and d.layer < 4], [("state_counts", "error_attempts:evaluate")])
+        self.assertTrue(any(d.layer == 4 and d.ref.startswith("failures.") for d in report.diffs))  # the missing error row also changes the reported failures
 
     def test_no_difference_text_holds_a_title_or_a_url(self) -> None:
         row = self.w.row_with("b3")
@@ -457,9 +460,10 @@ class PipelineDifferenceTests(HarnessCase):
         run = self.w.run(minutes_later=120)  # run 3 still lists job 2, which Identity no longer knows
         self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
         self.assertIn("storage", pl.degraded_reason(run))
-        self.assertIn("storage parity: 1 differences (identity_missing 1)", run.notes)
+        self.assertIn("storage parity: 2 differences (figure 1, identity_missing 1)", run.notes)  # layer 4 sees the lost baseline ID as one figure too
         state = storage_of(self)
-        self.assertEqual(state.last_diffs, ["identity_missing greenhouse|acme|2"])
+        self.assertEqual(state.last_diffs[0], "identity_missing greenhouse|acme|2")
+        self.assertEqual(state.last_diffs[1:], ["figure logical.baseline_jobs_per_board.greenhouse|acme (old 3 new 2)"])
         self.assertEqual((state.days["2026-10-14"]["runs"], state.days["2026-10-14"]["diff_runs"]), (2, 1))
         self.assertIsNone(state.bar_met_at)
         seen = [e.key for e in self.w.events(kind=lg.SEEN)]
@@ -514,7 +518,7 @@ class PipelineDifferenceTests(HarnessCase):
         text = "\n".join([stored, run.notes, *logs.output])
         for forbidden in ("Secret Title ZZQ", "Nowhere Land ZZQ", "http"):
             self.assertNotIn(forbidden, text)
-        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=dual, 1 counted") for line in logs.output), logs.output)
+        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=dual, 2 counted") for line in logs.output), logs.output)
         self.assertEqual(sum("Storage" in line for line in logs.output if line.startswith("INFO")), 1)  # one storage line per run
         self.assertIn("0 of 3 complete days toward the bar, admission seen no", "\n".join(logs.output))
 
@@ -575,7 +579,7 @@ class FigureTests(unittest.TestCase):
 
     def test_a_tally_date_letter_flipped_is_a_counted_figure_difference_named_by_its_path(self) -> None:
         world, view, now = self.world()
-        row = next(t for t in world.tally if any("|filtered|" in dim and dim.endswith("|k") for dim in t.counts) and t.run_at < "2026-10-15")
+        row = next(t for t in world.tally if any("|filtered|" in dim and dim.endswith("|k") for dim in t.counts) and "2026-10-02" <= t.run_at < "2026-10-15")
         dim = next(dim for dim in row.counts if "|filtered|" in dim and dim.endswith("|k"))
         flipped = {(dim[:-1] + "u" if k == dim else k): n for k, n in row.counts.items()}
         view = compact.Ledger(view.events, [], view.identity, [replace(t, counts=flipped) if t is row else t for t in world.tally])

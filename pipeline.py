@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable, Iterable
 
 import compact
@@ -135,6 +135,8 @@ class Deps:
     poll_cutoff_s: float = POLL_CUTOFF_S
     eval_cutoff_s: float = EVAL_CUTOFF_S
     alert_cutoff_s: float = ALERT_CUTOFF_S
+    tracker_rows: Callable[[], list[dict[str, str]]] | None = None  # reads the Job Tracker once for the storage parity check (None = compared as empty)
+    display_tz: tzinfo = timezone.utc  # the Settings time zone: the day buckets of the figures the parity check compares
 
 
 _BOT_TOKEN_IN_URL = re.compile(r"bot[0-9]{5,}:[A-Za-z0-9_-]{20,}")
@@ -203,7 +205,11 @@ def degraded_reason(run: RunRecord) -> str:
     return ",".join(reasons)
 
 
-def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, repaired: str = "") -> None:
+def storage_check(
+    ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, repaired: str = "", *,
+    runs: list[RunRecord] | None = None, boards: dict[str, BoardRecord] | None = None, discovery: dict[str, str] | None = None,
+    tracker_rows: Callable[[], list[dict[str, str]]] | None = None, tz: tzinfo = timezone.utc,
+) -> None:  # fmt: skip
     """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes.
 
     Events stays authoritative in dual mode, so a difference, a raised check or a slow check can only add a note, a degraded
@@ -211,9 +217,15 @@ def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.Storag
     counted difference `check_failed` (unknown is never zero differences). Notes and the log line carry kinds and counts only."""
     failed = False
     t_check = time.monotonic()
+    tracker: list[dict[str, str]] = []
+    if tracker_rows is not None:
+        try:
+            tracker = list(tracker_rows())
+        except Exception as exc:  # an unreadable tracker is compared as empty on both sides: it must not turn the check into a failure
+            log.warning("Storage check: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
     try:
         view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
-        report = parity.check_dual(ledger.events, view, now=now)
+        report = parity.check_dual(ledger.events, view, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
     except Exception as exc:
         failed = True
         report = parity.ParityReport([parity.Diff(0, "check_failed", type(exc).__name__)], {}, round(time.monotonic() - t_check, 2))
@@ -836,7 +848,7 @@ def run_cycle(d: Deps) -> RunRecord:
             if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
                 log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)%s", STORAGE_CHECK_CUTOFF_S // 60, repair_text)
             else:
-                storage_check(ledger, now, storage, run, repair_text)
+                storage_check(ledger, now, storage, run, repair_text, runs=runs, boards=boards, discovery=discovery_state, tracker_rows=d.tracker_rows, tz=d.display_tz)
                 discovery_state[compact.STORAGE_KEY] = storage.to_json()
                 try:
                     d.state.save_discovery_state(discovery_state, lg.stamp(now))

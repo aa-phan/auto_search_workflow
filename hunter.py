@@ -2157,6 +2157,8 @@ def main(argv: list[str] | None = None) -> int:
         groq_budget=budget,
         can_score=lambda st: budget.pick_model(groq.order(), fresh=st.freshness == fr.VERIFIED_FRESH, unavailable=groq.unavailable) is not None,
         groq_limits=groq.limits_json,
+        tracker_rows=store.tracker_rows,  # the storage parity check reads the tracker once per run (D-57)
+        display_tz=store.display_tz,
         clock=time.monotonic,
         process_t0=PROCESS_T0,
         poll_cutoff_s=cfg.poll_cutoff_s,
