@@ -171,7 +171,8 @@ class AllocatedCellsTests(unittest.TestCase):
         runs = [run_row("2026-10-15", 3, 1000), run_row("2026-10-16", 3, 1100), run_row("2026-10-16", 20, 1200), run_row("2026-10-17", 3, 1500), run_row("2026-10-18", 1, 99_999)]
         a = sr.analyze([], {}, runs, NOW, grid=GRID)  # 2026-10-18 is today: never counted. Growth: 10-16: +200, 10-17: +300 -> median 250 rows
         self.assertEqual(a["daily_growth_cells"], 250 * 7)
-        self.assertIsNone(sr.analyze([], {}, runs[:2], NOW, grid=GRID)["daily_growth_cells"])  # one complete day is no growth figure
+        self.assertIsNone(sr.analyze([], {}, runs[:1], NOW, grid=GRID)["daily_growth_cells"])  # one complete day is no growth figure
+        self.assertEqual(sr.analyze([], {}, runs[:2], NOW, grid=GRID)["daily_growth_cells"], 100 * 7)  # two consecutive complete days are one
         self.assertIsNone(sr.analyze([], {}, [], NOW, grid=GRID)["daily_growth_cells"])
 
 
@@ -518,8 +519,10 @@ class ReconcileParityTests(unittest.TestCase):
 class CommandsReadTheMergedViewTests(unittest.TestCase):
     """`--pilot-report` and `--storage-report` load the merged ledger (Events plus Identity and Tally); only the rebalance report keeps reading pending jobs."""
 
-    def store(self, ledger: compact.Ledger, runs: list) -> types.SimpleNamespace:
-        state = types.SimpleNamespace(load_ledger=lambda: ledger, load_runs=lambda: runs, load_boards=lambda: {}, load_discovery_state=lambda: {})
+    def store(self, ledger: compact.Ledger, runs: list, *, grid: dict | None = None, discovery: dict | None = None) -> types.SimpleNamespace:
+        state = types.SimpleNamespace(
+            load_ledger=lambda: ledger, load_runs=lambda: runs, load_boards=lambda: {}, load_discovery_state=lambda: discovery or {}, sheet_grid=lambda: grid or {},
+        )  # fmt: skip
         return types.SimpleNamespace(state=state, tracker_rows=lambda: [])
 
     def run_command(self, name: str, ledger: compact.Ledger, world, now: datetime) -> str:
@@ -540,6 +543,36 @@ class CommandsReadTheMergedViewTests(unittest.TestCase):
         text_new = self.run_command("pilot", world.compact_view(now), world, now)
         self.assertIn("JOBS FIRST OBSERVED IN THE WINDOW", text_new)
         self.assertEqual(text_old, text_new)
+
+    def test_the_storage_report_command_passes_the_sheet_grid_and_the_storage_key(self) -> None:
+        now = ZONES[0][1]
+        world = compact_world(UTC, now)
+        full = compact.Ledger(world.events, [], world.identity, world.tally)
+        key = compact.StorageState(mode=compact.MODE_DUAL, seeded_at="2026-10-01T00:00:00Z").to_json()
+        out = io.StringIO()
+        with mock.patch.object(hunter.fr, "utcnow", return_value=now), contextlib.redirect_stdout(out):
+            self.assertEqual(hunter.run_storage_report(self.store(full, world.runs, grid=GRID, discovery={compact.STORAGE_KEY: key})), 0)
+        text = out.getvalue()
+        self.assertIn(TABS_HEADER, text)
+        self.assertIn("1,400,007 cells", text)
+        self.assertIn("COMPACT STORAGE (projection while dual writing; not measured)", text)
+
+    def test_an_unreadable_sheet_metadata_leaves_the_cell_sections_out_and_prints_the_rest(self) -> None:
+        now = ZONES[0][1]
+        world = compact_world(UTC, now)
+        full = compact.Ledger(world.events, [], world.identity, world.tally)
+        store = self.store(full, world.runs)
+
+        def broken() -> dict:
+            raise RuntimeError("metadata unavailable")
+
+        store.state.sheet_grid = broken
+        out = io.StringIO()
+        with mock.patch.object(hunter.fr, "utcnow", return_value=now), contextlib.redirect_stdout(out), self.assertLogs("hunter", level="WARNING") as logs:
+            self.assertEqual(hunter.run_storage_report(store), 0)
+        self.assertNotIn("TABS (", out.getvalue())
+        self.assertIn("JOBS RECORDED", out.getvalue())
+        self.assertNotIn("metadata unavailable", "\n".join(logs.output))  # the exception type only
 
     def test_the_storage_report_prints_one_logical_line_that_does_not_depend_on_the_mode(self) -> None:
         now = ZONES[0][1]

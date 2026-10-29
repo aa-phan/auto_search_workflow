@@ -25,6 +25,8 @@ SHEET_CELL_LIMIT = 10_000_000
 CELL_CHAR_LIMIT = 50_000
 COMPACT_CELL_CHARS = compact.IDENTITY_CELL_CHARS  # one Identity cell (headroom under the 50,000-character cell limit); defined once, in compact
 COMPACT_COLUMNS = 5  # Board_Key, Chunk, Baselined_At, Count, IDs
+TALLY_COLUMNS = 4  # Run_ID, Run_At, Total, Counts
+TAB_ORDER = ("Events", "Identity", "Tally", "Events_Legacy")  # listed first and in this order; every other tab follows, alphabetically
 
 
 def _stamp(value: str) -> datetime | None:
@@ -112,10 +114,14 @@ def logical_counts(events: list[lg.Event], *, folded: Iterable[compact.FoldedCou
 
 
 def analyze(
-    events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[RunRecord], now: datetime, *, extra_boards: tuple[int, ...] = (200,), ledger: compact.Ledger | None = None
+    events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[RunRecord], now: datetime, *, extra_boards: tuple[int, ...] = (200,), ledger: compact.Ledger | None = None,
+    grid: dict[str, tuple[int, int]] | None = None, storage: compact.StorageState | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     """`events` are the Events rows (the physical figures read them). With `ledger` (the merged view: Events rows plus Identity and Tally)
-    the report also carries `logical`, the counts that do not depend on where an observation is stored."""
+    the report also carries `logical`, the counts that do not depend on where an observation is stored. With `grid` (every tab's allocated
+    (rows, columns) from the sheet metadata) it carries `tabs`, `allocated_cells` and its share of the 10,000,000-cell limit; with `storage`
+    (the Discovery key) also `before_after`: the cutover's `before` snapshot beside what is measured now, or, while dual writing, a labelled
+    projection. `load_s_median_last_24` and `daily_growth_cells` (D-57, plan 03-07) are always there (None when nothing was measured)."""
     kinds: Counter[str] = Counter()
     chars: Counter[str] = Counter()
     by_type: Counter[str] = Counter()
@@ -227,6 +233,7 @@ def analyze(
         "projection": projection,
         "ledger_rows_logged_in_runs": (runs[0].events_rows, runs[-1].events_rows) if runs else None,
         **({"logical": logical_counts(ledger.events, folded=ledger.folded(), identity=ledger.identity)} if ledger is not None else {}),
+        **_cells_and_growth(events, runs, now, grid, storage, projection.get(str(nb))),
     }  # fmt: skip
 
 
@@ -234,16 +241,19 @@ BEFORE_LOAD_RUNS = 24  # completed production runs whose Load_S the cutover's be
 BEFORE_GROWTH_DAYS = 7  # complete UTC days whose growth of Runs.Events_Rows the snapshot takes the median of
 
 
-def before_snapshot(runs: list[RunRecord], grid: dict[str, tuple[int, int]], events_rows: int, now: datetime) -> dict[str, Any]:
-    """What the ledger cost before the cutover, so the owner can compare it with the compact ledger afterwards (P3-06): the Events rows,
-    the allocated grid per tab and in cells (`grid` maps a tab title to its (rows, columns) as the sheet metadata reports them), the
-    median `Runs.Load_S` of the last 24 completed production runs and the median daily growth of `Runs.Events_Rows` over the last 7
-    complete UTC days (the day's last run decides the day's row count; a day that does not follow a day with data has no growth figure).
-    Anything not measured is None, never 0. Counts only: the snapshot goes into the Discovery key `storage`."""
-    cells = {tab: rows * cols for tab, (rows, cols) in sorted(grid.items())}
-    done = [r for r in runs if r.completed and r.run_kind != KIND_REHEARSAL]
+def _complete_runs(runs: list[RunRecord]) -> list[RunRecord]:
+    """The runs a figure may use: finished and not a local rehearsal."""
+    return [r for r in runs if r.completed and r.run_kind != KIND_REHEARSAL]
+
+
+def _median_load(done: list[RunRecord]) -> float | None:
     loads = [r.load_s for r in done[-BEFORE_LOAD_RUNS:]]
-    today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    return statistics.median(loads) if loads else None
+
+
+def _events_growth_by_day(done: list[RunRecord], today: str) -> dict[str, int]:
+    """Growth of `Runs.Events_Rows` per complete UTC day before `today`: the day's last run decides its row count, and a day that does not
+    follow a day with data has no figure (a gap must never look like a jump)."""
     last_of_day: dict[str, int] = {}
     for r in done:  # runs are in write order: the last one of a day overwrites the earlier ones
         day = r.run_at[:10]
@@ -254,11 +264,145 @@ def before_snapshot(runs: list[RunRecord], grid: dict[str, tuple[int, int]], eve
         before = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
         if before in last_of_day:
             growth[day] = last_of_day[day] - last_of_day[before]
+    return growth
+
+
+def before_snapshot(runs: list[RunRecord], grid: dict[str, tuple[int, int]], events_rows: int, now: datetime) -> dict[str, Any]:
+    """What the ledger cost before the cutover, so the owner can compare it with the compact ledger afterwards (P3-06): the Events rows,
+    the allocated grid per tab and in cells (`grid` maps a tab title to its (rows, columns) as the sheet metadata reports them), the
+    median `Runs.Load_S` of the last 24 completed production runs and the median daily growth of `Runs.Events_Rows` over the last 7
+    complete UTC days (the day's last run decides the day's row count; a day that does not follow a day with data has no growth figure).
+    Anything not measured is None, never 0. Counts only: the snapshot goes into the Discovery key `storage`."""
+    cells = {tab: rows * cols for tab, (rows, cols) in sorted(grid.items())}
+    done = _complete_runs(runs)
+    growth = _events_growth_by_day(done, now.astimezone(timezone.utc).strftime("%Y-%m-%d"))
     recent = [growth[day] for day in sorted(growth)[-BEFORE_GROWTH_DAYS:]]
     return {
         "events_rows": events_rows, "grid": {tab: [rows, cols] for tab, (rows, cols) in sorted(grid.items())}, "cells": cells, "cells_total": sum(cells.values()),
-        "median_load_s": statistics.median(loads) if loads else None, "median_daily_events_growth": statistics.median(recent) if recent else None,
+        "median_load_s": _median_load(done), "median_daily_events_growth": statistics.median(recent) if recent else None,
     }  # fmt: skip
+
+
+def _side_cells_per_day(storage: compact.StorageState, grid: dict[str, tuple[int, int]], today: datetime) -> float:
+    """Allocated cells a day that Identity (5 cells a row) and Tally (4 cells a row) added since the cutover: their row growth between the
+    cutover's `before` grid and the grid now, spread over the complete UTC days after the cutover day. 0 when there is no cutover time, no
+    complete day yet, or the snapshot does not hold that tab's grid (unknown is not counted, so the figure never overstates)."""
+    cut = compact.parse_stamp(storage.cutover.get("at"))
+    before = storage.cutover.get("before")
+    days = (today.astimezone(timezone.utc).date() - cut.date()).days - 1 if cut else 0
+    if days <= 0 or not isinstance(before, dict) or not isinstance(before.get("grid"), dict):
+        return 0.0
+    extra = 0
+    for tab, per_row in (("Identity", COMPACT_COLUMNS), ("Tally", TALLY_COLUMNS)):
+        then, now_ = before["grid"].get(tab), grid.get(tab)
+        if isinstance(then, (list, tuple)) and then and now_:
+            extra += per_row * max(0, now_[0] - int(then[0]))
+    return extra / days
+
+
+def _cells_and_growth(
+    events: list[lg.Event], runs: list[RunRecord], now: datetime, grid: dict[str, tuple[int, int]] | None, storage: compact.StorageState | None, projection: dict[str, Any] | None
+) -> dict[str, Any]:  # fmt: skip
+    """The figures plan 03-07 adds: per-tab allocated cells, the median load, the daily growth in allocated cells and the before/after record.
+
+    Daily growth in cells = the median over complete UTC days of 7 cells x the change in `Runs.Events_Rows` (the day's last run decides), plus
+    for the after figure the Identity and Tally growth since the cutover (`_side_cells_per_day`). Which days count: with no cutover, the last 7
+    complete days; after a cutover, only complete days AFTER `fold.first_day` (the days before it hold the swap and the first fold, which are not
+    steady state), and none until a fold deleted a row. The figure is None until a complete day follows a complete day."""
+    done = _complete_runs(runs)
+    today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    growth = _events_growth_by_day(done, today)
+    cut = storage.cutover if storage is not None else {}
+    after_start = storage.fold.get("first_day") if storage is not None and cut else None
+    side = _side_cells_per_day(storage, grid or {}, now) if storage is not None and cut and grid else 0.0
+    if cut and storage is not None and storage.mode == compact.MODE_COMPACT:
+        days = [d for d in sorted(growth) if after_start and d > str(after_start)][-BEFORE_GROWTH_DAYS:]
+    elif cut:
+        days = []  # restored: the ledger was swapped back, so no growth figure describes either layout
+    else:
+        days = sorted(growth)[-BEFORE_GROWTH_DAYS:]
+    daily = round(statistics.median(growth[d] * EVENT_COLUMNS for d in days) + side) if days else None
+    out: dict[str, Any] = {"load_s_median_last_24": _median_load(done), "daily_growth_cells": daily, "daily_growth_days": days}
+    if grid is not None:
+        tabs = {tab: {"rows": rows, "columns": cols, "cells": rows * cols} for tab, (rows, cols) in grid.items()}
+        allocated = sum(t["cells"] for t in tabs.values())
+        out.update(tabs=tabs, allocated_cells=allocated, allocated_share_pct=round(100 * allocated / SHEET_CELL_LIMIT, 1))
+    if storage is not None:
+        out["before_after"] = _before_after(storage, done, len(events), out.get("allocated_cells"), daily, days, projection)
+    return out
+
+
+def _before_after(
+    storage: compact.StorageState, done: list[RunRecord], events_rows: int, allocated: int | None, daily: int | None, days: list[str], projection: dict[str, Any] | None
+) -> dict[str, Any]:  # fmt: skip
+    if storage.mode == compact.MODE_RESTORED:
+        return {"mode": "restored", "cutover_at": storage.cutover.get("at")}
+    if storage.mode != compact.MODE_COMPACT:
+        return {"mode": "dual", "projection": {k: projection[k] for k in ("boards", "steady_cells_per_day_now", "steady_cells_per_day_compact")} if projection else None}
+    snap = storage.cutover.get("before") if isinstance(storage.cutover.get("before"), dict) else {}
+    rows_before = snap.get("median_daily_events_growth")
+    before_growth = None if rows_before is None else round(rows_before * EVENT_COLUMNS)
+    cut = storage.cutover.get("at") or ""
+    loads = _median_load([r for r in done if cut and r.run_at >= cut])
+    measured = daily is not None
+    return {
+        "mode": "compact", "cutover_at": cut or None, "first_fold_day": storage.fold.get("first_day") or None,
+        "before": {"events_rows": snap.get("events_rows"), "cells_total": snap.get("cells_total"), "median_load_s": snap.get("median_load_s"), "daily_growth_cells": before_growth},
+        "after": {"events_rows": events_rows, "cells_total": allocated, "median_load_s": loads, "daily_growth_cells": daily, "days_used": days},
+        "measured": measured,
+        "growth_ratio": round(before_growth / daily, 1) if measured and before_growth is not None and daily and daily > 0 else None,
+    }  # fmt: skip
+
+
+def _n(value: Any) -> str:
+    return "n/a" if value is None else f"{value:,}"
+
+
+def _cells_section(a: dict[str, Any]) -> list[str]:
+    """The lines of the tab table and of the before/after section (or the labelled projection). Empty when the report was given neither the grid nor the storage state."""
+    L: list[str] = []
+    if "tabs" in a:
+        tabs = a["tabs"]
+        order = [t for t in TAB_ORDER if t in tabs] + sorted(t for t in tabs if t not in TAB_ORDER)
+        L += ["", f"TABS (allocated grid cells; the {SHEET_CELL_LIMIT:,}-cell limit counts every tab, blank cells included)"]
+        L += [f"  {t:<14} {tabs[t]['rows']:>10,} rows x {tabs[t]['columns']} columns = {tabs[t]['cells']:>12,} cells" for t in order]
+        L.append(f"  total          {a['allocated_cells']:,} cells = {a['allocated_share_pct']}% of the {SHEET_CELL_LIMIT:,}-cell limit")
+        growth = a["daily_growth_cells"]
+        L.append(
+            f"  median Runs.Load_S of the last {BEFORE_LOAD_RUNS} completed runs: {'n/a' if a['load_s_median_last_24'] is None else str(a['load_s_median_last_24']) + ' s'}; "
+            + (f"median daily growth in allocated cells: {growth:,} (median over {len(a['daily_growth_days'])} complete UTC days)" if growth is not None else "daily growth in allocated cells: not measured yet (needs two complete UTC days"
+               + (" after the first fold)" if a.get("before_after", {}).get("mode") == "compact" else ")"))
+        )  # fmt: skip
+    ba = a.get("before_after")
+    if ba is None:
+        return L
+    if ba["mode"] == "restored":
+        L += ["", f"COMPACT STORAGE (restored: compaction is off until a new owner decision; cutover {ba.get('cutover_at') or 'n/a'}; no after figure is measured)"]
+    elif ba["mode"] == "dual":
+        p = ba["projection"]
+        L += ["", "COMPACT STORAGE (projection while dual writing; not measured)"]
+        L.append(
+            f"  at {p['boards']} monitored boards: ~{p['steady_cells_per_day_now']:,} cells a day with every row kept; the compact design would add ~{p['steady_cells_per_day_compact']:,} cells a day "
+            "(D-43 rates applied to today's rows; the compact ledger does not exist yet, so nothing here is a measurement)"
+            if p else "  no projection yet (not enough complete days); the compact ledger does not exist yet, so nothing here is a measurement"
+        )  # fmt: skip
+    else:
+        b, f = ba["before"], ba["after"]
+        fold = ba["first_fold_day"]
+        L += ["", f"BEFORE / AFTER THE CUTOVER (cutover {ba['cutover_at'] or 'n/a'}; first fold {fold or 'not yet'})"]
+        L.append(f"  Events rows: {_n(b['events_rows'])} before -> {_n(f['events_rows'])} now")
+        L.append(f"  allocated cells, every tab: {_n(b['cells_total'])} before -> {_n(f['cells_total'])} now")
+        L.append(f"  median Runs.Load_S: {'n/a' if b['median_load_s'] is None else str(b['median_load_s']) + ' s'} before (last {BEFORE_LOAD_RUNS} runs) -> {'n/a' if f['median_load_s'] is None else str(f['median_load_s']) + ' s'} after (runs since the cutover)")
+        if ba["measured"]:
+            used = f["days_used"]
+            ratio = f"; {ba['growth_ratio']}x smaller" if ba["growth_ratio"] is not None else ""
+            L.append(
+                f"  median daily growth in allocated cells: {_n(b['daily_growth_cells'])} before (Events rows x 7) -> {f['daily_growth_cells']:,} after{ratio}; "
+                f"{len(used)} complete UTC days after the first fold ({used[0]} .. {used[-1]}), Identity and Tally growth since the cutover included"
+            )  # fmt: skip
+        else:
+            L.append(f"  median daily growth in allocated cells: {_n(b['daily_growth_cells'])} before (Events rows x 7) -> not measured yet (needs a complete UTC day after the first fold)")
+    return L
 
 
 def format_report(a: dict[str, Any]) -> str:
@@ -304,6 +448,9 @@ def format_report(a: dict[str, Any]) -> str:
         "LOAD TIME (Runs.Load_S, whole seconds, includes the ~22k-row Boards registry): " + (
             "; ".join(f"{k}: {v['median_load_s']} s at {v['ledger_rows']} rows ({v['runs']} runs)" for k, v in a["load_seconds_by_ledger_size"].items()) or "not enough runs with ledger sizes")
         + (f"; fitted slope {a['load_seconds_per_100k_ledger_rows']} s per 100,000 rows" if a["load_seconds_per_100k_ledger_rows"] is not None else "; no per-row slope is measurable yet"),
+    ]
+    L += _cells_section(a)
+    L += [
         "",
         "500 vs 700 BOARDS (steady state scales linearly with monitored boards: an assumption; one-time admission is sized from the waiting boards' last job counts)",
     ]

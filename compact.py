@@ -416,6 +416,7 @@ def fold_plan(ledger: "Ledger", now: datetime) -> FoldPlan:
     if len(ledger.event_rows) != len(ledger.events):
         raise ValueError("the ledger carries no sheet row numbers; refusing to plan a fold")
     cutoff = now - FOLD_AGE
+    cutoff_stamp = lg.stamp(cutoff.astimezone(timezone.utc))
     held = ledger.identity.keys()
     totals = ledger.tally_totals()
     retained = ledger.retained_counts()
@@ -424,6 +425,8 @@ def fold_plan(ledger: "Ledger", now: datetime) -> FoldPlan:
     for key, ev in first_seen_identity(ledger.events).items():
         if identity_class(ev) not in (lg.FILTERED, lg.STALED) or identity_entry(ev) is None:
             continue
+        if len(ev.time) == len(cutoff_stamp) and ev.time > cutoff_stamp:
+            continue  # a well-formed stamp sorts like its instant: younger than the cut (and a malformed one of this length is skipped below anyway); saves parsing most rows
         when = event_time(ev)
         if when is None or when > cutoff:
             continue

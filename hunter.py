@@ -1978,7 +1978,13 @@ def run_storage_report(store: Any) -> int:
     """`--storage-report`: what the ledger is made of, read only. It loads the merged view (D-57), so the logical counts also cover Identity and Tally."""
     state = store.state
     ledger = state.load_ledger()
-    print(storage_report.format_report(storage_report.analyze(ledger.events, state.load_boards(), state.load_runs(), fr.utcnow(), ledger=ledger)))
+    try:
+        grid = state.sheet_grid()  # the allocated rows and columns of every tab, from the sheet metadata (one extra read)
+    except Exception as exc:  # the report is read only: without the grid it prints everything else and leaves the cell sections out
+        log.warning("Storage report: the sheet metadata could not be read (%s); allocated cells are not reported", type(exc).__name__)
+        grid = None
+    storage = compact.StorageState.load(state.load_discovery_state().get(compact.STORAGE_KEY))
+    print(storage_report.format_report(storage_report.analyze(ledger.events, state.load_boards(), state.load_runs(), fr.utcnow(), ledger=ledger, grid=grid, storage=storage)))
     return 0
 
 
