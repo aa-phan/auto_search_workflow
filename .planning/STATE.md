@@ -91,15 +91,16 @@ Roadmap decisions for v2.0 (2026-10-25):
 ### Pending Todos
 
 - Daily check scheduled for 2026-10-25 12:00 UTC ran; findings are in STATUS.md. Repeat daily until Phase 3 lands.
-- First weekly rebalance about 2026-10-29 01:00 UTC: watch it in the daily checks; the formal read is EVID-01 in Phase 5.
-- Owner: decide whether tracker row greenhouse|nadiacare|4459849009 stays deleted or is restored (02-UAT test 2 left it open).
+- First weekly rebalance ran 2026-10-29 00:15 UTC (inside the governor test run; PILOT_LOG); the formal read is EVID-01 in Phase 5.
+- Owner: add Settings row `Tracker_Deleted_Keys` = `greenhouse|nadiacare|4459849009` (D-55).
 - User to check that the employer behind 6 of 14 recent tracker rows (Alphabe Insight Inc, SmartRecruiters) is genuine.
 
 ### Blockers/Concerns
 
 - [Phase 2] Groq plan D-53: free, budget default 100,000 per model, pushed 2026-10-28 (1d63416) and read by the owner in the Runs tab; revisit the plan before Phase 4; the 20-30 target stays conditional (about 75 evaluations / 12 rows a day).
-- [Phase 2] Governors (15/20/22 min cutoffs, 5-attempt alert bound, WR-01 lock expiry) are offline-verified only; none has fired in production yet.
-- [Phase 2] 1 ledger-kept job is missing from the tracker (greenhouse|nadiacare|4459849009, 54 of 55); owner keep-or-restore decision pending.
+- [Phase 2] Poll cutoff verified live 2026-10-29 (governor test run 40792640070, D-56). Evaluation cutoff, alert cutoff, 5-attempt alert bound and WR-01 lock expiry are still offline-verified only.
+- [Phase 5] The first weekly rebalance (on) applied inside that test run (266 graduated, 0 replaced) with 214 boards missing one poll; EVID-01 should read it with that caveat.
+- [Phase 2] greenhouse|nadiacare|4459849009 deleted from the tracker on purpose (owner, D-55); add it to the live Settings row Tracker_Deleted_Keys to clear NEEDS ATTENTION.
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
