@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated 2026-10-29 (Phase 3 dual-write storage deployed 17:46 UTC (f8c8263), first live evidence in "Phase 3 live verification (dual write)", D-57; before that 2026-10-29: plans 03-01..03-04 built and verified offline only; before that 2026-10-28: Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
+Last updated 2026-10-29 (Phase 3 plan 03-07 built and verified offline only: the 7-day fold, the storage report's allocated cells and before/after, the compact-mode integrity check; before that Phase 3 dual-write storage deployed 17:46 UTC (f8c8263), first live evidence in "Phase 3 live verification (dual write)", D-57; before that 2026-10-29: plans 03-01..03-04 built and verified offline only; before that 2026-10-28: Groq plan decided, D-53: stay free, budget default 100,000 per model; before that 2026-10-26: Phase 2 governors and measurement built and verified offline only, owner decisions D-48..D-52; before that 2026-10-23: pilot week 1 closed; graduation floor D-45; tracker header refusal D-46; before that 2026-10-17: watchdog, pilot-report corrections and storage scoping, D-42 and D-43; before that operational dashboard, D-40; before that search provider Serper -> Tavily, D-36; before that board slot allocation, D-23..D-30; before that the discovery rotation / 12-hour window change, D-17..D-21). Read `SPEC.md` (contract) and `DECISIONS.md` (why) first.
 
 ## Phase 3 compact storage (D-57; plans 03-01..03-04)
 
@@ -26,7 +26,7 @@ Written 2026-10-29. **Built and verified offline (mocked); deployed to productio
 - The parity check's seconds and memory at about 200,000 rows, plus its extra Job Tracker read per run (an offline scale check took 6.4 s on a synthetic 194,000-row ledger).
 - The Sheet render of the new Storage line and of the NEEDS ATTENTION row.
 - That the `storage_parity` input appears and runs in GitHub Actions. Its `Check configuration` step still lists `GROQ_API_KEY` as required (as for every other report), although `--storage-parity` itself needs no Groq key.
-- Everything after the dual-writing deploy: the cutover, the fold and the restore are plans 03-06 and 03-07 and are not built yet.
+- Everything after the dual-writing deploy: the cutover, the restore, the fold, the storage report's before/after and the compact integrity check were built afterwards (plans 03-06 and 03-07, sections below) and are mocked only.
 
 **Migration notes for the first run after deploy (plan 03-05):**
 - Two hidden tabs appear, `Identity` and `Tally`. `Identity` is protected with a warning, so Sheets asks for confirmation before a hand edit; do not edit it (a removed ID can make an old job look new).
@@ -48,7 +48,32 @@ Written 2026-10-29. `python hunter.py --storage-cutover` (workflow input `storag
 | A `compact` key without `Events_Legacy` writes as dual and says so; mode `restored` writes every observation to `Events` again with no check | pass | **mocked** |
 | Workflow inputs `storage_cutover` and `storage_restore` (boolean, fixed commands, excluded from the poller and from `REQUIRE_TELEGRAM`; 13 inputs of GitHub's 25) | pass | **mocked** (static test of the workflow file; the workflow was never run) |
 
-**Not built yet:** the fold (plan 03-07, the point of no return for the restore) and the before/after report. The earliest `READY TO CUT OVER` is still 2026-11-02 00:00 UTC (see "Phase 3 live verification (dual write)"). Mutation checks are listed in the plan 03-06 SUMMARY.
+The fold and the before/after report are plan 03-07, below. The earliest `READY TO CUT OVER` is still 2026-11-02 00:00 UTC (see "Phase 3 live verification (dual write)"). Mutation checks are listed in the plan 03-06 SUMMARY.
+
+## Phase 3 plan 03-07 (fold, storage report, compact integrity check): built, verified offline only
+
+Written 2026-10-29. The 7-day fold, the extended `--storage-report` and the compact-mode integrity check exist in the code, **but nothing of this plan is pushed, dispatched or run against the real Sheet; production stays in dual mode, so none of it can act before the owner's cutover (plan 03-09).** `.venv/bin/python -m unittest discover -s tests` printed `Ran 910 tests ... OK` (836 after plan 03-06). Every check below ran on the in-memory Sheets fake (which interprets `deleteDimension` itself), the CSV store and synthetic ledgers; no Google, Groq or Telegram call was made.
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Fold: the first compact-mode run of a UTC day after the cutover's deletes exactly the `filtered` or `stale` rows at or before `now - 7 x 24 h` (a row exactly 7 x 24 h old goes, one a second younger stays) with ONE batch of `deleteDimension` requests, highest range first; Events_Legacy, baselines-in-Identity, operational rows untouched; every Dashboard figure and the logical counts are the same before and after | pass | **mocked** |
+| Fold durability: a row whose ID is not in the Identity set read at run start, or whose Tally group is missing or below the retained count, is kept and counted (`storage fold: N rows (M kept: not durable yet)`) and folds the next day once the repair has run; never fold on the cutover day, twice a day, in dual or restored mode, with a `compact` key but no `Events_Legacy`, in a dry run, or past the 20-minute cutoff | pass | **mocked** |
+| Fold failure and interruption: a failed fold adds `storage fold failed: <type>`, degrades the run and leaves `last_day` unset; a half-folded run (second batch fails) counts every job once and the next run finishes it; a planned row that no longer holds its key refuses the whole fold before the first delete | pass | **mocked** |
+| Batches of at most 500 requests, highest rows first, over 1,301 single-row ranges | pass | **mocked** (the number 500 is research A5, an assumption) |
+| Storage report: rows, columns and allocated cells per tab and in total with the share of 10,000,000, median `Load_S` of the last 24 runs, daily growth in allocated cells, BEFORE / AFTER THE CUTOVER from the cutover snapshot, the compact figure labelled a projection while dual writing | pass | **mocked** (the sheet metadata is the fake's) |
+| Growth simulation: 28 days at 700 boards through the real `split_observations`, `retained_events` and `fold_plan`: about 36,800 allocated cells a day with every row kept against about 1,700 after the folds (ratio above 20; D-43 estimated about 26,200 against about 1,300 at 500 boards) | pass | **mocked** (a model, not a measurement) |
+| Compact integrity check in every compact-mode run (`parity.check_compact`: Identity codec, every kept identity-class key in Identity, no Tally group missing or below its retained count, no failing summary consistency check) and in `--storage-parity`; a difference degrades the run and shows NEEDS ATTENTION; compact runs record no clock days | pass | **mocked** |
+
+**Mutation checks** (each applied with the bytecode cache off, observed failing, reverted from a saved copy and compared): ranges sent in ascending order, the Identity-membership test dropped, the Tally test dropped, the cutover-day guard changed from after to on-or-after, the pipeline's mode guard dropped, the after-growth window including the first fold day, the Identity and Tally side growth dropped, the fold disabled in the simulation, the projection label dropped, the Identity-presence test dropped from the compact check, `tally_negative` dropped, clock days recorded in compact mode, the compact check not run, the summary checks not run.
+
+**Not verified live yet (plan 03-09 observes each):**
+- The real rename pair of the cutover and its effect on the hidden flag and the protection (plan 03-06).
+- `deleteDimension` batches of several hundred ranges in one `spreadsheets.batchUpdate` (research A5: no documented request cap; the constant `compact.FOLD_REQUESTS_PER_BATCH` is 500) and the first fold's duration against the 20-minute cutoff at about 35,000 deleted rows.
+- Allocated cells read from the real sheet metadata, and whether deleting rows shrinks the real grid as the fake does.
+- The Events_Legacy protection prompt (a hand edit asks for confirmation; whether the service account is unaffected).
+- That the compact integrity check's seconds stay small on the real ledger (about 40,000 Events rows plus 200,000 Identity IDs).
+
+**Known limit of the compact check:** an ID that only Identity holds (a baseline, or a folded row) has no Events row to compare with, so removing it by hand is not seen after the cutover (it is seen before: dual-mode parity). A lost Tally count of a group that still has Events rows is counted (`tally_negative`); a lost count of baselines alone is not detectable. Both are written down in D-57.
 
 ## Phase 3 live verification (dual write)
 

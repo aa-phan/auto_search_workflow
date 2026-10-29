@@ -2007,8 +2007,9 @@ def _parity_report(
 
 def run_storage_parity(store: Any, settings: Settings) -> int:
     """`--storage-parity` (D-57): does Identity plus Tally reproduce what the Events rows say? Read only: it takes no writer lease, writes no
-    Sheet row, no Discovery key and no tab, and needs no Groq key. Exit 0: zero counted differences; 1: some; 2: it cannot be checked (the
-    stores are not seeded, or the stored mode is not dual, where this comparison of Events with the compact stores no longer applies)."""
+    Sheet row, no Discovery key and no tab, and needs no Groq key. In dual mode it compares Events with the compact stores (four layers); in
+    compact mode it runs the integrity check `parity.check_compact`. Exit 0: zero counted differences; 1: some; 2: it cannot be checked (the
+    stores are not seeded, or the stored mode is restored)."""
     now = fr.utcnow()
     state = store.state
     discovery = state.load_discovery_state()
@@ -2016,11 +2017,14 @@ def run_storage_parity(store: Any, settings: Settings) -> int:
     if storage.seeded_at is None:
         print("STORAGE PARITY cannot run: Identity and Tally are not seeded yet (the first run after deployment seeds them). Nothing was written.")
         return 2
-    if storage.mode != compact.MODE_DUAL:
-        print(f"STORAGE PARITY cannot run: the stored mode is {storage.mode}, and this check compares the Events rows with the compact stores in dual mode only. Nothing was written.")
+    if storage.mode not in (compact.MODE_DUAL, compact.MODE_COMPACT):
+        print(f"STORAGE PARITY cannot run: the stored mode is {storage.mode}; the check applies in dual mode (Events against the compact stores) and in compact mode (the integrity of Identity and Tally). Nothing was written.")
         return 2
     ledger = state.load_ledger()
-    report = _parity_report(store, ledger, compact.simulate_compact(ledger.events, now), now=now, runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
+    if storage.mode == compact.MODE_COMPACT:  # Events no longer holds every row: check what Identity and Tally promise about the rows it keeps
+        report = parity.check_compact(ledger, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
+    else:
+        report = _parity_report(store, ledger, compact.simulate_compact(ledger.events, now), now=now, runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
     print(parity.format_report(report, storage, now))
     return 0 if not report.counted else 1
 

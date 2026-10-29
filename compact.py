@@ -706,6 +706,14 @@ class StorageState:
         if self.bar_met_at is None and counted == 0 and not failed and self.bar(now).met:
             self.bar_met_at = lg.stamp(now.astimezone(timezone.utc))
 
+    def record_compact_check(
+        self, now: datetime, *, counted: int, declared: int, failed: bool = False, diffs: Iterable[str] = (), compared: int = 0, seconds: float = 0.0
+    ) -> None:  # fmt: skip
+        """Record a compact-mode integrity check: `last_check` and `last_diffs` only. The parity bar and its clock belong to dual writing; after the
+        cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was."""
+        self.last_check = {"at": lg.stamp(now.astimezone(timezone.utc)), "counted": counted, "declared": declared, "compared": compared, "seconds": round(seconds, 1)}
+        self.last_diffs = [str(text)[:MAX_DIFF_CHARS] for text in list(diffs)[:MAX_LISTED_DIFFS]]
+
     def fold_due(self, now: datetime) -> bool:
         """May a fold start at `now` (P3-03)? Only in stored mode `compact`, only on a UTC day AFTER the UTC day of the cutover (the restore
         stays possible for the rest of that day), and at most once a UTC day (`fold.last_day`). A cutover record without a readable time never folds."""

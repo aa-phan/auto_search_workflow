@@ -814,7 +814,8 @@ class FoldCase(CutoverCase):
 
     def edit_identity(self, drop: str) -> None:
         row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
-        row[4] = ",".join(e for e in row[4].split(",") if e != drop)
+        kept = [e for e in row[4].split(",") if e != drop]
+        row[3], row[4] = str(len(kept)), ",".join(kept)  # the Count column follows, as it would after a clean removal
 
     def edit_tally(self, run_id: str, edit: Any) -> None:
         for row in self.sh.sheets[stm.TALLY_TAB].values[1:]:

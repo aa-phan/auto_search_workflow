@@ -101,6 +101,17 @@ def _seen_set(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str
             out.append(Diff(1, "identity_kind", key))
         if f"{stem}|{compact.decode_entry(entry)[1]}" != key:
             out.append(Diff(1, "stem", key))
+    found, entries = _identity_invariants(ident)
+    out += found
+    compared["seen_keys"] = len(seen_rows)
+    compared["identity_entries"] = entries
+    return out
+
+
+def _identity_invariants(ident: compact.IdentitySet) -> tuple[list[Diff], int]:
+    """The codec invariants of the Identity tab alone (no Events row involved): `Count` equals the entries, the cell fits, every stem has its
+    completion marker, no posting ID twice in a stem. Returns the differences and the number of entries."""
+    out: list[Diff] = []
     entries = 0
     for row in ident.all_rows():
         found = row.entries()
@@ -114,9 +125,7 @@ def _seen_set(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str
             out.append(Diff(1, "identity_marker", stem))
         ids = Counter(compact.decode_entry(e)[1] for row in ident.rows(stem) for e in row.entries())
         out += [Diff(1, "identity_duplicate", f"{stem}|{pid}", f"{n} entries") for pid, n in sorted(ids.items()) if n > 1]
-    compared["seen_keys"] = len(seen_rows)
-    compared["identity_entries"] = entries
-    return out
+    return out, entries
 
 
 def _tally(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str, int]) -> list[Diff]:
@@ -286,6 +295,84 @@ def check_dual(
     compared: dict[str, int] = {}
     diffs = _seen_set(events, ledger, compared) + _tally(events, ledger, compared) + _state_counts(events, ledger, now, compared)
     diffs += _figures(events, ledger, now, tz, list(runs), boards or {}, discovery or {}, list(tracker), compared)
+    return ParityReport(diffs, compared, round(time.monotonic() - t0, 2))
+
+
+def _kept_in_identity(ledger: compact.Ledger, compared: dict[str, int]) -> list[Diff]:
+    """Compact layer 1: every keyable identity-class key that Events still holds is in Identity with the right kind letter and the stem round trip,
+    and every Identity entry is well formed. The other direction is not compared: baselines and folded rows have no Events row any more, so an ID
+    that only Identity holds has nothing to be compared with (a known limit, D-57)."""
+    out: list[Diff] = []
+    ident = ledger.identity
+    held = ident.keys()
+    kept = compact.first_seen_identity(ledger.events)
+    for key, ev in sorted(kept.items()):
+        keyed = compact.identity_entry(ev)
+        if keyed is None:
+            out.append(Diff(1, "unkeyable", key, declared=True))
+            continue
+        stem, entry = keyed
+        if key not in held:
+            out.append(Diff(1, "identity_missing", key))
+            continue
+        if ident.kind(key) != compact.KIND_OF[ev.disposition]:
+            out.append(Diff(1, "identity_kind", key))
+        if f"{stem}|{compact.decode_entry(entry)[1]}" != key:
+            out.append(Diff(1, "stem", key))
+    found, entries = _identity_invariants(ident)
+    out += found
+    for row in ident.all_rows():  # an entry is a kind letter b, f or s plus an escaped ID that survives a decode and an encode
+        for entry in row.entries():
+            kind, pid = compact.decode_entry(entry)
+            if kind not in compact.DISPOSITION_OF or not pid or compact.encode_entry(kind, pid) != entry:
+                out.append(Diff(1, "identity_entry", f"{row.stem}#{row.chunk}"))
+                break
+    compared["seen_keys"] = len(kept)
+    compared["identity_entries"] = entries
+    return out
+
+
+def _tally_integrity(ledger: compact.Ledger, compared: dict[str, int]) -> list[Diff]:
+    """Compact layer 2: Tally may hold MORE than Events retains (that is what a fold leaves), never less. A retained group with no Tally row is
+    `tally_missing`; a group whose count of a dimension is below the retained count is `tally_negative` (`Ledger.negative()`, a lost write);
+    a row whose Total is not the sum of its counts is `tally_count`."""
+    out: list[Diff] = []
+    have = ledger.tally_totals()
+    want = compact.tally_recount(ledger.events)
+    out += [Diff(2, "tally_missing", _group(*g), f"{sum(want[g].values())} observations") for g in sorted(want.keys() - have.keys())]
+    out += [Diff(2, "tally_negative", f"{_group(f.run_id, f.run_at)} {f.dim}", f"{have[(f.run_id, f.run_at)].get(f.dim, 0)} vs {f.n + have[(f.run_id, f.run_at)].get(f.dim, 0)}")
+            for f in ledger.negative() if (f.run_id, f.run_at) in have]  # fmt: skip
+    recorded: Counter[tuple[str, str]] = Counter()
+    for row in ledger.tally:
+        recorded[(row.run_id, row.run_at)] += row.total
+    out += [Diff(2, "tally_count", f"{_group(*g)} total", f"{recorded[g]} vs {sum(have[g].values())}") for g in sorted(have) if recorded[g] != sum(have[g].values())]
+    compared["tally_groups"] = len(have.keys() | want.keys())
+    return out
+
+
+def _summary_checks(ledger: compact.Ledger, now: datetime, tz: tzinfo, runs: list[Any], boards: dict[str, Any], discovery: dict[str, str], tracker: list[dict[str, str]],
+                    compared: dict[str, int]) -> list[Diff]:  # fmt: skip
+    """Compact layer 4: the Dashboard summary of the merged view (kept rows plus folded counts) must pass its own consistency checks."""
+    summary = rp.build_summary(now=now, tz=tz, events=ledger.events, folded=ledger.folded(), runs=runs, boards=boards, discovery=discovery, tracker=tracker)
+    problems = [str(p) for p in summary.get("checks", [])]
+    compared["summary_checks"] = len(problems)
+    return [Diff(4, "figure_checks", f"checks.{_segment(p.split(':', 1)[0])}", f"{i + 1} of {len(problems)}") for i, p in enumerate(problems)]
+
+
+def check_compact(
+    ledger: compact.Ledger, *, now: datetime, tz: tzinfo = timezone.utc, runs: Iterable[Any] = (), boards: dict[str, Any] | None = None,
+    discovery: dict[str, str] | None = None, tracker: Iterable[dict[str, str]] = (),
+) -> ParityReport:  # fmt: skip
+    """The integrity check of compact mode (plan 03-07): Events no longer holds every row, so there is no full ledger to compare with; instead
+    Identity and Tally must be consistent with what Events keeps. Four parts: the Identity codec invariants and every kept identity-class key in
+    Identity (`identity_missing`, `identity_kind`, `stem`, `identity_count`, `identity_cell`, `identity_marker`, `identity_duplicate`,
+    `identity_entry`); no kept Tally group missing or below its retained count (`tally_missing`, `tally_negative`, `tally_count`); and the
+    merged Dashboard summary with an empty consistency-check list (`figure_checks`). `ledger` is the merged view as loaded: Events rows,
+    Identity, Tally. Pure and read-only; a difference never changes detection, evaluation or alerts."""
+    t0 = time.monotonic()
+    compared: dict[str, int] = {}
+    diffs = _kept_in_identity(ledger, compared) + _tally_integrity(ledger, compared)
+    diffs += _summary_checks(ledger, now, tz, list(runs), boards or {}, discovery or {}, list(tracker), compared)
     return ParityReport(diffs, compared, round(time.monotonic() - t0, 2))
 
 

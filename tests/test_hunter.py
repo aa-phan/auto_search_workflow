@@ -1395,22 +1395,29 @@ class StorageParityCommandTests(unittest.TestCase):
         self.assertRegex(text, r"\n  and [1-9]\d* more not listed\n")
         self.assertRegex(text, r"[5-9]\d counted differences")
 
-    def test_not_seeded_or_not_in_dual_mode_exits_two_with_one_line_and_writes_nothing(self) -> None:
+    def test_not_seeded_or_restored_exits_two_with_one_line_and_writes_nothing(self) -> None:
         code, text = self.command()  # nothing run yet: no `storage` key
         self.assertEqual(code, 2)
         self.assertEqual(len(text.strip().splitlines()), 1)
         self.assertIn("not seeded", text)
         self.seeded_and_checked()
-        for mode in (compact.MODE_COMPACT, compact.MODE_RESTORED):
-            with self.subTest(mode):
-                st = compact.StorageState.load(self.w.state.load_discovery_state()[compact.STORAGE_KEY])
-                st.mode = mode
-                row = next(r for r in self.sh.sheets[stm.DISCOVERY_TAB].values if r and r[0] == compact.STORAGE_KEY)
-                row[1] = st.to_json()
-                code, text = self.command()
-                self.assertEqual(code, 2)
-                self.assertEqual(len(text.strip().splitlines()), 1)
-                self.assertIn(mode, text)
+        st = compact.StorageState.load(self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+        st.mode = compact.MODE_RESTORED
+        next(r for r in self.sh.sheets[stm.DISCOVERY_TAB].values if r and r[0] == compact.STORAGE_KEY)[1] = st.to_json()
+        code, text = self.command()
+        self.assertEqual(code, 2)
+        self.assertEqual(len(text.strip().splitlines()), 1)
+        self.assertIn(compact.MODE_RESTORED, text)
+
+    def test_in_compact_mode_the_command_runs_the_integrity_check_instead_of_refusing(self) -> None:
+        self.seeded_and_checked()  # plan 03-07: after the cutover `--storage-parity` is the compact integrity check (here on a ledger that still holds every row)
+        st = compact.StorageState.load(self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+        st.mode = compact.MODE_COMPACT
+        next(r for r in self.sh.sheets[stm.DISCOVERY_TAB].values if r and r[0] == compact.STORAGE_KEY)[1] = st.to_json()
+        code, text = self.command()
+        self.assertEqual(code, 0, text)
+        self.assertIn("mode compact", text)
+        self.assertIn("0 counted differences", text)
 
     def test_the_command_needs_no_groq_key_and_is_dispatched_before_the_writer_lease(self) -> None:
         src = (Path(__file__).resolve().parent.parent / "hunter.py").read_text()

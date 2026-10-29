@@ -209,13 +209,15 @@ def degraded_reason(run: RunRecord) -> str:
 def storage_check(
     ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, repaired: str = "", *,
     runs: list[RunRecord] | None = None, boards: dict[str, BoardRecord] | None = None, discovery: dict[str, str] | None = None,
-    tracker_rows: Callable[[], list[dict[str, str]]] | None = None, tz: tzinfo = timezone.utc,
+    tracker_rows: Callable[[], list[dict[str, str]]] | None = None, tz: tzinfo = timezone.utc, mode: str = compact.MODE_DUAL,
 ) -> None:  # fmt: skip
     """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes.
 
-    Events stays authoritative in dual mode, so a difference, a raised check or a slow check can only add a note, a degraded
-    outcome and a clock reset: detection, evaluation and alerts are already done when this runs. A check that raises is the
-    counted difference `check_failed` (unknown is never zero differences). Notes and the log line carry kinds and counts only."""
+    In dual mode Events stays authoritative and the check compares it with the compact stores (`parity.check_dual`); in compact mode Events
+    holds only what a fold keeps, so the check is the integrity check `parity.check_compact` (Identity and Tally against the kept rows) and
+    no parity clock is recorded (the bar is not used after the cutover). Either way a difference, a raised check or a slow check can only add
+    a note and a degraded outcome (and, in dual mode, a clock reset): detection, evaluation and alerts are already done when this runs. A
+    check that raises is the counted difference `check_failed` (unknown is never zero differences). Notes and the log line carry kinds and counts only."""
     failed = False
     t_check = time.monotonic()
     tracker: list[dict[str, str]] = []
@@ -225,8 +227,11 @@ def storage_check(
         except Exception as exc:  # an unreadable tracker is compared as empty on both sides: it must not turn the check into a failure
             log.warning("Storage check: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
     try:
-        view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
-        report = parity.check_dual(ledger.events, view, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
+        if mode == compact.MODE_COMPACT:
+            report = parity.check_compact(ledger, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
+        else:
+            view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
+            report = parity.check_dual(ledger.events, view, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
     except Exception as exc:
         failed = True
         report = parity.ParityReport([parity.Diff(0, "check_failed", type(exc).__name__)], {}, round(time.monotonic() - t_check, 2))
@@ -234,6 +239,16 @@ def storage_check(
         run.notes += f"storage check failed: {type(exc).__name__}; "
     if report.counted and not failed:
         run.notes += f"storage parity: {report.counted} differences ({', '.join(f'{k} {n}' for k, n in report.kinds().items())}); "
+    if mode == compact.MODE_COMPACT:
+        storage.record_compact_check(
+            now, counted=report.counted, declared=report.declared, failed=failed, diffs=report.named(compact.MAX_LISTED_DIFFS),
+            compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
+        )  # fmt: skip
+        log.info(
+            "Storage: mode=compact, %d counted and %d declared differences, %d kept job keys and %d Tally runs compared, check took %.1f s%s",
+            report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), report.seconds, repaired,
+        )  # fmt: skip
+        return
     storage.record_check(
         now, counted=report.counted, declared=report.declared, admissions=run.boards_activated, failed=failed,
         diffs=report.named(compact.MAX_LISTED_DIFFS), compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
@@ -867,13 +882,13 @@ def run_cycle(d: Deps) -> RunRecord:
             log.warning("Alert cutoff after %s min: %d alerts wait for the next run (still pending, no attempt used)", minutes, run.alerts_deferred)
             run.notes += f"alert cutoff after {minutes:g} min: {run.alerts_deferred} alerts wait for the next run; "
         write()
-        # ---------------------------------------------------------------- 5. storage parity (dual mode only)
+        # ---------------------------------------------------------------- 5. storage check (dual: parity with Events; compact: integrity of Identity and Tally)
         # After the alert stage, on the start-of-run snapshot: it checks the previous runs' writes and can never delay a poll or an alert.
-        if not d.dry_run and mode == compact.MODE_DUAL and seeded_before and not decision.note:
+        if not d.dry_run and mode in (compact.MODE_DUAL, compact.MODE_COMPACT) and seeded_before and not decision.note:
             if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
                 log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)%s", STORAGE_CHECK_CUTOFF_S // 60, repair_text)
             else:
-                storage_check(ledger, now, storage, run, repair_text, runs=runs, boards=boards, discovery=discovery_state, tracker_rows=d.tracker_rows, tz=d.display_tz)
+                storage_check(ledger, now, storage, run, repair_text, runs=runs, boards=boards, discovery=discovery_state, tracker_rows=d.tracker_rows, tz=d.display_tz, mode=str(mode))
                 discovery_state[compact.STORAGE_KEY] = storage.to_json()
                 try:
                     d.state.save_discovery_state(discovery_state, lg.stamp(now))

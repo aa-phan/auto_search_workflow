@@ -740,7 +740,7 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertGreaterEqual(report.compared["tally_groups"], 8)
 
     def test_an_identity_id_removed_for_a_kept_gated_row_is_counted_identity_missing(self) -> None:
-        report = self.check(rows=self.entry_row("f2", lambda r: replace(r, ids=",".join(e for e in r.entries() if e != "f2"), count=len(r.entries()) - 1)))
+        report = self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids=",".join(e for e in r.entries() if e != "ff2"), count=len(r.entries()) - 1)))
         self.assertEqual(self.kinds(report), ["identity_missing"])
         self.assertEqual([d.ref for d in report.diffs], ["greenhouse|acme|f2"])
 
@@ -750,15 +750,15 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertEqual(report.counted, 0)
 
     def test_a_kind_letter_changed_for_a_kept_key_is_counted(self) -> None:
-        self.assertEqual(self.kinds(self.check(rows=self.entry_row("f2", lambda r: replace(r, ids=r.ids.replace("f2", "s2"))))), ["identity_kind"])
+        self.assertEqual(self.kinds(self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids.replace("ff2", "sf2"))))), ["identity_kind"])
 
     def test_the_identity_codec_invariants_are_counted_by_name(self) -> None:
         cases = {
-            "identity_count": self.entry_row("f2", lambda r: replace(r, count=r.count + 3)),
-            "identity_cell": self.entry_row("f2", lambda r: replace(r, ids=r.ids + "," + "x" * (compact.IDENTITY_CELL_CHARS + 1), count=r.count + 1)),
-            "identity_marker": self.entry_row("f2", lambda r: replace(r, baselined_at="")),
-            "identity_duplicate": self.entry_row("f2", lambda r: replace(r, ids=r.ids + ",f2", count=r.count + 1)),
-            "identity_entry": self.entry_row("f2", lambda r: replace(r, ids=r.ids + ",x9", count=r.count + 1)),  # `x` is no kind letter
+            "identity_count": self.entry_row("ff2", lambda r: replace(r, count=r.count + 3)),
+            "identity_cell": self.entry_row("ff2", lambda r: replace(r, ids=r.ids + "," + "x" * (compact.IDENTITY_CELL_CHARS + 1), count=r.count + 1)),
+            "identity_marker": self.entry_row("ff2", lambda r: replace(r, baselined_at="")),
+            "identity_duplicate": self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1)),
+            "identity_entry": self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",x9", count=r.count + 1)),  # `x` is no kind letter
         }
         for kind, rows in cases.items():
             with self.subTest(kind):
@@ -796,7 +796,7 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertEqual([d.kind for d in report.diffs if d.declared], ["unkeyable"])
 
     def test_no_difference_text_holds_a_title_or_a_url(self) -> None:
-        report = self.check(rows=self.entry_row("f2", lambda r: replace(r, ids="")), tally=self.w.tally[:2])
+        report = self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids="")), tally=self.w.tally[:2])
         text = "\n".join(d.text() for d in report.diffs)
         self.assertTrue(text)
         for forbidden in ("http", "title", "Remote"):
