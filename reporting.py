@@ -25,8 +25,9 @@ import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
-from typing import Any
+from typing import Any, Iterable
 
+import compact
 import discovery as dsc
 import eval_budget
 import freshness as fr
@@ -58,6 +59,7 @@ AGE_BUCKETS = (("le1h", "<=1h"), ("h1_12", "1-12h"), ("h12_24", "12-24h"), ("h24
 _AGE_BOUNDS_MIN = (("le1h", 60), ("h1_12", 12 * 60), ("h12_24", 24 * 60), ("h24_72", 72 * 60))  # inclusive upper bounds, consistent with the inclusive 12-hour boundary (D-17)
 DATE_FOUND_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")  # hunter.DISPLAY_FORMAT first; Sheets may re-render USER_ENTERED cells
 DEGRADED_BOARD_SHARE = 0.2  # a provider is "degraded" when this share (and at least 3) of its monitored boards failed their last poll
+FOLDED_PUBLISHED = datetime(1970, 1, 1, tzinfo=timezone.utc)  # stands for "the publication date was known" on a folded count: it only feeds `date_known`, never an age
 _BACKOFF_RE = re.compile(r"provider backoff after HTTP 429: not polled this run: ([^;]+)")
 
 
@@ -247,11 +249,13 @@ class Clean:
     excluded_rehearsal_events: int
     excluded_fixture_rows: int
     duplicate_run_records: int
+    folded: list[compact.FoldedCount] = field(default_factory=list)  # Tally counts whose Events rows are gone (D-57), rehearsal runs removed
 
 
-def clean_inputs(runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]]) -> Clean:
-    """Drop rehearsal runs (and the events they made), collapse a run's start record and finished record into one,
-    and drop tracker fixtures."""
+def clean_inputs(runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], folded: Iterable[compact.FoldedCount] = ()) -> Clean:
+    """Drop rehearsal runs (and the events and folded Tally counts they made), collapse a run's start record and finished
+    record into one, and drop tracker fixtures. A folded count stands for `n` first-observation events that no longer have an
+    Events row, so a rehearsal run's folded counts add their `n` to the excluded events; a blank run id is never a rehearsal."""
     by_id: dict[str, RunRecord] = {}
     ordered: list[RunRecord] = []
     dupes = 0
@@ -270,8 +274,15 @@ def clean_inputs(runs: list[RunRecord], events: list[lg.Event], tracker: list[di
     rehearsal = {r.run_id for r in ordered if r.run_kind == KIND_REHEARSAL and r.run_id}
     kept_runs = [r for r in ordered if r.run_kind != KIND_REHEARSAL]
     kept_events = [e for e in events if str(e.detail.get("run", "")) not in rehearsal] if rehearsal else list(events)
+    kept_folded: list[compact.FoldedCount] = []
+    folded_dropped = 0
+    for fc in folded:
+        if fc.run_id in rehearsal:
+            folded_dropped += fc.n
+        else:
+            kept_folded.append(fc)
     rows = [row for row in tracker if not _is_fixture(row)]
-    return Clean(kept_runs, kept_events, rows, len(ordered) - len(kept_runs), len(events) - len(kept_events), len(tracker) - len(rows), dupes)
+    return Clean(kept_runs, kept_events, rows, len(ordered) - len(kept_runs), len(events) - len(kept_events) + folded_dropped, len(tracker) - len(rows), dupes, kept_folded)
 
 
 def _is_fixture(row: dict[str, str]) -> bool:
@@ -279,6 +290,32 @@ def _is_fixture(row: dict[str, str]) -> bool:
 
 
 # --------------------------------------------------------------------------- the summary
+
+
+def _count_seen(c: Counter[str], f: JobFacts, n: int = 1) -> None:
+    """Add `n` first observations of a job like `f` to one day's counters: the seen-only part of the per-day block. Real jobs
+    pass n = 1; a folded Tally count passes its weight through this same code, so a figure cannot drift between storage modes (P3-10).
+    The counters that need a pending job or an evaluation stay with the per-job loop: a folded count never has either."""
+    out = f.outcome()
+    c["seen"] += n
+    c[f"out:{out}"] += n
+    c[f"ats:{f.ats}"] += n
+    if out != "baseline":
+        c["seen_new"] += n
+        c[f"src:{f.source}"] += n
+        c[f"new_ats:{f.ats}"] += n
+        c["new_date_known" if f.date_known else "new_date_unknown"] += n
+
+
+def _folded_fact(fc: compact.FoldedCount) -> JobFacts:
+    """One representative job for a folded Tally count (`fc.n` jobs of one run and dimension). Its key is synthetic and it is
+    never put in `facts` (the yield view, the Groq section, failures and the tracker join read real jobs only). It carries the
+    class recorded at first observation and nothing else: it is never pending, never evaluated, never a freshness or latency fact."""
+    dim = compact.parse_dim(fc.dim)
+    return JobFacts(
+        f"{dim['ats']}|~tally|{fc.run_id}@{fc.run_at}|{fc.dim}", ats=dim["ats"], seen_at=parse_stamp(fc.run_at), freshness=dim["freshness"],
+        disposition=dim["disposition"], source=dim["source"], pass_kind=dim["pass"], published=FOLDED_PUBLISHED if dim["date_known"] else None,
+    )  # fmt: skip
 
 
 def build_summary(
@@ -298,10 +335,13 @@ def build_summary(
     run_timeout_s: int = 25 * 60,
     min_alert_score: int = 70,
     tracker_deleted: frozenset[str] = frozenset(),
+    folded: Iterable[compact.FoldedCount] = (),
 ) -> dict[str, Any]:  # fmt: skip
     """Everything the dashboard shows, as plain data. `now` and `tz` are the only sources of time.
-    `tracker_deleted`: job keys the owner deleted from the tracker on purpose (D-55); not listed as missing."""
-    clean = clean_inputs(runs, events, tracker)
+    `tracker_deleted`: job keys the owner deleted from the tracker on purpose (D-55); not listed as missing.
+    `folded`: Tally counts whose Events rows were removed after the storage cutover (`Ledger.folded()`, D-57); counted by the
+    same seen-only code as real jobs, so the figures are the same whether those rows exist or not."""
+    clean = clean_inputs(runs, events, tracker, folded)
     facts = job_facts(clean.events)
     periods = make_periods(now, tz)
     local = lambda t: t.astimezone(tz).date()  # noqa: E731
@@ -316,18 +356,11 @@ def build_summary(
         if f.seen_at is not None:
             c = day[local(f.seen_at)]
             out = f.outcome()
-            c["seen"] += 1
-            c[f"out:{out}"] += 1
-            c[f"ats:{f.ats}"] += 1
-            if out != "baseline":
-                c["seen_new"] += 1
-                c[f"src:{f.source}"] += 1
-                c[f"new_ats:{f.ats}"] += 1
-                c["new_date_known" if f.date_known else "new_date_unknown"] += 1
-                if f.disposition == lg.PENDING:  # passed the cheap gates and is not stale: the jobs freshness is judged on
-                    c["rel"] += 1
-                    c[f"rel:{f.freshness}"] += 1
-                    c["rel_date_known" if f.date_known else "rel_date_unknown"] += 1
+            _count_seen(c, f)
+            if out != "baseline" and f.disposition == lg.PENDING:  # passed the cheap gates and is not stale: the jobs freshness is judged on
+                c["rel"] += 1
+                c[f"rel:{f.freshness}"] += 1
+                c["rel_date_known" if f.date_known else "rel_date_unknown"] += 1
             if out in ("kept", "score"):
                 c["eligible"] += 1
             if out == "kept":
@@ -373,6 +406,9 @@ def build_summary(
             t = f.error_last.get(stage, (None, ""))[0]
             if t:
                 day[local(t)][f"errors:{stage}"] += n
+    for fc in clean.folded:  # observations whose Events rows are gone: each (run, dimension) once, with its weight
+        if (fact := _folded_fact(fc)).seen_at is not None:
+            _count_seen(day[local(fact.seen_at)], fact, fc.n)
     expected_from = parse_stamp(finished[0].run_at) if finished else None
     gaps_by_day: dict[date, list[int]] = defaultdict(list)
     for r in clean.runs:
@@ -474,14 +510,14 @@ def build_summary(
         })  # fmt: skip
 
     checks = _checks(per_period, facts, clean, periods)
-    newest_event = max((t for e in clean.events if (t := parse_stamp(e.time))), default=None)
+    newest_event = max((t for t in (*(parse_stamp(e.time) for e in clean.events), *(parse_stamp(fc.run_at) for fc in clean.folded)) if t), default=None)
     newest_run = max((t for r in clean.runs if (t := parse_stamp(r.run_at))), default=None)
     summary = {
         "generated_at": _stamp(now), "timezone": str(tz), "default_view": "7d", "fresh_window_hours": fresh_window.total_seconds() / 3600,
         "source_freshness": {
             "latest_run_record": _stamp(newest_run), "latest_ledger_event": _stamp(newest_event),
             "latest_run_age_hours": _hours(now, newest_run) if newest_run else None,
-            "tracker_rows_read": len(clean.tracker), "boards_read": len(boards), "ledger_events_read": len(clean.events), "run_records_read": len(clean.runs),
+            "tracker_rows_read": len(clean.tracker), "boards_read": len(boards), "ledger_events_read": len(clean.events) + sum(fc.n for fc in clean.folded), "run_records_read": len(clean.runs),
         },
         "exclusions": {
             "rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events,

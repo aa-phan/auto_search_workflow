@@ -11,7 +11,9 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -20,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import boards as bd  # noqa: E402
+import compact  # noqa: E402
 import dashboard as db  # noqa: E402
 import discovery as dsc  # noqa: E402
 import eligibility as el  # noqa: E402
@@ -1072,6 +1075,215 @@ class _World:
                 raise RuntimeError("Sheets quota exceeded")
 
         self.refresh_ok = db.refresh(Store(), settings())  # exactly what hunter.main does after run_cycle
+
+
+# --------------------------------------------------------------------------- compact storage: the merged view gives the same figures (D-57, P3-10, P3-11)
+
+
+@dataclass
+class World:
+    """A consistent dual-write world: every Events row, plus the Identity entries and Tally rows that `split_observations` wrote
+    for each run (the stored side never comes from the code under test)."""
+
+    events: list[lg.Event]
+    runs: list[st_mod.RunRecord]
+    identity: compact.IdentitySet
+    tally: list[compact.TallyRow]
+    rehearsal_run: str
+    wave_run: str
+
+    def compact_view(self, now: datetime) -> compact.Ledger:
+        """What a compact store holds: no baseline rows, no gated or stale rows older than 7 days (the parity check's simulation)."""
+        return compact.Ledger(compact.simulate_compact(self.events, now), [], self.identity, self.tally)
+
+    def half_folded_view(self) -> compact.Ledger:
+        """Every other baseline row of the admission wave removed, everything else kept: the run is partly folded."""
+        wave = [e for e in self.events if e.event == lg.SEEN and e.detail.get("run") == self.wave_run and e.disposition == lg.BASELINED]
+        gone = {id(e) for e in wave[::2]}
+        return compact.Ledger([e for e in self.events if id(e) not in gone], [], self.identity, self.tally)
+
+
+def compact_world(tz: Any, now: datetime) -> World:
+    """35 local days of ledger ending at `now` (a few minutes after local midnight): rows without run ids, an admission wave split
+    across local midnight, a re-entry pass, daily gated and stale rows with dated and undated postings from poll and search,
+    pending / kept / alerted / abandoned jobs, a rehearsal run with its own identity rows, runs at exactly local midnight."""
+    today = now.astimezone(tz).date()
+    midnight = lambda d: datetime.combine(d, dtime(0), tzinfo=tz).astimezone(UTC)  # noqa: E731
+    day = lambda n: today - timedelta(days=n)  # noqa: E731
+    events: list[lg.Event] = []
+    runs: list[st_mod.RunRecord] = []
+
+    def new_run(at: datetime, kind: str = "production") -> str:
+        run_id = f"r-{stamp(at)}"
+        runs.append(run_rec(at, run_id=run_id, run_kind=kind))
+        return run_id
+
+    def baseline(prefix: str, count: int, at: datetime, run: str, *, dated: int = 0, pass_kind: str = "baseline", source: str = "poll") -> None:
+        for i in range(count):
+            pub = at - timedelta(days=40 + i) if i < dated else None
+            events.append(seen(f"{prefix}{i}", at, fresh=fr.BASELINE, disp=lg.BASELINED, pub=pub, source=source, pass_kind=pass_kind, run=run))
+
+    baseline("greenhouse|oldco|L", 25, midnight(day(34)) + timedelta(hours=1), "", dated=5)  # before run ids existed
+    for i in range(5):
+        events.append(seen(f"greenhouse|oldco|F{i}", midnight(day(33)) + timedelta(hours=2), fresh=fr.RECENT, disp=lg.FILTERED, source="serper"))
+    early = midnight(day(20)) - timedelta(seconds=1)  # the last second of the previous local day
+    baseline("lever|zeta|E", 6, early, new_run(early))
+    wave_at = midnight(day(20))  # exactly local midnight: the new day
+    wave_run = new_run(wave_at)
+    baseline("greenhouse|newco|W", 60, wave_at, wave_run, dated=30)
+    baseline("ashby|newco2|X", 20, wave_at, wave_run)
+    re_at = midnight(day(10)) + timedelta(hours=3)
+    baseline("ashby|reco|R", 12, re_at, new_run(re_at), pass_kind="reentry")
+    for n in range(30, -1, -1):
+        offsets = [timedelta(0), timedelta(minutes=2), timedelta(minutes=4), timedelta(minutes=6)] if n == 0 else [timedelta(0), timedelta(minutes=30), timedelta(hours=12), timedelta(hours=24, seconds=-1)]
+        for r, off in enumerate(offsets):
+            at = midnight(day(n)) + off
+            run = new_run(at)
+            for i in range(8):
+                events.append(seen(f"greenhouse|acme|f{n}-{r}-{i}", at, fresh=(fr.RECENT, fr.UNCERTAIN)[i % 2], disp=lg.FILTERED, pub=at - timedelta(days=3) if i % 2 == 0 else None,
+                                   source=("poll", "serper", "search")[i % 3], run=run))
+            for i in range(3):
+                events.append(seen(f"lever|beta|s{n}-{r}-{i}", at, fresh=fr.STALE, disp=lg.STALED, pub=at - timedelta(days=40), run=run))
+            fresh_key, new_key = f"greenhouse|acme|p{n}-{r}-0", f"greenhouse|acme|p{n}-{r}-1"
+            events.append(seen(fresh_key, at, pub=at - timedelta(hours=1), run=run))
+            events.append(seen(new_key, at, fresh=fr.OBSERVED_NEW, source="search", run=run))
+            if n > 0:
+                events.append(evaluated(fresh_key, at + timedelta(seconds=30), run=run))
+                events.append(alerted(fresh_key, at + timedelta(seconds=40)))
+                events.append(evaluated(new_key, at + timedelta(seconds=31), reject="location" if n % 2 == 0 else "", visible=n % 2 == 1, alert=False, run=run))
+            if n == 5 and r == 1:
+                events.append(lg.Event(stamp(at + timedelta(minutes=1)), new_key, lg.ABANDONED, detail={"stage": lg.STAGE_EVALUATE, "run": run}))
+            if n == 3 and r == 0:
+                events.append(errored(fresh_key, at + timedelta(minutes=2)))
+    rehearsal_at = midnight(day(5)) + timedelta(hours=2)
+    rehearsal = new_run(rehearsal_at, st_mod.KIND_REHEARSAL)
+    baseline("greenhouse|rehco|H", 10, rehearsal_at, rehearsal)
+    for i in range(4):
+        events.append(seen(f"greenhouse|acme|rf{i}", rehearsal_at, fresh=fr.RECENT, disp=lg.FILTERED, run=rehearsal))
+    for i in range(2):
+        events.append(seen(f"greenhouse|acme|rp{i}", rehearsal_at, pub=rehearsal_at - timedelta(hours=1), run=rehearsal))
+        events.append(evaluated(f"greenhouse|acme|rp{i}", rehearsal_at + timedelta(seconds=20), run=rehearsal))
+    events.sort(key=lambda e: e.time)
+    groups: dict[tuple[str, str], list[lg.Event]] = defaultdict(list)
+    for ev in events:
+        groups[(str(ev.detail.get("run") or ""), ev.time)].append(ev)
+    identity = compact.IdentitySet()
+    tally: list[compact.TallyRow] = []
+    for (run_id, run_at), group in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        split = compact.split_observations(group, compact.MODE_DUAL)
+        identity.apply(identity.plan_additions(split.identity, "2026-10-01T00:00:00Z"))
+        if split.tally:
+            tally.append(compact.TallyRow(run_id, run_at, sum(split.tally.values()), dict(sorted(split.tally.items()))))
+    have = {(t.run_id, t.run_at) for t in tally}
+    tally += [compact.TallyRow(r.run_id, r.run_at, 0, {}) for r in runs if (r.run_id, r.run_at) not in have]  # a run with nothing identity-only still writes its zero row
+    return World(events, runs, identity, tally, rehearsal, wave_run)
+
+
+ZONES = ((UTC, datetime(2026, 10, 29, 0, 7, tzinfo=UTC)), (CHI, datetime(2026, 10, 29, 5, 7, tzinfo=UTC)))  # both `now`s are 00:07 local on 29 October
+
+
+class CompactParityTests(unittest.TestCase):
+    """P3-10: every figure from Identity + Tally + the kept Events rows equals the figure from all Events rows."""
+
+    def both(self, tz: Any, now: datetime, world: World, view: compact.Ledger) -> tuple[dict[str, Any], dict[str, Any]]:
+        old = rp.build_summary(now=now, tz=tz, runs=world.runs, events=world.events, boards={}, discovery={}, tracker=[])
+        new = rp.build_summary(now=now, tz=tz, runs=world.runs, events=view.events, boards={}, discovery={}, tracker=[], folded=view.folded())
+        return old, new
+
+    def test_the_simulated_compact_view_gives_the_same_summary_in_both_time_zones(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                view = world.compact_view(now)
+                self.assertLess(len(view.events), len(world.events) - 150)  # the view really dropped rows (baselines and old gated rows)
+                self.assertGreater(sum(fc.n for fc in view.folded()), 150)
+                old, new = self.both(tz, now, world, view)
+                self.assertEqual(old, new)
+                self.assertEqual((old["checks"], new["checks"]), ([], []))
+
+    def test_a_half_folded_view_counts_each_job_once(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                view = world.half_folded_view()
+                self.assertEqual(sum(fc.n for fc in view.folded()), 40)  # half of the wave's 80 baselines: Tally minus the rows still present
+                old, new = self.both(tz, now, world, view)
+                self.assertEqual(old, new)
+                self.assertEqual((old["checks"], new["checks"]), ([], []))
+
+    def test_the_rendered_dashboard_has_the_same_values(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                old, new = self.both(tz, now, world, world.compact_view(now))
+                self.assertEqual(db.render(old).values(), db.render(new).values())
+
+    def test_freshness_denominators_count_dated_and_undated_folded_postings(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                old, new = self.both(tz, now, world, world.compact_view(now))
+                for period in ("today", "7d", "30d"):
+                    f_old, f_new = old["periods"][period]["freshness"], new["periods"][period]["freshness"]
+                    self.assertEqual((f_new["new_postings_date_known"], f_new["new_postings_date_unknown"]), (f_old["new_postings_date_known"], f_old["new_postings_date_unknown"]))
+                f30 = new["periods"]["30d"]["freshness"]
+                self.assertGreater(f30["new_postings_date_known"], 0)
+                self.assertGreater(f30["new_postings_date_unknown"], 0)
+
+    def test_rehearsal_runs_are_excluded_and_counted_from_either_side(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                view = world.compact_view(now)
+                old, new = self.both(tz, now, world, view)
+                self.assertEqual(old["exclusions"], new["exclusions"])
+                self.assertEqual(new["exclusions"]["rehearsal_runs"], 1)
+                self.assertEqual(new["exclusions"]["events_from_rehearsal_runs"], 10 + 4 + 2 + 2)  # its baselines and gated rows are folded counts now
+                self.assertTrue(any(fc.run_id == world.rehearsal_run for fc in view.folded()))
+                self.assertEqual(old["source_freshness"], new["source_freshness"])
+
+    def test_rows_from_before_run_ids_are_kept_unattributed(self) -> None:
+        for tz, now in ZONES:
+            with self.subTest(tz=str(tz)):
+                world = compact_world(tz, now)
+                view = world.compact_view(now)
+                blank = [fc for fc in view.folded() if fc.run_id == ""]
+                self.assertEqual(sum(fc.n for fc in blank), 25 + 5)  # kept as counts, never dropped as a rehearsal
+                old, new = self.both(tz, now, world, view)
+                self.assertEqual(old["source_freshness"]["ledger_events_read"], new["source_freshness"]["ledger_events_read"])
+                self.assertEqual(old["trend"], new["trend"])
+
+    def test_a_day_with_only_tally_contributions_is_recorded_in_the_trend(self) -> None:
+        tz, now = UTC, datetime(2026, 10, 29, 0, 7, tzinfo=UTC)
+        at = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
+        events = [seen(f"greenhouse|solo|{i}", at, fresh=fr.BASELINE, disp=lg.BASELINED, pass_kind="baseline", run="solo") for i in range(7)]
+        split = compact.split_observations(events, compact.MODE_COMPACT)
+        self.assertEqual(split.events, [])  # in compact mode the baselines have no Events row at all
+        ledger = compact.Ledger([], [], compact.IdentitySet(), [compact.TallyRow("solo", stamp(at), 7, dict(split.tally))])
+        old = rp.build_summary(now=now, tz=tz, runs=[], events=events, boards={}, discovery={}, tracker=[])
+        new = rp.build_summary(now=now, tz=tz, runs=[], events=ledger.events, boards={}, discovery={}, tracker=[], folded=ledger.folded())
+        day = next(t for t in new["trend"] if t["date"] == "2026-10-20")
+        self.assertEqual((day["recorded"], day["baselined"]), (True, 7))
+        self.assertEqual(old, new)
+
+    def test_a_folded_count_goes_through_the_same_counting_code_as_real_jobs(self) -> None:
+        at = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+        real = [seen(f"lever|co|{i}", at, fresh=fr.RECENT, disp=lg.FILTERED, pub=at - timedelta(days=2), source="search", run="x") for i in range(5)]
+        dim = compact.tally_dim(real[0])
+        old = rp.build_summary(now=T0 + timedelta(days=14), tz=UTC, runs=[], events=real, boards={}, discovery={}, tracker=[])
+        new = rp.build_summary(now=T0 + timedelta(days=14), tz=UTC, runs=[], events=[], boards={}, discovery={}, tracker=[], folded=[compact.FoldedCount("x", stamp(at), dim, 5)])
+        self.assertEqual(old["periods"], new["periods"])
+        self.assertEqual(new["periods"]["30d"]["results"]["new_postings"], 5)
+
+    def test_a_folded_count_is_never_a_freshness_latency_or_alert_fact(self) -> None:
+        at = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+        damaged = "greenhouse|poll|pending||verified_fresh|k"  # a hand-edited Tally key that claims a relevant, verified-fresh, dated job
+        sm = rp.build_summary(now=at + timedelta(days=1), tz=UTC, runs=[], events=[], boards={}, discovery={}, tracker=[], folded=[compact.FoldedCount("x", stamp(at), damaged, 3)])
+        p = sm["periods"]["30d"]
+        self.assertEqual((p["freshness"]["verified_fresh"], p["freshness"]["cohort_jobs"], p["results"]["verified_fresh_matches"], p["results"]["alerts_delivered"]), (0, 0, 0, 0))
+        self.assertEqual((p["latency_sample"]["relevant_new_postings_detected"], p["latency_min"]["publication_to_detection"]["n"]), (0, 0))
+        self.assertEqual(p["outcomes"]["pending"], 3)  # shown as waiting work, never as a result
+        self.assertEqual(sm["failures"]["pending_evaluation"]["jobs"], 0)  # and never as a job the pipeline could evaluate
 
 
 if __name__ == "__main__":

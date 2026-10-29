@@ -575,14 +575,15 @@ def publish_csv(directory: Path, grid: Grid) -> Path:
 
 
 def build(store: Any, settings: Any, *, now: datetime | None = None, tz: tzinfo | None = None, run_timeout_s: int = 25 * 60) -> dict[str, Any]:
-    """Load the state with batch reads (one `get_all_values` per tab) and build the summary."""
+    """Load the state with batch reads (one `get_all_values` per tab) and build the summary from the merged ledger view."""
     from datetime import timedelta
 
     state = store.state
     now = now or datetime.now(timezone.utc)
     policy = settings.pool_policy
+    ledger = state.load_ledger()  # the merged view (D-57): Events rows plus Identity and Tally; `folded()` is empty while Events holds every row
     return rp.build_summary(
-        now=now, tz=tz or getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), events=state.load_events(), boards=state.load_boards(),
+        now=now, tz=tz or getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), events=ledger.events, folded=ledger.folded(), boards=state.load_boards(),
         discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
         search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits,
         established_target=policy.established_target, exploration_target=policy.exploration_target, run_timeout_s=run_timeout_s, min_alert_score=settings.min_score,
