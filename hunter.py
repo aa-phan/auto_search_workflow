@@ -1961,13 +1961,22 @@ def run_pilot_report(store: Any, settings: Settings, days: int) -> int:
     """Read-only pilot measurements from the state the system keeps (see pilot.py)."""
     now = fr.utcnow()
     state = store.state
+    ledger = state.load_ledger()  # the merged view (D-57): Events rows plus Identity and Tally; `folded()` is empty while Events holds every row
     rep = pilot.build_report(
-        now=now, days=days, runs=state.load_runs(), events=state.load_events(), boards=state.load_boards(),
+        now=now, days=days, runs=state.load_runs(), events=ledger.events, folded=ledger.folded(), boards=state.load_boards(),
         discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
         search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits, max_active=settings.max_active_boards,
         tracker_deleted=frozenset(settings.tracker_deleted_keys),
     )  # fmt: skip
     print(pilot.format_report(rep))
+    return 0
+
+
+def run_storage_report(store: Any) -> int:
+    """`--storage-report`: what the ledger is made of, read only. It loads the merged view (D-57), so the logical counts also cover Identity and Tally."""
+    state = store.state
+    ledger = state.load_ledger()
+    print(storage_report.format_report(storage_report.analyze(ledger.events, state.load_boards(), state.load_runs(), fr.utcnow(), ledger=ledger)))
     return 0
 
 
@@ -2077,9 +2086,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.pilot_report is not None:
         return run_pilot_report(store, settings, max(1, args.pilot_report))
     if args.storage_report:
-        state = store.state
-        print(storage_report.format_report(storage_report.analyze(state.load_events(), state.load_boards(), state.load_runs(), fr.utcnow())))
-        return 0
+        return run_storage_report(store)
     if args.dashboard:
         return run_dashboard(cfg, store, settings, dry_run=args.dry_run)
     if args.rebalance_report:

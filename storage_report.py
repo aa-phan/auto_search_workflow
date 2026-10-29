@@ -12,8 +12,9 @@ import math
 import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
+import compact
 import freshness as fr
 import ledger as lg
 from boards import MONITORED, STATUS_VALIDATED, BoardRecord, admission_order
@@ -22,7 +23,7 @@ from state import RunRecord
 EVENT_COLUMNS = 7
 SHEET_CELL_LIMIT = 10_000_000
 CELL_CHAR_LIMIT = 50_000
-COMPACT_CELL_CHARS = 40_000  # leave headroom under the 50,000-character cell limit
+COMPACT_CELL_CHARS = compact.IDENTITY_CELL_CHARS  # one Identity cell (headroom under the 50,000-character cell limit); defined once, in compact
 COMPACT_COLUMNS = 5  # Board_Key, Chunk, Baselined_At, Count, IDs
 
 
@@ -43,16 +44,78 @@ def classify(ev: lg.Event) -> str:
     identity    a `seen` row for a job that is never evaluated (title gate, stale): identity for dedupe only
     operational a `seen` row for a job that enters the pipeline, and every evaluated / alerted / error / abandoned /
                 updated / republished row: needed for retries, alerts and reporting"""
-    if ev.event == lg.SEEN:
-        if ev.disposition == lg.BASELINED:
-            return "baseline"
-        if ev.disposition in (lg.FILTERED, lg.STALED):
-            return "identity"
-        return "operational"
-    return "operational"
+    disposition = compact.identity_class(ev)  # the one definition of identity-class (D-57)
+    if disposition == lg.BASELINED:
+        return "baseline"
+    return "identity" if disposition else "operational"
 
 
-def analyze(events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[RunRecord], now: datetime, *, extra_boards: tuple[int, ...] = (200,)) -> dict[str, Any]:
+_PURPOSE_OF_DISPOSITION = {lg.BASELINED: "baseline", lg.FILTERED: "identity", lg.STALED: "identity"}
+_NEVER = datetime(1970, 1, 1, tzinfo=timezone.utc)  # `needs_alert` takes a clock it does not read
+
+
+def _stem(key: str) -> str:
+    return "|".join(key.split("|", 2)[:2])
+
+
+def logical_counts(events: list[lg.Event], *, folded: Iterable[compact.FoldedCount] = (), identity: compact.IdentitySet | None = None) -> dict[str, Any]:
+    """The counts that must not depend on where the identity-only observations are stored (P3-10), one job once: first-seen jobs
+    by purpose, by disposition and per UTC day of first observation by purpose; the boards with baselines and the baseline jobs
+    per board (`ats|board`); and the jobs that must be preserved (awaiting evaluation or alert). Physical figures (rows,
+    characters, cells, load time) are not logical and are reported, never compared.
+
+    Events rows count each key once, at its first `seen` row (a duplicate row changes nothing). `folded` adds the Tally counts whose
+    Events rows are gone, by their recorded disposition and the UTC day of the run. With `identity`, a board's baseline jobs are the
+    `b` entries of its Identity set plus the baseline rows in Events that Identity does not hold (an unkeyable key); without it they
+    are the Events baseline rows."""
+    first: dict[str, lg.Event] = {}
+    for ev in events:
+        if ev.event == lg.SEEN and ev.key not in first:
+            first[ev.key] = ev
+    purpose: Counter[str] = Counter()
+    disposition: Counter[str] = Counter()
+    per_day: dict[str, Counter[str]] = defaultdict(Counter)
+    baseline_by_board: Counter[str] = Counter()
+    held = identity.keys() if identity is not None else set()
+    for ev in first.values():
+        kind = classify(ev)
+        purpose[kind] += 1
+        disposition[ev.disposition] += 1
+        if t := _stamp(ev.time):
+            per_day[t.strftime("%Y-%m-%d")][kind] += 1
+        if kind == "baseline" and ev.key not in held:
+            baseline_by_board[_stem(ev.key)] += 1
+    for fc in folded:
+        dim = compact.parse_dim(fc.dim)
+        kind = _PURPOSE_OF_DISPOSITION.get(dim["disposition"], "operational")
+        purpose[kind] += fc.n
+        disposition[dim["disposition"]] += fc.n
+        if t := _stamp(fc.run_at):
+            per_day[t.strftime("%Y-%m-%d")][kind] += fc.n
+    if identity is not None:  # a Tally count has no board: the baselines per board come from Identity
+        for stem in identity.stems():
+            kinds: dict[str, str] = {}
+            for row in identity.rows(stem):
+                for entry in row.entries():
+                    letter, pid = compact.decode_entry(entry)
+                    kinds.setdefault(pid, letter)  # the first entry for an ID wins, as in IdentitySet
+            if n := sum(1 for letter in kinds.values() if letter == compact.KIND_OF[lg.BASELINED]):
+                baseline_by_board[stem] += n
+    pending = sum(1 for s in lg.replay(events).values() if lg.needs_evaluation(s) or lg.needs_alert(s, _NEVER))
+    return {
+        "jobs_by_purpose": {k: purpose[k] for k in ("baseline", "identity", "operational")},
+        "jobs_by_disposition": dict(sorted(disposition.items())),
+        "jobs_per_day_by_purpose": {day: {k: c[k] for k in ("baseline", "identity", "operational")} for day, c in sorted(per_day.items())},
+        "boards_with_baselines": len(baseline_by_board), "baseline_jobs_per_board": dict(sorted(baseline_by_board.items())),
+        "must_be_preserved": pending,
+    }  # fmt: skip
+
+
+def analyze(
+    events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[RunRecord], now: datetime, *, extra_boards: tuple[int, ...] = (200,), ledger: compact.Ledger | None = None
+) -> dict[str, Any]:  # fmt: skip
+    """`events` are the Events rows (the physical figures read them). With `ledger` (the merged view: Events rows plus Identity and Tally)
+    the report also carries `logical`, the counts that do not depend on where an observation is stored."""
     kinds: Counter[str] = Counter()
     chars: Counter[str] = Counter()
     by_type: Counter[str] = Counter()
@@ -163,6 +226,7 @@ def analyze(events: list[lg.Event], boards: dict[str, BoardRecord], runs: list[R
         "load_seconds_per_100k_ledger_rows": slope, "load_seconds_by_ledger_size": load_by_size,
         "projection": projection,
         "ledger_rows_logged_in_runs": (runs[0].events_rows, runs[-1].events_rows) if runs else None,
+        **({"logical": logical_counts(ledger.events, folded=ledger.folded(), identity=ledger.identity)} if ledger is not None else {}),
     }  # fmt: skip
 
 
@@ -197,6 +261,15 @@ def format_report(a: dict[str, Any]) -> str:
         f"COMPACT BASELINE (one row per board per {COMPACT_CELL_CHARS:,}-character chunk of posting IDs): {c['rows_if_one_row_per_board_chunk']:,} rows = {c['cells']:,} cells for today's baselines "
         f"(saves {c['cells_saved_vs_now']:,} cells); the largest single board needs {c['max_ids_chars_for_one_board']:,} characters of IDs (cell limit {CELL_CHAR_LIMIT:,})",
         f"MUST BE PRESERVED: {a['pending_must_be_preserved']} jobs currently awaiting evaluation or alert delivery",
+    ]
+    if "logical" in a:
+        g = a["logical"]
+        p_ = g["jobs_by_purpose"]
+        L.append(
+            f"JOBS RECORDED (Events rows plus Identity and Tally): {sum(p_.values()):,} first-seen jobs = {p_['baseline']:,} baseline + {p_['identity']:,} title-gated or stale + {p_['operational']:,} operational; "
+            f"baselines on {g['boards_with_baselines']:,} boards; {g['must_be_preserved']:,} jobs awaiting evaluation or alert"
+        )
+    L += [
         "LOAD TIME (Runs.Load_S, whole seconds, includes the ~22k-row Boards registry): " + (
             "; ".join(f"{k}: {v['median_load_s']} s at {v['ledger_rows']} rows ({v['runs']} runs)" for k, v in a["load_seconds_by_ledger_size"].items()) or "not enough runs with ledger sizes")
         + (f"; fitted slope {a['load_seconds_per_100k_ledger_rows']} s per 100,000 rows" if a["load_seconds_per_100k_ledger_rows"] is not None else "; no per-row slope is measurable yet"),

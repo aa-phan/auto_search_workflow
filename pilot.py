@@ -12,8 +12,9 @@ import re
 import statistics
 from collections import Counter as Counter_
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
+import compact
 import freshness as fr
 import ledger as lg
 import reporting as rp
@@ -85,7 +86,9 @@ def build_report(
     max_active: int = 500,
     run_timeout_s: int = 25 * 60,
     tracker_deleted: frozenset[str] = frozenset(),
+    folded: Iterable[compact.FoldedCount] = (),
 ) -> dict[str, Any]:  # fmt: skip
+    """`folded`: Tally counts whose Events rows are gone (D-57); only the reconciliation reads them (every other figure here reads pending jobs and operational rows)."""
     raw_runs, raw_events, raw_tracker = runs, events, tracker  # the reconciliation cleans its own copy with the same rules
     clean = rp.clean_inputs(runs, events, tracker)  # drops rehearsal runs, their events and tracker fixtures; merges a run's start and finished records
     runs, events, tracker = clean.runs, clean.events, clean.tracker
@@ -334,7 +337,7 @@ def build_report(
             versions[-1]["last_run_at"], versions[-1]["runs"] = r.run_at, versions[-1]["runs"] + 1
         else:
             versions.append({"version": tag, "first_run_at": r.run_at, "last_run_at": r.run_at, "runs": 1})
-    reconciliation = rp.reconcile(runs=raw_runs, events=raw_events, tracker=raw_tracker, start=start, end=now, tracker_deleted=tracker_deleted)
+    reconciliation = rp.reconcile(runs=raw_runs, events=raw_events, tracker=raw_tracker, start=start, end=now, tracker_deleted=tracker_deleted, folded=folded)
     return {
         "detection_sample": detection_sample, "code_versions": versions, "reconciliation": reconciliation,
         "revalidation": revalidation,

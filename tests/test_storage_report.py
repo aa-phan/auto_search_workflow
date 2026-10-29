@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import boards as bd  # noqa: E402
 import compact  # noqa: E402
 import freshness as fr  # noqa: E402
+import hunter  # noqa: E402
 import ledger as lg  # noqa: E402
 import pilot  # noqa: E402
 import reporting as rp  # noqa: E402
@@ -245,6 +249,41 @@ class ReconcileParityTests(unittest.TestCase):
                 self.assertEqual(old["reconciliation"], new["reconciliation"])
                 self.assertEqual(old["detection_sample"], new["detection_sample"])  # latency samples read pending jobs only: unchanged
                 self.assertEqual(old, new)
+
+
+class CommandsReadTheMergedViewTests(unittest.TestCase):
+    """`--pilot-report` and `--storage-report` load the merged ledger (Events plus Identity and Tally); only the rebalance report keeps reading pending jobs."""
+
+    def store(self, ledger: compact.Ledger, runs: list) -> types.SimpleNamespace:
+        state = types.SimpleNamespace(load_ledger=lambda: ledger, load_runs=lambda: runs, load_boards=lambda: {}, load_discovery_state=lambda: {})
+        return types.SimpleNamespace(state=state, tracker_rows=lambda: [])
+
+    def run_command(self, name: str, ledger: compact.Ledger, world, now: datetime) -> str:
+        settings = types.SimpleNamespace(fresh_window_hours=12, search_monthly_credits=1000, search_reserve_credits=200, max_active_boards=500, tracker_deleted_keys=())
+        out = io.StringIO()
+        with mock.patch.object(hunter.fr, "utcnow", return_value=now), contextlib.redirect_stdout(out):
+            if name == "pilot":
+                self.assertEqual(hunter.run_pilot_report(self.store(ledger, world.runs), settings, 7), 0)
+            else:
+                self.assertEqual(hunter.run_storage_report(self.store(ledger, world.runs)), 0)
+        return out.getvalue()
+
+    def test_the_pilot_report_prints_the_same_funnel_from_either_storage_mode(self) -> None:
+        now = ZONES[0][1]
+        world = compact_world(UTC, now)
+        everything = compact.Ledger(world.events, [], compact.IdentitySet(), [])
+        text_old = self.run_command("pilot", everything, world, now)
+        text_new = self.run_command("pilot", world.compact_view(now), world, now)
+        self.assertIn("JOBS FIRST OBSERVED IN THE WINDOW", text_new)
+        self.assertEqual(text_old, text_new)
+
+    def test_the_storage_report_prints_one_logical_line_that_does_not_depend_on_the_mode(self) -> None:
+        now = ZONES[0][1]
+        world = compact_world(UTC, now)
+        full = compact.Ledger(world.events, [], world.identity, world.tally)  # dual mode: every row is still in Events, so nothing is folded
+        self.assertEqual(full.folded(), [])
+        lines = [next(line for line in self.run_command("storage", ledger, world, now).splitlines() if line.startswith("JOBS RECORDED")) for ledger in (full, world.compact_view(now))]
+        self.assertEqual(lines[0], lines[1])
 
 
 if __name__ == "__main__":

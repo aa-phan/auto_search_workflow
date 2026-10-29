@@ -1075,19 +1075,28 @@ def format_text(s: dict[str, Any]) -> str:
 
 
 def reconcile(
-    *, runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], start: datetime, end: datetime, tracker_deleted: frozenset[str] = frozenset()
-) -> dict[str, Any]:
+    *, runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], start: datetime, end: datetime, tracker_deleted: frozenset[str] = frozenset(),
+    folded: Iterable[compact.FoldedCount] = (),
+) -> dict[str, Any]:  # fmt: skip
     """Name every population behind the headline counts (jobs kept, verified-fresh matches, alerts, tracker rows) for ONE
     explicit window [start, end], so unrelated counts are never forced into a funnel. Same cleaning (rehearsal runs,
     their events, tracker fixtures) and the same per-job facts as the dashboard; only the window differs (the
-    dashboard uses calendar days in the display time zone, this uses exact timestamps)."""
+    dashboard uses calendar days in the display time zone, this uses exact timestamps).
+    `folded`: Tally counts whose Events rows are gone (`Ledger.folded()`, D-57). Each one inside the window by its run time adds
+    its count to the first-observed cohort and to its outcome (baseline, stale or title-gated); it never reaches `facts`."""
     from boards import parse_job_url
 
-    clean = clean_inputs(runs, events, tracker)
+    clean = clean_inputs(runs, events, tracker, folded)
     facts = job_facts(clean.events)
     inside = lambda t: t is not None and start <= t <= end  # noqa: E731
     seen = [f for f in facts.values() if inside(f.seen_at)]
     out = Counter(f.outcome() for f in seen)
+    folded_in = 0
+    for fc in clean.folded:
+        if inside((fact := _folded_fact(fc)).seen_at):
+            out[fact.outcome()] += fc.n
+            folded_in += fc.n
+    first_observed = len(seen) + folded_in
     kept = [f for f in seen if f.outcome() == "kept"]
     scored = [f for f in seen if f.outcome() in ("kept", "score")]
     fresh = lambda f: f.freshness == fr.VERIFIED_FRESH  # noqa: E731
@@ -1135,7 +1144,7 @@ def reconcile(
         "window": {"from": _stamp(start), "to": _stamp(end), "hours": round((end - start).total_seconds() / 3600, 1)},
         "excluded": {"rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events, "tracker_fixture_rows": clean.excluded_fixture_rows},
         "jobs_first_observed": {  # one cohort: each job once, by the time of its first observation
-            "total": len(seen), "baseline_existing_postings": out["baseline"], "new_postings": len(seen) - out["baseline"],
+            "total": first_observed, "baseline_existing_postings": out["baseline"], "new_postings": first_observed - out["baseline"],
             "stopped_by_title_gate": out["title"], "stale_at_observation": out["age"],
             "relevant_pending_or_evaluated": sum(1 for f in seen if f.disposition == lg.PENDING),
             "awaiting_evaluation": out["pending"], "abandoned": out["abandoned"],
