@@ -84,6 +84,7 @@ def build_report(
     search_reserve: int,
     max_active: int = 500,
     run_timeout_s: int = 25 * 60,
+    tracker_deleted: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:  # fmt: skip
     raw_runs, raw_events, raw_tracker = runs, events, tracker  # the reconciliation cleans its own copy with the same rules
     clean = rp.clean_inputs(runs, events, tracker)  # drops rehearsal runs, their events and tracker fixtures; merges a run's start and finished records
@@ -333,7 +334,7 @@ def build_report(
             versions[-1]["last_run_at"], versions[-1]["runs"] = r.run_at, versions[-1]["runs"] + 1
         else:
             versions.append({"version": tag, "first_run_at": r.run_at, "last_run_at": r.run_at, "runs": 1})
-    reconciliation = rp.reconcile(runs=raw_runs, events=raw_events, tracker=raw_tracker, start=start, end=now)
+    reconciliation = rp.reconcile(runs=raw_runs, events=raw_events, tracker=raw_tracker, start=start, end=now, tracker_deleted=tracker_deleted)
     return {
         "detection_sample": detection_sample, "code_versions": versions, "reconciliation": reconciliation,
         "revalidation": revalidation,

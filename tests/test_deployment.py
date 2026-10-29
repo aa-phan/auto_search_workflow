@@ -254,6 +254,21 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn("trigger_source:", text)
         self.assertIn("TRIGGER_SOURCE: ${{ inputs.trigger_source }}", text)
 
+    def test_governor_cutoffs_reach_the_program_only_from_manual_inputs_and_blank_means_default(self) -> None:
+        from unittest import mock
+
+        text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
+        self.assertIn("POLL_CUTOFF_MINUTES: ${{ inputs.poll_cutoff_minutes }}", text)
+        self.assertIn("EVAL_CUTOFF_MINUTES: ${{ inputs.eval_cutoff_minutes }}", text)
+        self.assertNotIn("vars.POLL_CUTOFF_MINUTES", text)  # never a standing repository variable that would cut every scheduled run
+        self.assertNotIn("vars.EVAL_CUTOFF_MINUTES", text)
+        with mock.patch.dict("os.environ", {"POLL_CUTOFF_MINUTES": "", "EVAL_CUTOFF_MINUTES": ""}):  # a scheduled run: inputs are empty
+            cfg = h.Config.from_env()
+        self.assertEqual((cfg.poll_cutoff_s, cfg.eval_cutoff_s), (15 * 60, 20 * 60))
+        with mock.patch.dict("os.environ", {"POLL_CUTOFF_MINUTES": "1", "EVAL_CUTOFF_MINUTES": "0"}):
+            cfg = h.Config.from_env()
+        self.assertEqual((cfg.poll_cutoff_s, cfg.eval_cutoff_s), (60, 60))  # at least one minute
+
     def test_workflows_never_print_secrets_and_use_only_the_documented_ones(self) -> None:
         used: set[str] = set()
         for f in (ROOT / ".github" / "workflows").glob("*.yml"):

@@ -76,8 +76,10 @@ def k(n: int, ats: str = "greenhouse") -> str:
 
 
 def summary(events: list[lg.Event] | None = None, runs: list[st_mod.RunRecord] | None = None, tracker: list[dict[str, str]] | None = None,
-            boards: dict[str, bd.BoardRecord] | None = None, discovery: dict[str, str] | None = None, now: datetime = T0, tz: Any = UTC) -> dict[str, Any]:
-    return rp.build_summary(now=now, tz=tz, runs=runs or [], events=events or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker or [])
+            boards: dict[str, bd.BoardRecord] | None = None, discovery: dict[str, str] | None = None, now: datetime = T0, tz: Any = UTC,
+            tracker_deleted: frozenset[str] = frozenset()) -> dict[str, Any]:
+    return rp.build_summary(now=now, tz=tz, runs=runs or [], events=events or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker or [],
+                            tracker_deleted=tracker_deleted)
 
 
 def run_rec(at: datetime, **kw: Any) -> st_mod.RunRecord:
@@ -887,6 +889,20 @@ class YieldTests(unittest.TestCase):
         self.assertIn(k(2), rows[0]["detail"])
         self.assertEqual(rows[0]["ref"], "Job Tracker")
         self.assertIn("tracker missing kept jobs", "\n".join(str(v) for row in db.render(none).values() for v in row))
+
+    def test_owner_deleted_tracker_keys_are_not_listed_as_missing_but_still_counted(self) -> None:
+        at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)
+        ev = self.ledger([(1, at), (2, at + timedelta(minutes=1))])
+        sm = summary(ev, tracker=[tracker_row(1)], now=self.NOW, tz=CHI, tracker_deleted=frozenset({k(2), "greenhouse|nobody|1"}))
+        rc = sm["yield"]["reconcile"]
+        self.assertEqual((rc["ledger_kept"], rc["in_tracker"], rc["missing_from_tracker"], rc["deleted_by_owner"]), (2, 1, [], 1))
+        self.assertEqual([r for r in sm["failures"]["table"] if r["what"] == "tracker missing kept jobs"], [])  # no NEEDS ATTENTION row
+        text = "\n".join(str(v) for row in db.render(sm).values() for v in row)
+        self.assertNotIn("tracker missing kept jobs", text)
+        self.assertIn("1 of 2 ledger-kept jobs are in the tracker (1 deleted on purpose, Tracker_Deleted_Keys)", text)
+        other = summary(ev, tracker=[], now=self.NOW, tz=CHI, tracker_deleted=frozenset({k(2)}))  # a job not acknowledged is still flagged
+        rows = [r for r in other["failures"]["table"] if r["what"] == "tracker missing kept jobs"]
+        self.assertEqual((len(rows), rows[0]["count"], rows[0]["detail"]), (1, 1, k(1)))
 
     def test_dashboard_rerun_is_identical(self) -> None:
         at = datetime(2026, 10, 25, 20, 0, tzinfo=UTC)

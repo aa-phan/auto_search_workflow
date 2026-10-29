@@ -782,6 +782,12 @@ class GroqSettingsTests(unittest.TestCase):
         self.assertEqual(pair({"Groq_Fallback_Daily_Token_Budget": "xyz"}), (100000, 100000))
         self.assertEqual(pair({}, {"GROQ_DAILY_TOKEN_BUDGET": "90000", "GROQ_FALLBACK_DAILY_TOKEN_BUDGET": "40000"}), (90000, 40000))
 
+    def test_tracker_deleted_keys_setting_parses_a_list_and_defaults_to_none(self) -> None:
+        self.assertEqual(self.parse({}).tracker_deleted_keys, ())
+        s = self.parse({"Tracker_Deleted_Keys": " greenhouse|nadiacare|4459849009 ; lever|acme|abc-1,\ngreenhouse|nadiacare|4459849009"})
+        self.assertEqual(s.tracker_deleted_keys, ("greenhouse|nadiacare|4459849009", "lever|acme|abc-1"))
+        self.assertIn("Tracker_Deleted_Keys", h.SETTING_DEFAULTS)
+
     def test_groq_budget_default_is_half_of_the_recorded_daily_limit_because_the_window_rolls(self) -> None:
         """D-53: the owner read 200,000 tokens/day per model from the account's limits page (2026-10-26); the daily request
         window was measured as rolling (reset 86.4 s per request), so the default is half the limit (two consecutive UTC-day

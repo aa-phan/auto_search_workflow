@@ -297,8 +297,10 @@ def build_summary(
     exploration_target: int = 100,
     run_timeout_s: int = 25 * 60,
     min_alert_score: int = 70,
+    tracker_deleted: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:  # fmt: skip
-    """Everything the dashboard shows, as plain data. `now` and `tz` are the only sources of time."""
+    """Everything the dashboard shows, as plain data. `now` and `tz` are the only sources of time.
+    `tracker_deleted`: job keys the owner deleted from the tracker on purpose (D-55); not listed as missing."""
     clean = clean_inputs(runs, events, tracker)
     facts = job_facts(clean.events)
     periods = make_periods(now, tz)
@@ -447,7 +449,7 @@ def build_summary(
     # ---- board coverage
     coverage = _coverage(now, finished, boards, discovery, established_target, exploration_target)
     # ---- tracker rows per found-day (MEAS-01)
-    yld = _yield(facts, clean.tracker, tz=tz, periods=periods, local=local)
+    yld = _yield(facts, clean.tracker, tz=tz, periods=periods, local=local, tracker_deleted=tracker_deleted)
     # ---- Groq consumption (MEAS-02 / MEAS-03)
     groq = _groq(now, finished, facts, discovery, periods, local)
     # ---- failures
@@ -889,7 +891,7 @@ def age_bucket(f: JobFacts | None) -> str:
     return "older"
 
 
-def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzinfo, periods: list[Period], local: Any) -> dict[str, Any]:
+def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzinfo, periods: list[Period], local: Any, tracker_deleted: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Tracker ROWS per found-day by cohort (verified fresh / Recent / other), joined to the ledger by identity.
     Counts, keys and dates only: tracker free text is never copied (T-02-14)."""
     keys, join = tracker_join(facts, tracker)
@@ -932,14 +934,15 @@ def _yield(facts: dict[str, JobFacts], tracker: list[dict[str, str]], *, tz: tzi
         }
     kept = {key: f for key, f in facts.items() if f.eval_visible}
     in_tracker = {key for key in keys if key in kept}
-    missing = sorted(({"key": key, "evaluated": _stamp(f.eval_at)} for key, f in kept.items() if key not in in_tracker), key=lambda m: (m["evaluated"] or "", m["key"]))
+    absent = {key for key in kept if key not in in_tracker}
+    missing = sorted(({"key": key, "evaluated": _stamp(kept[key].eval_at)} for key in absent - tracker_deleted), key=lambda m: (m["evaluated"] or "", m["key"]))
     seen_keys = Counter(key for key in keys if key)
     return {
         "trend": trend, "per_period": per_period, "join": join,
         "day_unknown": sum(1 for d_, _, _, _ in rows if d_ is None),
         "target": list(TARGET_ROWS_PER_DAY),
         "reconcile": {
-            "ledger_kept": len(kept), "in_tracker": len(in_tracker), "missing_from_tracker": missing,
+            "ledger_kept": len(kept), "in_tracker": len(in_tracker), "missing_from_tracker": missing, "deleted_by_owner": len(absent & tracker_deleted),
             "tracker_rows_without_ledger_match": join["unmatched"], "duplicate_rows": sum(n - 1 for n in seen_keys.values() if n > 1),
         },
     }
@@ -1035,7 +1038,9 @@ def format_text(s: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- reconciliation of the headline counts (pilot report)
 
 
-def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], start: datetime, end: datetime) -> dict[str, Any]:
+def reconcile(
+    *, runs: list[RunRecord], events: list[lg.Event], tracker: list[dict[str, str]], start: datetime, end: datetime, tracker_deleted: frozenset[str] = frozenset()
+) -> dict[str, Any]:
     """Name every population behind the headline counts (jobs kept, verified-fresh matches, alerts, tracker rows) for ONE
     explicit window [start, end], so unrelated counts are never forced into a funnel. Same cleaning (rehearsal runs,
     their events, tracker fixtures) and the same per-job facts as the dashboard; only the window differs (the
@@ -1089,7 +1094,7 @@ def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[di
         else:
             tracker_keys[ident.key] += 1
     tkeys = set(tracker_keys)
-    missing = sorted(({"key": key, "evaluated": _stamp(facts[key].eval_at)} for key in visible_all - tkeys), key=lambda m: (m["evaluated"] or "", m["key"]))
+    missing = sorted(({"key": key, "evaluated": _stamp(facts[key].eval_at)} for key in visible_all - tkeys - tracker_deleted), key=lambda m: (m["evaluated"] or "", m["key"]))
     return {
         "window": {"from": _stamp(start), "to": _stamp(end), "hours": round((end - start).total_seconds() / 3600, 1)},
         "excluded": {"rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events, "tracker_fixture_rows": clean.excluded_fixture_rows},
@@ -1115,7 +1120,7 @@ def reconcile(*, runs: list[RunRecord], events: list[lg.Event], tracker: list[di
             "rows_without_a_job_identity": unparsed, "distinct_jobs": len(tkeys), "duplicate_rows": sum(n - 1 for n in tracker_keys.values() if n > 1),
             "in_ledger_as_kept_any_time": len(tkeys & visible_all), "not_in_ledger_as_kept": len(tkeys - visible_all),
             "ledger_kept_in_window": len(visible_in), "ledger_kept_in_window_and_in_tracker": len(visible_in & tkeys),
-            "ledger_kept_any_time_but_not_in_tracker": len(visible_all - tkeys),
+            "ledger_kept_any_time_but_not_in_tracker": len(visible_all - tkeys - tracker_deleted), "deleted_by_owner": len((visible_all - tkeys) & tracker_deleted),
             "missing_from_tracker": missing, "by_stored_url": join_counts["by_stored_url"],  # keys and stamps only, never tracker text
         },
     }  # fmt: skip
@@ -1140,7 +1145,8 @@ def format_reconciliation(r: dict[str, Any]) -> list[str]:
         f"  TRACKER (all time, not windowed): {t['rows_raw']} rows = {t['fixture_rows_excluded']} labelled test fixture(s) + {t['rows_real']} real rows ({t['distinct_jobs']} distinct jobs"
         f"{', ' + str(t['duplicate_rows']) + ' duplicate row(s)' if t['duplicate_rows'] else ''}{', ' + str(t['rows_without_a_job_identity']) + ' without a recognizable job URL' if t['rows_without_a_job_identity'] else ''})",
         f"    {t['in_ledger_as_kept_any_time']} of those jobs are kept in the ledger; {t['not_in_ledger_as_kept']} are not (rows from before the ledger, hand-made rows, or other test data); "
-        f"ledger-kept jobs missing from the tracker: {t['ledger_kept_any_time_but_not_in_tracker']} (should be 0)",
+        f"ledger-kept jobs missing from the tracker: {t['ledger_kept_any_time_but_not_in_tracker']} (should be 0)"
+        + (f"; {t['deleted_by_owner']} more deleted on purpose (Tracker_Deleted_Keys)" if t.get("deleted_by_owner") else ""),
         f"    ledger-kept in this window: {t['ledger_kept_in_window']} ({t['ledger_kept_in_window_and_in_tracker']} are in the tracker)",
     ]
     if t.get("by_stored_url"):

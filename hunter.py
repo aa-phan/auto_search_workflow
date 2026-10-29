@@ -215,6 +215,12 @@ DEFAULT_SETTINGS: list[tuple[str, str, str]] = [
         "report = the weekly comparison only writes a report (nothing is replaced); on = it replaces boards. "
         "Check the report first: run the Job Hunter workflow with 'rebalance_report' ticked.",
     ),
+    (
+        "Tracker_Deleted_Keys",
+        "",
+        "Job keys (ats|board|posting id, comma-separated) of Job Tracker rows you deleted on purpose; the Dashboard stops listing them "
+        "as missing from the tracker. The app never deletes or rewrites tracker rows.",
+    ),
 ]
 SETTING_DEFAULTS = {k: v for k, v, _ in DEFAULT_SETTINGS}
 
@@ -272,6 +278,7 @@ class Settings:
     rebalance_every_days: int = 7
     max_replacements_per_rebalance: int = 20
     rebalance_mode: str = "report"
+    tracker_deleted_keys: tuple[str, ...] = ()  # owner-deleted tracker rows; reporting only, never written (D-55)
 
     @property
     def pool_policy(self) -> pools.PoolPolicy:
@@ -312,6 +319,7 @@ class Settings:
             rebalance_every_days=max(1, _int_or(pick("Rebalance_Every_Days"), 7)),
             max_replacements_per_rebalance=max(0, _int_or(pick("Max_Replacements_Per_Rebalance"), 20)),
             rebalance_mode=pick("Rebalance_Mode").lower() if pick("Rebalance_Mode").lower() in REBALANCE_MODES else "report",
+            tracker_deleted_keys=tuple(_split_list(pick("Tracker_Deleted_Keys"))),
         )
 
     @property
@@ -1957,6 +1965,7 @@ def run_pilot_report(store: Any, settings: Settings, days: int) -> int:
         now=now, days=days, runs=state.load_runs(), events=state.load_events(), boards=state.load_boards(),
         discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
         search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits, max_active=settings.max_active_boards,
+        tracker_deleted=frozenset(settings.tracker_deleted_keys),
     )  # fmt: skip
     print(pilot.format_report(rep))
     return 0

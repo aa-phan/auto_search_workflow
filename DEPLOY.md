@@ -92,6 +92,10 @@ Start: the first scheduled run after step 7 (note its `Run_At`). Keep unchanged 
 - Day 7: the report is the evidence. The pilot is **not** complete before seven full days of scheduled runs have elapsed; "complete" also needs at least one real alert to have gone through scoring, tracker and Telegram.
 - Stop and investigate if: runs by trigger shows no `schedule` runs after 24 hours, a duplicate alert appears, `awaiting alert now` stays above zero for more than a few hours, or search credits per day exceed 20.
 
+## Governor test (run deadlines; D-56)
+
+To see the D-51 cutoffs fire, run **Job Hunter** by hand with `poll_cutoff_minutes` and/or `eval_cutoff_minutes` set (whole minutes, at least 1; for example both `1`). Leave every other box unticked and both fields empty for normal runs. A poll cut records the run `degraded` and leaves the cut boards for the next run; an evaluation cut leaves jobs pending with no attempt used. Read the result in that run's `Runs` row (`Boards_Skipped_Deadline`, `Eval_Cut`, `Eval_Deadline_Skipped`, Notes "poll cutoff" / "evaluation cutoff") and add a PILOT_LOG row naming the run, because its numbers are not a normal measurement. The alert cutoff and the 5-attempt alert bound have no test input on purpose.
+
 ## Watchdog (missed-run alerts; D-42)
 
 The **Watchdog** workflow (`.github/workflows/watchdog.yml`) checks every 15 minutes (GitHub schedule) that a production polling run finished successfully within **2 hours**, and sends **one** Telegram message when it did not and **one** when polling recovers, to `TELEGRAM_CHAT_ID`. It reads the `Runs` tab only, keeps its own incident record in a hidden `Watchdog` tab, and never restarts anything or changes Settings. No new secret is needed.

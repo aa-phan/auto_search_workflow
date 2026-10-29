@@ -41,6 +41,16 @@ on:
         description: "Send ONE clearly labelled synthetic job through scoring -> tracker -> Telegram to your TELEGRAM_CHAT_ID (you are authorizing that recipient by ticking this)"
         type: boolean
         default: false
+      poll_cutoff_minutes:
+        description: "GOVERNOR TEST ONLY: start no board poll after this many minutes (default 15, D-51). The run is recorded degraded; cut boards are polled next run. Leave empty."
+        type: string
+        default: ""
+        required: false
+      eval_cutoff_minutes:
+        description: "GOVERNOR TEST ONLY: start no Groq call after this many minutes (default 20, D-51); unscored jobs stay pending. Leave empty."
+        type: string
+        default: ""
+        required: false
 
 # Nothing in this repository is written by the workflow: state lives in the Google Sheet.
 permissions:
@@ -73,6 +83,9 @@ jobs:
       # asks generic crawlers to stay out. Remove this line to park SmartRecruiters again (history is kept).
       ALLOW_SMARTRECRUITERS_BULK: "1"
       SEARCH_WINDOW_DAYS: ${{ vars.SEARCH_WINDOW_DAYS }} # optional; default 3 days. Scheduled discovery is always windowed (minimum 1).
+      # D-51 run deadlines; empty (every scheduled run) = the defaults 15 and 20 minutes. Set only by a manual governor test.
+      POLL_CUTOFF_MINUTES: ${{ inputs.poll_cutoff_minutes }}
+      EVAL_CUTOFF_MINUTES: ${{ inputs.eval_cutoff_minutes }}
     steps:
       - uses: actions/checkout@v4
 

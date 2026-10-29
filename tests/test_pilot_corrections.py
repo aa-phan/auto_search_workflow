@@ -167,6 +167,15 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual((t["in_ledger_as_kept_any_time"], t["not_in_ledger_as_kept"], t["ledger_kept_in_window"], t["ledger_kept_in_window_and_in_tracker"]), (30, 3, 30, 30))
         self.assertEqual(t["ledger_kept_any_time_but_not_in_tracker"], 2)  # the two pre-window alerted jobs were kept but their rows are not in this synthetic tracker
 
+    def test_owner_deleted_tracker_keys_leave_the_missing_list_but_are_reported(self) -> None:
+        ev, tracker, start, end = self.scenario()
+        gone = rp.reconcile(runs=[], events=ev, tracker=tracker, start=start, end=end)["tracker"]["missing_from_tracker"][0]["key"]
+        r = rp.reconcile(runs=[], events=ev, tracker=tracker, start=start, end=end, tracker_deleted=frozenset({gone}))
+        t = r["tracker"]
+        self.assertEqual((t["ledger_kept_any_time_but_not_in_tracker"], t["deleted_by_owner"]), (1, 1))
+        self.assertNotIn(gone, [m["key"] for m in t["missing_from_tracker"]])
+        self.assertIn("1 more deleted on purpose (Tracker_Deleted_Keys)", "\n".join(rp.format_reconciliation(r)))
+
     def test_the_text_states_the_window_exclusions_and_that_it_is_not_a_funnel(self) -> None:
         ev, tracker, start, end = self.scenario()
         text = "\n".join(rp.format_reconciliation(rp.reconcile(runs=[], events=ev, tracker=tracker, start=start, end=end)))

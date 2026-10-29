@@ -293,7 +293,9 @@ def render(sm: dict[str, Any]) -> Grid:
     ats_text = " · ".join(f"{a_} {n_}" for a_, n_ in sorted(y7["by_ats"].items(), key=lambda kv: (-kv[1], kv[0]))) or "none"
     i = g.add([Cell(
         f"Day = the day the job was found ({sm['timezone']}); age = when it was found minus the posting's own publication time; unknown = no time-precise publication time (never counted as fresh). "
-        f"{rc['in_tracker']} of {rc['ledger_kept']} ledger-kept jobs are in the tracker; {rc['tracker_rows_without_ledger_match']} rows have no ledger match"
+        f"{rc['in_tracker']} of {rc['ledger_kept']} ledger-kept jobs are in the tracker"
+        + (f" ({rc['deleted_by_owner']} deleted on purpose, Tracker_Deleted_Keys)" if rc.get("deleted_by_owner") else "")
+        + f"; {rc['tracker_rows_without_ledger_match']} rows have no ledger match"
         + (f"; {other_text} row(s) carry free-text feedback" if other_text else "") + f". By ATS (7d): {ats_text}.", "muted_wrap")], 48)
     g.merges.append((i, 0, COLUMNS - 1))
 
@@ -584,6 +586,7 @@ def build(store: Any, settings: Any, *, now: datetime | None = None, tz: tzinfo 
         discovery=state.load_discovery_state(), tracker=store.tracker_rows(), fresh_window=timedelta(hours=settings.fresh_window_hours),
         search_cap=settings.search_monthly_credits, search_reserve=settings.search_reserve_credits,
         established_target=policy.established_target, exploration_target=policy.exploration_target, run_timeout_s=run_timeout_s, min_alert_score=settings.min_score,
+        tracker_deleted=frozenset(getattr(settings, "tracker_deleted_keys", ())),
     )  # fmt: skip
 
 

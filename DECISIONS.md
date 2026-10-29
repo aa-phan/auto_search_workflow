@@ -349,7 +349,7 @@ This entry is the single list of owner decisions the v2.0 milestone needs. Decid
 
 **Outcome rules (P2-07).** A poll cut makes the run `degraded` (reason `poll cutoff`; a polling gap is the product's core risk and must be visible). An evaluation cut leaves the run `ok` with the note "evaluation cutoff" and `Eval_Cut = yes` / `Eval_Deadline_Skipped`: the jobs wait for the next run with no event and no attempt, like a budget skip (D-50). An alert cut is a discretion choice made in this plan, not in P2-07: the run is `degraded` (reason `alert cutoff`, `Alerts_Deferred`) because a fresh alert waiting another hour is what the owner most needs to see; the alert stays pending, with no event and no attempt, and the next run delivers it. The degraded reasons come from the counters, not from note text.
 
-**Configuration.** `POLL_CUTOFF_MINUTES` (default 15) and `EVAL_CUTOFF_MINUTES` (default 20) environment variables, whole minutes, at least 1; a non-numeric value falls back to the default. They are operator tuning knobs read against the `Runs` phase times, not owner Settings rows. The alert cutoff (22 minutes) is a pipeline constant: keep `EVAL_CUTOFF_MINUTES` below it, or alerts for jobs scored late are deferred. `--url` and `--delivery-test` run without a Groq deadline.
+**Configuration.** `POLL_CUTOFF_MINUTES` (default 15) and `EVAL_CUTOFF_MINUTES` (default 20) environment variables, whole minutes, at least 1; a non-numeric value falls back to the default. They are operator tuning knobs read against the `Runs` phase times, not owner Settings rows. (Amended by D-56: the job_hunter workflow passes them only from two manual dispatch inputs for a governor test; before D-56 the workflow did not pass them at all.) The alert cutoff (22 minutes) is a pipeline constant: keep `EVAL_CUTOFF_MINUTES` below it, or alerts for jobs scored late are deferred. `--url` and `--delivery-test` run without a Groq deadline.
 
 **Not changed.** `MAX_JOBS_PER_RUN` (30) stays as the backstop (P2-08); the Groq prompt, the scoring rule and `Min_Alert_Score` are untouched. The dashboard refresh after `run_cycle` is not cut (it is contained and reads about 10 seconds of state).
 
@@ -414,3 +414,23 @@ This entry is the single list of owner decisions the v2.0 milestone needs. Decid
 **Consequences.** Plan 02-09 (deploy the parking) is superseded and closed without a deployment; its timing rule (after the first weekly rebalance, own PILOT_LOG row) no longer applies because nothing is deployed. The workflow comments now cite D-54 instead of "for the pilot". `tests/test_deployment.py` already asserts the override in both workflows, the 1.0 s spacing and the parked default, and now guards this decision. D-48 row 3, the ROADMAP owner table, SPEC "Provider limits honoured" and STATUS are amended to point here.
 
 **Verification.** Offline only (the deployment test, mocked). No live check is needed for an unchanged setting; the next production runs keep logging "SmartRecruiters is polled by explicit decision".
+
+## D-55 Owner-deleted tracker rows are acknowledged by key (owner decision 2026-10-28; amends D-52 / P2-12)
+
+**Why.** D-52 lists every ledger-kept job missing from the Job Tracker under NEEDS ATTENTION for as long as the all-time mismatch is not 0 (P2-12, applied literally). After Phase 2 UAT one job was missing: `greenhouse|nadiacare|4459849009` (54 of 55). The owner decided to keep it deleted. There was no way to acknowledge a deliberate deletion, so the row would have stayed on the Dashboard forever and hidden any new, real mismatch behind an old, known one.
+
+**Decision.** A new Settings row `Tracker_Deleted_Keys` (blank by default) lists job keys (`ats|board|posting id`, separated by commas, semicolons or new lines) of tracker rows the owner deleted on purpose. The reconciliation leaves them out of "missing from the tracker" and out of the NEEDS ATTENTION row, and counts them separately as `deleted_by_owner`. The Dashboard reconciliation line says "(N deleted on purpose, Tracker_Deleted_Keys)" and the pilot report says "N more deleted on purpose". A key in the setting that is not missing changes nothing.
+
+**Not changed.** The program still never deletes or rewrites tracker rows, and the ledger keeps the job's events (append-only, D-03). Reporting only: no seen, evaluated or alerted state reads the setting. As with every Settings row, the live Settings tab is not widened automatically: the owner adds the row (or asks for it to be written through the Sheets connector).
+
+**Verification.** Offline (mocked): the setting parses a list and defaults to none (`test_hunter`); the Dashboard and failures table drop an acknowledged key but still flag one that is not acknowledged (`test_reporting`); the pilot reconciliation reports it apart (`test_pilot_corrections`). A mutation check (removing the exclusion) fails the Dashboard test. Not verified live until the row exists in the Settings tab and a run refreshes the Dashboard.
+
+## D-56 Governor test inputs on the Job Hunter workflow (2026-10-28; amends D-51 "Configuration")
+
+**Why.** The D-51 cutoffs had never fired in production (Phase 2 UAT test 5), and the workflow did not pass `POLL_CUTOFF_MINUTES` or `EVAL_CUTOFF_MINUTES` to the program, so they could not be exercised live without a code change.
+
+**Decision.** Two optional string inputs, `poll_cutoff_minutes` and `eval_cutoff_minutes`, on `workflow_dispatch`, passed as the environment variables of the same names. Every scheduled and external hourly run leaves them empty, so the defaults (15 and 20 minutes) apply; they are never repository variables, which would cut every run. The program's floor of one minute stays. The alert cutoff (22 minutes) and the 5-attempt bound on alert sends without an HTTP response are **not** exposed: forcing the bound live abandons real alerts for good.
+
+**Cost of a test run.** A poll cut records the run `degraded` and leaves the cut boards untouched (polled first next run); an evaluation cut leaves jobs pending with no event and no attempt. Nothing is lost, but that run's Runs row is not a normal measurement; the PILOT_LOG row names it.
+
+**Verification.** Offline: `test_governor_cutoffs_reach_the_program_only_from_manual_inputs_and_blank_means_default` (`test_deployment`). Live: see the PILOT_LOG row of the test run.
