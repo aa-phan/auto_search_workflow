@@ -57,7 +57,7 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 ### Measurement and governors
 
 - [x] **MEAS-01**: The Dashboard shows tracker rows per day, age when found and the My_Feedback mix, with backfilled / recent rows reported separately from verified-fresh rows
-- [ ] **MEAS-02**: The Groq account's real limits and tokens per call are measured and the Groq plan decision is recorded
+- [x] **MEAS-02**: The Groq account's real limits and tokens per call are measured and the Groq plan decision is recorded
 - [x] **MEAS-03**: Each run records Groq tokens used; a daily token budget keeps runs under the Groq limit
 - [x] **MEAS-04**: Evaluation and polling stop before the 25-minute timeout; verified-fresh jobs are scored first and unscored jobs stay retryable
 - [x] **MEAS-05**: A job is recorded `alerted` only when a channel accepted the message, and alert failures without an HTTP response are bounded at 5 attempts (CONCERNS bugs 1 and 2)
@@ -105,7 +105,7 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 
 ### Governance
 
-- [ ] **GOV-01**: Owner decisions are recorded in DECISIONS.md: Groq plan, the D-05 amendment, the rule-7 lift for board-cycling scores only, per-ATS policy (Paycom skipped, iCIMS deferred), SmartRecruiters after the pilot, repository public, date-only alerts
+- [x] **GOV-01**: Owner decisions are recorded in DECISIONS.md: Groq plan, the D-05 amendment, the rule-7 lift for board-cycling scores only, per-ATS policy (Paycom skipped, iCIMS deferred), SmartRecruiters after the pilot, repository public, date-only alerts
 
 ## Future Requirements (deferred)
 
@@ -137,11 +137,11 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | MEAS-01 | Phase 2 | Complete |
-| MEAS-02 | Phase 2 | Pending |
+| MEAS-02 | Phase 2 | Complete |
 | MEAS-03 | Phase 2 | Complete |
 | MEAS-04 | Phase 2 | Complete |
 | MEAS-05 | Phase 2 | Complete |
-| GOV-01 | Phase 2 | Pending |
+| GOV-01 | Phase 2 | Complete |
 | STOR-01 | Phase 3 | Pending |
 | WIN-01 | Phase 4 | Pending |
 | WIN-02 | Phase 4 | Pending |

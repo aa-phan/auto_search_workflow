@@ -306,7 +306,7 @@ This entry is the single list of owner decisions the v2.0 milestone needs. Decid
 | 10. Alert sends that fail without an HTTP response | Decided by the owner 2026-10-26: bounded at 5 attempts like rejected requests; implemented and documented in D-49 (SPEC "State model" amended there). Accepted risk: an alert-channel outage lasting 5 runs abandons the alerts pending during it | Phase 2 (MEAS-05) | n/a (decided) | P2-18 (network errors), D-49 |
 | 11. Groq data handling (the resume text is sent to Groq on every scoring call; CONCERNS "Personal data") | Decided 2026-10-28 (decided in D-53): keep as is ("resume to Groq: ok"); the account's retention setting as read is recorded in D-53 (zero data retention not enabled) | With the Groq plan decision (D-53) | n/a (decided) | CONCERNS "Personal data", D-53 |
 
-**Consequences.** Nothing in code changes with this entry. The decided SmartRecruiters parking is deployed by plan 02-09. The ROADMAP Owner Decisions table now points here, and its Phase 4 entry gate refers to the D-05 amendment under its own D-number once the owner decides it.
+**Consequences.** Nothing in code changes with this entry. The SmartRecruiters parking decided here was to be deployed by plan 02-09; D-54 reversed it and 02-09 closed without a deployment. The ROADMAP Owner Decisions table now points here, and its Phase 4 entry gate refers to the D-05 amendment under its own D-number once the owner decides it.
 
 
 ## D-49 An alert is recorded only when a channel accepted it; alert sends without an HTTP response are bounded at 5 (changes SPEC "State model"; owner decision 2026-10-26)
