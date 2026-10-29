@@ -226,9 +226,12 @@ def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.Storag
         diffs=report.named(compact.MAX_LISTED_DIFFS), compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
     )  # fmt: skip
     today = storage.days.get(now.astimezone(timezone.utc).strftime("%Y-%m-%d"), {})
+    bar = storage.bar(now)
     log.info(
-        "Storage: mode=%s, %d counted and %d declared differences, %d job keys and %d Tally runs compared, %d checked runs today, check took %.1f s%s",
-        storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0), report.seconds, repaired,
+        "Storage: mode=%s, %d counted and %d declared differences, %d job keys and %d Tally runs compared, %d checked runs today, "
+        "%d of %d complete days toward the bar, admission seen %s, check took %.1f s%s",
+        storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0),
+        bar.days_counted, compact.PARITY_DAYS, "yes" if bar.admission_seen else "no", report.seconds, repaired,
     )  # fmt: skip
 
 

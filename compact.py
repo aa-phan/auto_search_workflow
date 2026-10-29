@@ -30,6 +30,7 @@ PARITY_DAYS = 3  # complete consecutive UTC days of clean checked runs the bar n
 PARITY_MIN_RUNS_PER_DAY = 12  # checked runs a UTC day needs to count (about half of the hourly runs; DECISIONS D-57)
 STORAGE_DAYS_KEPT = 14  # days of parity bookkeeping kept in the `storage` key
 MAX_LISTED_DIFFS = 10  # differences named in the `storage` key
+MAX_DIFF_CHARS = 200  # one named difference is cut to this many characters (the key must stay far below the 45,000-character Discovery cell cap)
 
 KIND_OF = {lg.BASELINED: "b", lg.FILTERED: "f", lg.STALED: "s"}  # disposition -> one-letter kind prefix of an entry
 DISPOSITION_OF = {kind: disposition for disposition, kind in KIND_OF.items()}
@@ -473,6 +474,17 @@ def _clean_days(raw: Any) -> dict[str, dict[str, int]]:
     return days
 
 
+@dataclass(frozen=True)
+class BarStatus:
+    """Where the parity bar stands (P3-05): the clean complete UTC days counted so far (at most PARITY_DAYS), whether the bar is
+    met, whether one of the counted days saw a board admission, and the length of the clean streak that ends yesterday."""
+
+    days_counted: int
+    met: bool
+    admission_seen: bool
+    streak: int
+
+
 def _dict(raw: Any) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
@@ -535,8 +547,10 @@ class StorageState:
         self, now: datetime, *, counted: int, declared: int, admissions: int, failed: bool = False, diffs: Iterable[str] = (),
         compared: int = 0, seconds: float = 0.0,
     ) -> None:  # fmt: skip
-        """Record one checked run under the UTC day it started in. A counted difference or a failed check restarts the clock."""
-        day = self.days.setdefault(_utc_day(now), {"runs": 0, "diff_runs": 0, "failed": 0, "admissions": 0})
+        """Record one checked run under the UTC day it started in (a run at 00:00:00 UTC is in the new day). A counted difference
+        or a failed check restarts the clock: it makes the day unclean and clears `bar_met_at`. `diffs` are the named differences
+        (at most MAX_LISTED_DIFFS kept, each cut to MAX_DIFF_CHARS); days older than STORAGE_DAYS_KEPT are dropped."""
+        day = self.days.setdefault(_utc_day(now), dict.fromkeys(DAY_FIELDS, 0))
         day["runs"] += 1
         if counted > 0 or failed:
             day["diff_runs"] += 1
@@ -545,4 +559,32 @@ class StorageState:
             day["failed"] += 1
         day["admissions"] += max(0, admissions)
         self.last_check = {"at": lg.stamp(now.astimezone(timezone.utc)), "counted": counted, "declared": declared, "compared": compared, "seconds": round(seconds, 1)}
-        self.last_diffs = list(diffs)
+        self.last_diffs = [str(text)[:MAX_DIFF_CHARS] for text in list(diffs)[:MAX_LISTED_DIFFS]]
+        for old in sorted(self.days)[:-STORAGE_DAYS_KEPT]:
+            del self.days[old]
+        if self.bar_met_at is None and counted == 0 and not failed and self.bar(now).met:
+            self.bar_met_at = lg.stamp(now.astimezone(timezone.utc))
+
+    def bar(self, now: datetime) -> BarStatus:
+        """Apply the bar to the complete UTC days before `now`'s day, newest first: a day counts only when it started after
+        `seeded_at` (the seed day never counts), has at least PARITY_MIN_RUNS_PER_DAY checked runs and not one run with a
+        difference. The bar is met when the PARITY_DAYS most recent complete days all count and one of them saw an admission.
+        The current, incomplete day never counts, but a difference found today blocks the bar at once (P3-07: any difference
+        restarts the clock, and today can never become one of the counted days)."""
+        try:
+            seeded = datetime.strptime(self.seeded_at or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return BarStatus(0, False, False, 0)
+        today = now.astimezone(timezone.utc).date()
+        counted: list[dict[str, int]] = []
+        for back in range(1, STORAGE_DAYS_KEPT + 1):
+            day = today - timedelta(days=back)
+            rec = self.days.get(day.isoformat())
+            started = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+            if rec is None or started <= seeded or rec["runs"] < PARITY_MIN_RUNS_PER_DAY or rec["diff_runs"] > 0:
+                break
+            counted.append(rec)
+        streak = len(counted)
+        admission = any(rec["admissions"] > 0 for rec in counted[:PARITY_DAYS])
+        dirty_today = self.days.get(today.isoformat(), {}).get("diff_runs", 0) > 0
+        return BarStatus(min(streak, PARITY_DAYS), streak >= PARITY_DAYS and admission and not dirty_today, admission, streak)

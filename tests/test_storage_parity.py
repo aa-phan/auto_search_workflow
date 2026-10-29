@@ -513,6 +513,7 @@ class PipelineDifferenceTests(HarnessCase):
             self.assertNotIn(forbidden, text)
         self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=dual, 1 counted") for line in logs.output), logs.output)
         self.assertEqual(sum("Storage" in line for line in logs.output if line.startswith("INFO")), 1)  # one storage line per run
+        self.assertIn("0 of 3 complete days toward the bar, admission seen no", "\n".join(logs.output))
 
     def test_a_tally_row_lost_between_runs_is_repaired_and_named(self) -> None:
         self.baselined("1", "2")
