@@ -53,6 +53,7 @@ POLL_CUTOFF_S = 15 * 60  # no new board poll starts after this
 EVAL_CUTOFF_S = 20 * 60  # no new Groq call starts after this
 ALERT_CUTOFF_S = 22 * 60  # no new alert send starts after this
 STORAGE_CHECK_CUTOFF_S = 22 * 60  # the storage parity check does not start after this (it is skipped, not recorded; D-57)
+FOLD_CUTOFF_S = 20 * 60  # the 7-day fold does not start after this process-clock time (it is skipped and `fold.last_day` stays unset, so the next run tries again; D-57)
 
 
 class FatalRunError(Exception):
@@ -188,7 +189,7 @@ def degraded_reason(run: RunRecord) -> str:
         reasons.append("discovery")
     if "final write failed" in run.notes or "run-start record not written" in run.notes:
         reasons.append("persistence")
-    if any(note in run.notes for note in ("storage write failed", "storage parity:", "storage check failed", "storage repair failed", "storage cutover incomplete", "storage state: compact without Events_Legacy")):
+    if any(note in run.notes for note in ("storage write failed", "storage parity:", "storage check failed", "storage repair failed", "storage cutover incomplete", "storage state: compact without Events_Legacy", "storage fold failed")):
         reasons.append("storage")
     if run.alerts_failed:
         reasons.append("alerts")
@@ -245,6 +246,28 @@ def storage_check(
         storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0),
         bar.days_counted, compact.PARITY_DAYS, "yes" if bar.admission_seen else "no", report.seconds, repaired,
     )  # fmt: skip
+
+
+def storage_fold(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, state: Any) -> bool:
+    """The 7-day fold (P3-03), on the start-of-run snapshot: plan what is durable in Identity and Tally, delete those Events rows, record the
+    result in `storage.fold`. Returns True when the record changed (the caller saves it). A failure adds the note `storage fold failed: <type>`
+    (degraded), leaves `fold.last_day` unset so the next run plans again from a fresh load, and never touches detection or alerts, which are done.
+    Notes and the log carry counts only: no key, title or URL."""
+    try:
+        plan = compact.fold_plan(ledger, now)
+        deleted = state.fold_events(plan.rows, plan.row_keys) if plan.rows else 0
+    except Exception as exc:
+        log.error("Storage fold raised %s", type(exc).__name__)
+        run.notes += f"storage fold failed: {type(exc).__name__}; "
+        return False
+    storage.fold = compact.fold_record(storage.fold, now, rows=deleted, skipped=plan.skipped)
+    if deleted or plan.skipped:
+        run.notes += f"storage fold: {deleted} rows ({plan.skipped} kept: not durable yet); "
+    log.info(
+        "Storage fold: %d rows deleted in %d ranges, %d kept (%d not in Identity, %d without a Tally count), %d rows folded in total",
+        deleted, len(compact.delete_ranges(plan.rows)), plan.skipped, plan.skipped_not_in_identity, plan.skipped_no_tally, storage.fold["rows_total"],
+    )  # fmt: skip
+    return True
 
 
 def run_cycle(d: Deps) -> RunRecord:
@@ -856,6 +879,18 @@ def run_cycle(d: Deps) -> RunRecord:
                     d.state.save_discovery_state(discovery_state, lg.stamp(now))
                 except Exception as exc:
                     log.error("Could not record the storage check: %s", type(exc).__name__)
+                    run.notes += f"storage write failed: {type(exc).__name__}; "
+        # ---------------------------------------------------------------- 6. storage fold (compact mode only)
+        # After the alert stage and the check, on the start-of-run snapshot, at most once a UTC day and never on the cutover's own day (P3-03, P3-06).
+        if not d.dry_run and mode == compact.MODE_COMPACT and not decision.note and storage.fold_due(now):
+            if d.clock() >= t0 + FOLD_CUTOFF_S:
+                log.info("Storage: fold skipped, the run clock passed %d min (it is tried again next run)", FOLD_CUTOFF_S // 60)
+            elif storage_fold(ledger, now, storage, run, d.state):
+                discovery_state[compact.STORAGE_KEY] = storage.to_json()
+                try:
+                    d.state.save_discovery_state(discovery_state, lg.stamp(now))
+                except Exception as exc:
+                    log.error("Could not record the storage fold: %s", type(exc).__name__)
                     run.notes += f"storage write failed: {type(exc).__name__}; "
         crashed = False
     finally:

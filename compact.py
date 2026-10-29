@@ -387,6 +387,82 @@ def restore_record(now: datetime, *, appended_rows: int | None) -> dict[str, Any
     return {"at": lg.stamp(now.astimezone(timezone.utc)), "appended_rows": appended_rows}
 
 
+FOLD_REQUESTS_PER_BATCH = 500  # `deleteDimension` requests in one spreadsheets.batchUpdate (no documented cap; measured live on the first fold, research A5)
+
+
+@dataclass(frozen=True)
+class FoldPlan:
+    """What one fold deletes from Events: the sheet rows (ascending, the numbers loaded at run start) and, per candidate key that stays
+    because its durability is not proven yet, the reason: the posting ID is not in the Identity set read at run start, or the
+    (Run_ID, Run_At) Tally group is missing or holds fewer observations than Events still retains for it. `row_keys` names the key each
+    row must still hold when the delete is sent (the Sheet store checks it, so a shifted row is never deleted)."""
+
+    rows: list[int]
+    skipped_not_in_identity: int = 0
+    skipped_no_tally: int = 0
+    row_keys: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def skipped(self) -> int:
+        return self.skipped_not_in_identity + self.skipped_no_tally
+
+
+def fold_plan(ledger: "Ledger", now: datetime) -> FoldPlan:
+    """The 7-day fold (P3-03): every `seen` row of each key whose first observation is a keyable `filtered` or `stale` row with Time at or
+    before `now - FOLD_AGE`, but only when the key is durable elsewhere: its posting ID is in the Identity set of `ledger` AND its
+    (Run_ID, Run_At) Tally group exists with at least as many observations of the row's dimension as Events still retains (the same test as
+    `Ledger.negative()`). A candidate failing either test is kept and counted, once per key. Baselines (written to Identity only after the
+    cutover) and every operational row are never selected. Pure: `ledger` is the start-of-run snapshot and nothing is changed."""
+    if len(ledger.event_rows) != len(ledger.events):
+        raise ValueError("the ledger carries no sheet row numbers; refusing to plan a fold")
+    cutoff = now - FOLD_AGE
+    held = ledger.identity.keys()
+    totals = ledger.tally_totals()
+    retained = ledger.retained_counts()
+    selected: set[str] = set()
+    not_in_identity = no_tally = 0
+    for key, ev in first_seen_identity(ledger.events).items():
+        if identity_class(ev) not in (lg.FILTERED, lg.STALED) or identity_entry(ev) is None:
+            continue
+        when = event_time(ev)
+        if when is None or when > cutoff:
+            continue
+        if key not in held:
+            not_in_identity += 1
+            continue
+        group, dim = (str(ev.detail.get("run") or ""), ev.time), tally_dim(ev)
+        if group not in totals or totals[group].get(dim, 0) < retained.get(group, Counter()).get(dim, 0):
+            no_tally += 1
+            continue
+        selected.add(key)
+    picked = sorted((n, ev.key) for ev, n in zip(ledger.events, ledger.event_rows) if ev.event == lg.SEEN and ev.key in selected)
+    return FoldPlan([n for n, _ in picked], not_in_identity, no_tally, dict(picked))
+
+
+def delete_ranges(rows: Iterable[int]) -> list[tuple[int, int]]:
+    """Contiguous inclusive 1-based row ranges `(first, last)` of these sheet rows, the HIGHEST range first: deleting from the bottom up
+    leaves every lower row number where the plan found it."""
+    out: list[tuple[int, int]] = []
+    for n in sorted(set(rows), reverse=True):
+        if out and out[-1][0] == n + 1:
+            out[-1] = (n, out[-1][1])
+        else:
+            out.append((n, n))
+    return out
+
+
+def fold_record(previous: dict[str, Any], now: datetime, *, rows: int, skipped: int) -> dict[str, Any]:
+    """The `fold` record of the `storage` key after a fold that ran to its end: `last_day` (the UTC day: at most one fold a day),
+    `last_rows` and `last_skipped` of this fold, `rows_total` over all folds and `first_day`, set once by the first fold that deleted a row
+    (the restore is refused from then on; a fold that deleted nothing changes nothing irreversible). Counts and dates only."""
+    total = (_int(previous.get("rows_total")) or 0) + rows
+    out: dict[str, Any] = {"last_day": _utc_day(now), "last_rows": rows, "last_skipped": skipped, "rows_total": total}
+    first = previous.get("first_day") or (_utc_day(now) if rows > 0 else "")
+    if first:
+        out["first_day"] = first
+    return out
+
+
 def parse_dim(dim: str) -> dict[str, Any]:
     """The inverse of `tally_dim`: ats, source, disposition, pass, freshness and whether the publication date was known."""
     ats, source, disposition, pass_kind, freshness, date = (dim.split("|") + [""] * 6)[:6]
@@ -626,6 +702,15 @@ class StorageState:
             del self.days[old]
         if self.bar_met_at is None and counted == 0 and not failed and self.bar(now).met:
             self.bar_met_at = lg.stamp(now.astimezone(timezone.utc))
+
+    def fold_due(self, now: datetime) -> bool:
+        """May a fold start at `now` (P3-03)? Only in stored mode `compact`, only on a UTC day AFTER the UTC day of the cutover (the restore
+        stays possible for the rest of that day), and at most once a UTC day (`fold.last_day`). A cutover record without a readable time never folds."""
+        cut = parse_stamp(self.cutover.get("at"))
+        if self.mode != MODE_COMPACT or cut is None:
+            return False
+        today = _utc_day(now)
+        return today > _utc_day(cut) and self.fold.get("last_day") != today
 
     def bar(self, now: datetime) -> BarStatus:
         """Apply the bar to the complete UTC days before `now`'s day, newest first: a day counts only when it started after

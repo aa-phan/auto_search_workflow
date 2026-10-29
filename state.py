@@ -23,7 +23,7 @@ from typing import Any, Iterable
 
 import compact
 from boards import STAMP, BoardRecord, merge_provenance
-from ledger import EVENT_COLUMNS, Event
+from ledger import EVENT_COLUMNS, SEEN, Event
 
 log = logging.getLogger("hunter")
 
@@ -548,6 +548,28 @@ class SheetState:
         except Exception as exc:
             log.warning("Could not protect the %s tab: %s", title, exc)
 
+    def fold_events(self, rows: list[int], expect: dict[int, str] | None = None) -> int:
+        """Delete these Events rows (1-based sheet rows, numbers loaded at run start; the 7-day fold, D-57) and return how many went. Contiguous
+        ranges are sent as `deleteDimension` requests in DESCENDING order (a delete never moves a row that is still to be deleted), at most
+        `compact.FOLD_REQUESTS_PER_BATCH` requests per `spreadsheets.batchUpdate` (atomic per call); an interrupted fold leaves a consistent
+        sheet and the next fold plans again. With `expect` (row -> key) every row must still hold that key in a `seen` row, read fresh,
+        before the first request: a row shifted by a hand edit refuses the whole fold. Only the Events tab is touched, never Events_Legacy."""
+        ranges = compact.delete_ranges(rows)
+        if not ranges:
+            return 0
+        ws = self.sh.worksheet(EVENTS_TAB)
+        if expect is not None:
+            keys, kinds = ws.col_values(2), ws.col_values(3)
+            for n in rows:
+                if n < 2 or n > len(keys) or keys[n - 1] != expect.get(n) or kinds[n - 1] != SEEN:
+                    raise RuntimeError(f"Events row {n} no longer holds the row the fold planned to delete")
+        requests = [
+            {"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": first - 1, "endIndex": last}}} for first, last in ranges
+        ]
+        for i in range(0, len(requests), compact.FOLD_REQUESTS_PER_BATCH):
+            self.sh.batch_update({"requests": requests[i : i + compact.FOLD_REQUESTS_PER_BATCH]})
+        return sum(last - first + 1 for first, last in ranges)
+
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its sheet row: header = row 1, an unreadable row still advances the count), Identity and Tally,
         one read each. The Identity set is kept as this store's cache for `write_identity`; the returned ledger holds a copy."""
@@ -783,6 +805,26 @@ class CsvState:
 
     def protect_tab(self, title: str, description: str) -> None:
         """A local file has no protection: nothing to do."""
+
+    def fold_events(self, rows: list[int], expect: dict[int, str] | None = None) -> int:
+        """The local twin of the Sheet's fold: rewrite `events.csv` atomically without these row numbers (header = row 1). With `expect`
+        every row must still hold that key in a `seen` row, or nothing is rewritten. Only the Events file is touched."""
+        drop = set(rows)
+        if not drop:
+            return 0
+        with self._path(EVENTS_TAB).open(newline="", encoding="utf-8") as fh:
+            table = list(csv.reader(fh))
+        if expect is not None:
+            for n in drop:
+                row = table[n - 1] if 2 <= n <= len(table) else []
+                if len(row) < 3 or row[1] != expect.get(n) or row[2] != SEEN:
+                    raise RuntimeError(f"Events row {n} no longer holds the row the fold planned to delete")
+        p = self._path(EVENTS_TAB)
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(row for n, row in enumerate(table, start=1) if n not in drop)
+        os.replace(tmp, p)  # atomic
+        return len(drop)
 
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its row number: header = row 1, an unreadable row still advances the count), Identity and Tally.
