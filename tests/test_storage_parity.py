@@ -1,0 +1,351 @@
+"""Storage parity (D-57, P3-05 and P3-07): the named differences, the repair and the parity clock.
+
+Mocked and offline (AGENTS rules 5 and 8): synthetic Events rows checked with the pure `parity.check_dual`, and the pipeline run
+through the `Harness` of `tests/test_core.py` over the real CSV state in a temp directory. Nothing here touches Google Sheets,
+Groq or Telegram; the real seed size and the check's seconds at about 200,000 rows are live observations for plan 03-05.
+"""
+
+from __future__ import annotations
+
+import csv
+import sys
+import unittest
+from collections import defaultdict
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import compact  # noqa: E402
+import freshness as fr  # noqa: E402
+import ledger as lg  # noqa: E402
+import parity  # noqa: E402
+import pipeline as pl  # noqa: E402
+import state as stm  # noqa: E402
+from test_core import T0, HarnessCase, ago, job  # noqa: E402
+from test_storage_pipeline import history_event, read_csv, storage_of  # noqa: E402
+
+NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def at(**kw: float) -> str:
+    return lg.stamp(NOW - timedelta(**kw))
+
+
+class Synthetic:
+    """A consistent dual-write world built the way the pipeline builds it: per run, `split_observations` gives the Identity
+    entries and the Tally counts, so the stored side never comes from the code under test (`repair_plan`, `check_dual`)."""
+
+    def __init__(self) -> None:
+        events: list[lg.Event] = []
+
+        def seen(key: str, when: str, disposition: str, run: str = "", **kw: object) -> None:
+            events.append(history_event(key, when, disposition, run, **kw))  # type: ignore[arg-type]
+
+        for i in range(1, 6):  # an admission wave: three boards baselined in one run (the mixed-case Lever board is keyed in lower case)
+            seen(f"greenhouse|acme|{i}", at(days=9), lg.BASELINED, "wave")
+        for i in range(1, 5):
+            seen(f"greenhouse|globex|{i}", at(days=9), lg.BASELINED, "wave")
+        seen("lever|foo|abc1", at(days=9), lg.BASELINED, "wave")
+        seen("lever|foo|def2", at(days=9), lg.BASELINED, "wave")
+        for day in (5, 4, 3, 2, 1):  # steady days: one run a day with gated and stale rows and an operational job
+            seen(f"greenhouse|acme|f{day}", at(days=day), lg.FILTERED, f"steady-{day}", published=at(days=day, hours=2))
+            seen(f"greenhouse|globex|s{day}", at(days=day), lg.STALED, f"steady-{day}", published=at(days=60))
+            seen(f"greenhouse|acme|p{day}", at(days=day), lg.PENDING, f"steady-{day}", published=at(days=day, hours=1))
+        events.append(lg.Event(at(days=1), "greenhouse|acme|p1", lg.EVALUATED, fr.VERIFIED_FRESH, detail={"status": "To Apply", "alert": True, "run": "steady-1"}))
+        events.append(lg.Event(at(days=1), "greenhouse|acme|p2", lg.ERROR, detail={"stage": "evaluate", "attempt": 1, "run": "steady-2"}))
+        seen("greenhouse|acme|r1", at(days=2, hours=3), lg.FILTERED, "rehearsal-1")  # a rehearsal run: its rows are ordinary ledger rows
+        seen("greenhouse|acme|old1", at(days=12), lg.BASELINED)  # written before run ids existed
+        seen("greenhouse|acme|old2", at(days=12), lg.STALED)
+        events.sort(key=lambda e: e.time)
+        self.events = events
+        by_run: dict[tuple[str, str], list[lg.Event]] = defaultdict(list)
+        for ev in events:
+            by_run[(str(ev.detail.get("run") or ""), ev.time)].append(ev)
+        identity = compact.IdentitySet()
+        self.tally: list[compact.TallyRow] = []
+        for (run_id, run_at), group in sorted(by_run.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            split = compact.split_observations(group, compact.MODE_DUAL)
+            identity.apply(identity.plan_additions(split.identity, "2026-10-12T00:00:00Z"))
+            if split.tally:
+                self.tally.append(compact.TallyRow(run_id, run_at, sum(split.tally.values()), dict(sorted(split.tally.items()))))
+        self.rows = identity.all_rows()
+
+    def check(self, *, rows: list[compact.IdentityRow] | None = None, tally: list[compact.TallyRow] | None = None, events: list[lg.Event] | None = None) -> parity.ParityReport:
+        events = self.events if events is None else events
+        ident = compact.IdentitySet.from_rows(self.rows if rows is None else rows)
+        view = compact.Ledger(compact.simulate_compact(events, NOW), [], ident, self.tally if tally is None else tally)
+        return parity.check_dual(events, view, now=NOW)
+
+    def row_with(self, entry: str) -> compact.IdentityRow:
+        return next(r for r in self.rows if entry in r.entries())
+
+    def with_row(self, old: compact.IdentityRow, new: compact.IdentityRow) -> list[compact.IdentityRow]:
+        return [new if r is old else r for r in self.rows]
+
+
+class MutationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.w = Synthetic()
+
+    def assertOnly(self, report: parity.ParityReport, *kinds: str, ref: str | None = None) -> None:
+        counted = [d for d in report.diffs if not d.declared]
+        self.assertEqual(sorted({d.kind for d in counted}), sorted(kinds), [d.text() for d in counted])
+        if ref is not None:
+            self.assertIn(ref, [d.ref for d in counted])
+        self.assertEqual(report.counted, len(counted))
+
+    def test_the_consistent_world_has_zero_counted_differences_and_says_what_it_compared(self) -> None:
+        report = self.w.check()
+        self.assertEqual((report.counted, report.declared), (0, 0), [d.text() for d in report.diffs])
+        self.assertGreater(report.compared["seen_keys"], 25)
+        self.assertEqual(report.compared["identity_entries"], 12 + 6 + 6)  # twelve baselines, six gated and six stale entries, each once
+        self.assertGreaterEqual(report.compared["tally_groups"], 8)
+        self.assertGreater(report.compared["state_counters"], 2)
+
+    def test_one_identity_id_removed(self) -> None:
+        row = self.w.row_with("b3")
+        kept = [e for e in row.entries() if e != "b3"]
+        rows = self.w.with_row(row, replace(row, ids=",".join(kept), count=len(kept)))
+        self.assertOnly(self.w.check(rows=rows), "identity_missing", ref="greenhouse|acme|3")
+
+    def test_one_identity_id_added(self) -> None:
+        row = self.w.row_with("b3")
+        rows = self.w.with_row(row, replace(row, ids=row.ids + ",b999", count=row.count + 1))
+        self.assertOnly(self.w.check(rows=rows), "identity_extra", ref="greenhouse|acme|999")
+
+    def test_a_kind_letter_changed(self) -> None:
+        row = self.w.row_with("ff5")
+        rows = self.w.with_row(row, replace(row, ids=row.ids.replace("ff5", "bf5")))
+        self.assertOnly(self.w.check(rows=rows), "identity_kind", ref="greenhouse|acme|f5")
+
+    def test_a_wrong_count(self) -> None:
+        row = self.w.row_with("b3")
+        rows = self.w.with_row(row, replace(row, count=row.count + 1))
+        self.assertOnly(self.w.check(rows=rows), "identity_count", ref=f"{row.stem}#{row.chunk}")
+
+    def test_the_highest_chunks_marker_removed(self) -> None:
+        row = self.w.row_with("b3")
+        rows = self.w.with_row(row, replace(row, baselined_at=""))
+        self.assertOnly(self.w.check(rows=rows), "identity_marker", ref=row.stem)
+
+    def test_a_tally_row_lost(self) -> None:
+        lost = self.w.tally[3]
+        tally = [t for t in self.w.tally if t is not lost]
+        self.assertOnly(self.w.check(tally=tally), "tally_missing", ref=f"{lost.run_id}@{lost.run_at}")
+
+    def test_a_tally_run_id_changed(self) -> None:
+        wrong = self.w.tally[3]
+        tally = [replace(t, run_id="not-a-run") if t is wrong else t for t in self.w.tally]
+        report = self.w.check(tally=tally)
+        self.assertOnly(report, "tally_missing", "tally_orphan")
+        self.assertIn(f"not-a-run@{wrong.run_at}", [d.ref for d in report.diffs if d.kind == "tally_orphan"])
+
+    def test_a_tally_date_dimension_flipped(self) -> None:
+        wrong = next(t for t in self.w.tally if any(dim.endswith("|k") for dim in t.counts))
+        dim = next(dim for dim in wrong.counts if dim.endswith("|k"))
+        flipped = {(dim[:-1] + "u" if k == dim else k): n for k, n in wrong.counts.items()}
+        tally = [replace(t, counts=flipped) if t is wrong else t for t in self.w.tally]
+        report = self.w.check(tally=tally)
+        self.assertOnly(report, "tally_count")
+        self.assertIn(f"{wrong.run_id}@{wrong.run_at} {dim}", [d.ref for d in report.diffs])
+
+    def test_a_key_with_fewer_than_three_segments_is_declared_not_counted(self) -> None:
+        unkeyable = history_event("greenhouse|acme", at(days=12, hours=1), lg.STALED, "legacy")
+        split = compact.split_observations([unkeyable], compact.MODE_DUAL)
+        self.assertEqual((split.identity, sum(split.tally.values())), ({}, 1))  # counted in Tally, never an Identity entry
+        events = sorted(self.w.events + [unkeyable], key=lambda e: e.time)
+        tally = self.w.tally + [compact.TallyRow("legacy", unkeyable.time, 1, dict(split.tally))]
+        view = compact.Ledger(compact.simulate_compact(events, NOW), [], compact.IdentitySet.from_rows(self.w.rows), tally)
+        self.assertIn(unkeyable, view.events)  # twelve days old and stale, yet the fold would never delete it
+        report = parity.check_dual(events, view, now=NOW)
+        self.assertEqual([(d.kind, d.ref, d.declared) for d in report.diffs], [("unkeyable", "greenhouse|acme", True)])
+        self.assertEqual((report.counted, report.declared), (0, 1))
+
+    def test_a_second_seen_row_for_one_key_is_declared_not_counted(self) -> None:
+        again = history_event("greenhouse|acme|f4", at(hours=5), lg.FILTERED, "steady-0")
+        events = self.w.events + [again]
+        report = self.w.check(events=events)
+        self.assertEqual([(d.kind, d.ref) for d in report.diffs], [("duplicate_seen", "greenhouse|acme|f4")])
+        self.assertEqual((report.counted, report.declared), (0, 1))
+
+    def test_a_state_counter_that_differs_between_the_two_views_is_named(self) -> None:
+        events = self.w.events
+        view = compact.Ledger([ev for ev in compact.simulate_compact(events, NOW) if not (ev.event == lg.ERROR)], [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally)
+        report = parity.check_dual(events, view, now=NOW)
+        self.assertEqual([(d.kind, d.ref) for d in report.diffs if not d.declared], [("state_counts", "error_attempts:evaluate")])
+
+    def test_no_difference_text_holds_a_title_or_a_url(self) -> None:
+        row = self.w.row_with("b3")
+        rows = self.w.with_row(row, replace(row, ids=row.ids + ",b999", count=row.count + 1))
+        report = self.w.check(rows=rows, tally=self.w.tally[1:])
+        self.assertGreater(report.counted, 1)
+        text = " ".join(d.text() for d in report.diffs)
+        for forbidden in ("http", "t t", "Intern", "Remote"):
+            self.assertNotIn(forbidden, text)
+
+
+class SimulationTests(unittest.TestCase):
+    """The pure helpers later plans reuse: the simulated compact view and Tally minus the retained recount."""
+
+    def setUp(self) -> None:
+        self.w = Synthetic()
+
+    def test_simulate_compact_drops_baselines_and_week_old_gated_rows_and_keeps_the_rest(self) -> None:
+        kept = compact.simulate_compact(self.w.events, NOW)
+        seen = [e for e in kept if e.event == lg.SEEN]
+        self.assertFalse([e for e in seen if e.disposition == lg.BASELINED])  # every baseline row is gone, whatever its age
+        gated = sorted(e.key for e in seen if e.disposition in (lg.FILTERED, lg.STALED))
+        self.assertEqual(gated, sorted([f"greenhouse|acme|f{d}" for d in range(1, 6)] + [f"greenhouse|globex|s{d}" for d in range(1, 6)] + ["greenhouse|acme|r1"]))
+        self.assertNotIn("greenhouse|acme|old2", gated)  # twelve days old: gone
+        self.assertEqual(len([e for e in kept if e.event != lg.SEEN]), 2)  # the evaluated and error rows are operational
+        self.assertEqual(len([e for e in seen if e.disposition == lg.PENDING]), 5)
+
+    def test_a_row_exactly_seven_days_old_is_folded_and_one_second_younger_is_kept(self) -> None:
+        edge = history_event("greenhouse|acme|edge", lg.stamp(NOW - compact.FOLD_AGE), lg.FILTERED, "r")
+        young = history_event("greenhouse|acme|young", lg.stamp(NOW - compact.FOLD_AGE + timedelta(seconds=1)), lg.FILTERED, "r")
+        kept = compact.simulate_compact([edge, young], NOW)
+        self.assertEqual([e.key for e in kept], ["greenhouse|acme|young"])
+
+    def test_tally_minus_the_retained_recount_is_what_was_folded(self) -> None:
+        ledger = compact.Ledger(compact.simulate_compact(self.w.events, NOW), [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally)
+        folded = ledger.folded()
+        self.assertEqual(sum(f.n for f in folded), 12 + 1)  # the twelve baselines and the one stale row older than seven days
+        self.assertEqual(ledger.negative(), [])
+        self.assertTrue(all(f.n > 0 for f in folded))
+        whole = compact.Ledger(self.w.events, [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally)
+        self.assertEqual((whole.folded(), whole.negative()), ([], []))  # dual mode: nothing is folded
+
+    def test_a_lost_tally_count_shows_as_negative(self) -> None:
+        tally = [replace(t, counts={}) if t.run_id == "steady-2" else t for t in self.w.tally]
+        ledger = compact.Ledger(self.w.events, [], compact.IdentitySet.from_rows(self.w.rows), tally)
+        self.assertEqual(sorted((n.run_id, n.n) for n in ledger.negative()), [("steady-2", 1), ("steady-2", 1)])
+
+    def test_parse_dim_reads_what_tally_dim_wrote(self) -> None:
+        ev = history_event("greenhouse|acme|f1", at(days=1), lg.FILTERED, "r", published=at(days=1, hours=1))
+        self.assertEqual(
+            compact.parse_dim(compact.tally_dim(ev)),
+            {"ats": "greenhouse", "source": "poll", "disposition": "filtered", "pass": "", "freshness": "recent", "date_known": True},
+        )
+        self.assertFalse(compact.parse_dim("lever|search|baseline|baseline|baseline|u")["date_known"])
+
+    def test_repair_plan_names_what_is_missing_and_nothing_else(self) -> None:
+        empty = compact.Ledger(self.w.events, [], compact.IdentitySet(), [])
+        plan = compact.repair_plan(empty)
+        self.assertEqual(plan.ids, 12 + 6 + 6)
+        self.assertEqual([(t.run_id, t.run_at) for t in plan.tally], [(t.run_id, t.run_at) for t in sorted(self.w.tally, key=lambda t: (t.run_at, t.run_id))])
+        done = compact.Ledger(self.w.events, [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally)
+        self.assertFalse(compact.repair_plan(done))
+        partial = compact.Ledger(self.w.events, [], compact.IdentitySet.from_rows(self.w.rows), self.w.tally[:2])
+        self.assertEqual((compact.repair_plan(partial).ids, len(compact.repair_plan(partial).tally)), (0, len(self.w.tally) - 2))
+
+
+# --------------------------------------------------------------------------- the pipeline
+
+
+def rewrite_identity(case: HarnessCase, drop: str) -> None:
+    """Hand-remove one posting ID entry from the Identity file (what a hand edit of the Sheet would do)."""
+    path = case.w.state.dir / "identity.csv"
+    rows = read_csv(case, "identity")
+    for row in rows[1:]:
+        entries = [e for e in row[4].split(",") if e != drop]
+        row[3], row[4] = str(len(entries)), ",".join(entries)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerows(rows)
+
+
+class PipelineDifferenceTests(HarnessCase):
+    def baselined(self, *ids: str) -> None:
+        self.w.listings[self.board.key] = [job("acme", jid) for jid in ids]
+        self.w.run(seeds=[self.board])  # run 1 seeds (an empty ledger) and baselines
+
+    def test_a_missing_identity_id_degrades_the_run_but_never_changes_detection_then_repair_clears_it(self) -> None:
+        self.baselined("1", "2", "3")
+        self.w.run(minutes_later=60)  # run 2: the first checked run, clean
+        self.assertEqual(storage_of(self).last_check["counted"], 0)
+        rewrite_identity(self, "b2")
+        later = T0 + timedelta(minutes=180)
+        self.w.listings[self.board.key] = [job("acme", jid) for jid in ("1", "2", "3")] + [job("acme", "7", published=ago(minutes=10, base=later))]
+        run = self.w.run(minutes_later=120)  # run 3 still lists job 2, which Identity no longer knows
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage", pl.degraded_reason(run))
+        self.assertIn("storage parity: 1 differences (identity_missing 1)", run.notes)
+        state = storage_of(self)
+        self.assertEqual(state.last_diffs, ["identity_missing greenhouse|acme|2"])
+        self.assertEqual((state.days["2026-10-14"]["runs"], state.days["2026-10-14"]["diff_runs"]), (2, 1))
+        self.assertIsNone(state.bar_met_at)
+        seen = [e.key for e in self.w.events(kind=lg.SEEN)]
+        self.assertEqual(sorted(seen), ["greenhouse|acme|1", "greenhouse|acme|2", "greenhouse|acme|3", "greenhouse|acme|7"])  # job 2 was not observed again
+        self.assertEqual([e.key for e in self.w.events(kind=lg.EVALUATED)], ["greenhouse|acme|7"])  # detection, evaluation and alerts as without the check
+        self.assertEqual(len(self.w.alerts), 1)
+        self.assertEqual(self.w.state.load_ledger().identity.kind("greenhouse|acme|2"), "b")  # the repair at run start re-added the ID
+        clean = self.w.run(minutes_later=60)  # run 4
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK)
+        state = storage_of(self)
+        self.assertEqual((state.last_check["counted"], state.last_diffs), (0, []))
+        self.assertEqual((state.days["2026-10-14"]["runs"], state.days["2026-10-14"]["diff_runs"]), (3, 1))
+        self.assertEqual(len(self.w.alerts), 1)
+
+    def test_a_check_that_raises_is_a_counted_difference_and_a_failed_day_entry(self) -> None:
+        self.baselined("1", "2")
+        with mock.patch.object(parity, "check_dual", side_effect=RuntimeError("boom with a secret")):
+            run = self.w.run(minutes_later=60)
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage", pl.degraded_reason(run))
+        self.assertIn("storage check failed: RuntimeError", run.notes)
+        stored = self.w.state.load_discovery_state()[compact.STORAGE_KEY]
+        for text in (run.notes, stored):
+            self.assertNotIn("secret", text)  # the exception type only, never its text
+        state = storage_of(self)
+        day = state.days["2026-10-14"]
+        self.assertEqual((day["runs"], day["diff_runs"], day["failed"]), (1, 1, 1))
+        self.assertEqual((state.last_check["counted"], state.last_diffs), (1, ["check_failed RuntimeError"]))
+        self.assertEqual(len(self.w.events(kind=lg.SEEN)), 2)  # the run's own work is unaffected
+        clean = self.w.run(minutes_later=60)
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK)
+
+    def test_a_check_skipped_past_the_cutoff_is_not_recorded_and_does_not_reset_the_clock(self) -> None:
+        self.baselined("1")
+        self.w.run(minutes_later=60)
+        before = storage_of(self)
+        self.assertEqual(before.days["2026-10-14"]["runs"], 1)
+        late = self.w.run(minutes_later=60, process_t0=0.0, clock=lambda: pl.STORAGE_CHECK_CUTOFF_S + 1.0)
+        after = storage_of(self)
+        self.assertEqual((after.days, after.last_check, after.bar_met_at), (before.days, before.last_check, before.bar_met_at))
+        self.assertNotIn("storage", late.notes)
+        self.w.run(minutes_later=60)
+        self.assertEqual(storage_of(self).days["2026-10-14"]["runs"], 2)
+
+    def test_the_storage_key_the_notes_and_the_log_never_hold_job_text(self) -> None:
+        self.w.listings[self.board.key] = [job("acme", "1", location="Nowhere Land ZZQ"), job("acme", "2", title="Secret Title ZZQ")]
+        self.w.run(seeds=[self.board])
+        rewrite_identity(self, "b1")
+        with self.assertLogs("hunter", level="INFO") as logs:
+            run = self.w.run(minutes_later=60)
+        stored = self.w.state.load_discovery_state()[compact.STORAGE_KEY]
+        text = "\n".join([stored, run.notes, *logs.output])
+        for forbidden in ("Secret Title ZZQ", "Nowhere Land ZZQ", "http"):
+            self.assertNotIn(forbidden, text)
+        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=dual, 1 counted") for line in logs.output), logs.output)
+        self.assertEqual(sum("Storage" in line for line in logs.output if line.startswith("INFO")), 1)  # one storage line per run
+
+    def test_a_tally_row_lost_between_runs_is_repaired_and_named(self) -> None:
+        self.baselined("1", "2")
+        self.w.run(minutes_later=60)
+        path = self.w.state.dir / "tally.csv"
+        rows = read_csv(self, "tally")
+        self.assertEqual(len(rows), 3)
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(rows[:1] + rows[2:])  # the baseline run's row is gone
+        run = self.w.run(minutes_later=60)
+        self.assertIn("storage parity: ", run.notes)
+        self.assertIn("tally_missing", run.notes)
+        self.assertEqual(len(read_csv(self, "tally")) - 1, 3 + 0)  # repaired at run start: the group is back exactly once
+        self.assertEqual(self.w.run(minutes_later=60).outcome, stm.OUTCOME_OK)
+
+
+if __name__ == "__main__":
+    unittest.main()
