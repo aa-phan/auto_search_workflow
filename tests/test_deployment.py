@@ -230,8 +230,30 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_telegram_is_required_for_every_run_that_can_deliver_but_not_for_the_read_only_reports(self) -> None:
         text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
-        self.assertIn("(inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
+        self.assertIn("(inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report || inputs.storage_parity) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
         self.assertIn('required="$required TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"', text)
+
+    def test_storage_parity_input_is_read_only_and_excluded_from_the_poller(self) -> None:
+        """T-03-15: a boolean input, a fixed command, no input text inside `run:`, never a delivering run (static check of the workflow file)."""
+        text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
+        inputs_block = text.split("    inputs:\n")[1].split("\n\n")[0]
+        names = re.findall(r"^      ([a-z_]+):\n", inputs_block, re.M)
+        self.assertIn("storage_parity", names)
+        self.assertLessEqual(len(names), 25)  # GitHub allows 25 top-level workflow_dispatch inputs
+        declared = re.search(r"^      storage_parity:\n((?:        .*\n)+)", inputs_block + "\n", re.M)
+        assert declared is not None
+        self.assertIn("type: boolean", declared.group(1))
+        self.assertIn("default: false", declared.group(1))
+        self.assertIn("read only", declared.group(1))
+        step = re.search(r"^      - name: Storage parity \(read only\)\n((?:        .*\n?)+)", text, re.M)
+        assert step is not None
+        body = step.group(1).strip().splitlines()
+        self.assertEqual([ln.strip() for ln in body], ["if: ${{ inputs.storage_parity }}", "run: python hunter.py --storage-parity"])
+        poller = next(ln for ln in text.splitlines() if ln.strip().startswith("if:") and "!inputs.delivery_test" in ln)
+        self.assertIn("!inputs.storage_parity", poller)  # the poller step never runs beside it
+        require = next(ln for ln in text.splitlines() if "REQUIRE_TELEGRAM:" in ln)
+        self.assertIn("inputs.storage_report || inputs.storage_parity) && 'no' || 'yes'", require)  # it never delivers, so Telegram is not required
+        self.assertEqual(text.count("--storage-parity"), 1)
 
     def test_smartrecruiters_override_is_explicit_in_both_workflows_slowed_and_announced(self) -> None:
         import inventory as inv

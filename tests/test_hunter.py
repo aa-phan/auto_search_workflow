@@ -5,8 +5,11 @@ All mocked (no network, no credentials). See tests/test_core.py for the polling/
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import json
+import types
 from datetime import datetime, timedelta, timezone
 import os
 import sys
@@ -19,8 +22,10 @@ from unittest import mock
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # the tests directory itself, so this module also runs on its own (`python -m unittest tests.test_hunter`)
 
 import boards as bd  # noqa: E402
+import compact  # noqa: E402
 import freshness as fr  # noqa: E402
 import discovery as dsc  # noqa: E402
 import eval_budget as eb  # noqa: E402
@@ -28,7 +33,11 @@ import hunter as h  # noqa: E402
 import ledger as lg  # noqa: E402
 import pipeline as pl  # noqa: E402
 import search  # noqa: E402
+import state as stm  # noqa: E402
+from fake_sheets import FakeSpreadsheet as SharedSheet  # noqa: E402
 from meter import METER  # noqa: E402
+from test_core import Harness  # noqa: E402
+from test_storage_pipeline import historical_ledger  # noqa: E402
 
 
 def settings(**kw: object) -> h.Settings:
@@ -1313,3 +1322,100 @@ if __name__ == "__main__":
         del sh.timezone
         self.assertIsNone(h.SheetStore.sheet_timezone(store))  # FakeSpreadsheet has no attribute: handled
 
+
+
+
+# --------------------------------------------------------------------------- compact storage: `--storage-parity` (read only)
+
+
+class StorageParityCommandTests(unittest.TestCase):
+    """`run_storage_parity`: mocked (the in-memory Sheets fake, fake ATS listings, fake scorer); nothing here touched a real Sheet.
+    The command must change nothing: every case compares a full snapshot of the fake before and after and forbids the writer lease."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.w = Harness(tmp.name)
+        self.sh = SharedSheet()
+        self.w.state = stm.SheetState(self.sh)
+        self.w.state.ensure()
+        self.store = types.SimpleNamespace(state=self.w.state, tracker_rows=lambda: [], display_tz=timezone.utc)
+        lease = mock.patch.object(h, "writer_lease", side_effect=AssertionError("a read-only check must not take the writer lease"))
+        lease.start()
+        self.addCleanup(lease.stop)
+
+    def seeded_and_checked(self) -> None:
+        self.w.state.append_events(historical_ledger())
+        self.w.run()
+        self.w.run(minutes_later=60)
+
+    def snapshot(self) -> tuple[dict[str, list[list[str]]], int, int]:
+        return {t: [list(r) for r in ws.values] for t, ws in self.sh.sheets.items()}, self.sh.writes, len(self.sh.requests)
+
+    def command(self) -> tuple[int, str]:
+        before = self.snapshot()
+        out = io.StringIO()
+        with mock.patch.object(h.fr, "utcnow", return_value=self.w.now + timedelta(minutes=5)), contextlib.redirect_stdout(out):
+            code = h.run_storage_parity(self.store, settings())
+        self.assertEqual(self.snapshot(), before)  # zero Sheet writes, no Discovery key, no lease, no spreadsheet batch
+        return code, out.getvalue()
+
+    def test_a_seeded_consistent_sheet_exits_zero_prints_the_clock_and_writes_nothing(self) -> None:
+        self.seeded_and_checked()
+        code, text = self.command()
+        self.assertEqual(code, 0)
+        self.assertIn("STORAGE PARITY (read only; nothing was written)", text)
+        self.assertIn("0 counted differences", text)
+        self.assertIn("mode dual", text)
+        self.assertIn("seeded 2026-10-14T12:00:00Z", text)
+        self.assertRegex(text, r"clock: \d of 3 clean complete UTC days, admission seen (yes|no), bar met (yes|no)")
+        self.assertIn("seen_keys", text)  # what was compared
+        self.assertEqual([ln for ln in text.splitlines() if ln.startswith("  ")], [])  # no difference lines
+
+    def test_a_removed_identity_id_exits_one_and_names_the_key_without_changing_it(self) -> None:
+        self.seeded_and_checked()
+        ws = self.sh.sheets[stm.IDENTITY_TAB]
+        row = next(r for r in ws.values[1:] if r[0] == "greenhouse|acme")
+        row[4] = ",".join(e for e in row[4].split(",") if e != "b1")  # drop one posting ID from the stored chunk
+        code, text = self.command()
+        self.assertEqual(code, 1)
+        self.assertRegex(text, r"[1-9]\d* counted differences")
+        self.assertIn("identity_missing greenhouse|acme|1", text)
+        self.assertNotIn("0 counted differences", text)
+
+    def test_at_most_fifty_differences_are_listed_and_the_rest_are_counted(self) -> None:
+        self.seeded_and_checked()
+        ws = self.sh.sheets[stm.IDENTITY_TAB]
+        for row in ws.values[1:]:
+            row[4] = ""  # every stored ID is gone: far more than 50 differences
+        code, text = self.command()
+        self.assertEqual(code, 1)
+        listed = [ln for ln in text.splitlines() if ln.startswith("  ")]
+        self.assertLessEqual(len(listed), 51)  # 50 differences and one "and N more" line
+        self.assertIn("more not listed", text)
+
+    def test_not_seeded_or_not_in_dual_mode_exits_two_with_one_line_and_writes_nothing(self) -> None:
+        code, text = self.command()  # nothing run yet: no `storage` key
+        self.assertEqual(code, 2)
+        self.assertEqual(len(text.strip().splitlines()), 1)
+        self.assertIn("not seeded", text)
+        self.seeded_and_checked()
+        for mode in (compact.MODE_COMPACT, compact.MODE_RESTORED):
+            with self.subTest(mode):
+                st = compact.StorageState.load(self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+                st.mode = mode
+                row = next(r for r in self.sh.sheets[stm.DISCOVERY_TAB].values if r and r[0] == compact.STORAGE_KEY)
+                row[1] = st.to_json()
+                code, text = self.command()
+                self.assertEqual(code, 2)
+                self.assertEqual(len(text.strip().splitlines()), 1)
+                self.assertIn(mode, text)
+
+    def test_the_command_needs_no_groq_key_and_is_dispatched_before_the_writer_lease(self) -> None:
+        src = (Path(__file__).resolve().parent.parent / "hunter.py").read_text()
+        self.assertIn('"--storage-parity"', src)
+        flags = src.split("inventory_mode = ")[1].split("\n")[0]
+        self.assertIn("args.storage_parity", flags)  # inventory mode: no GROQ_API_KEY and no resume are required
+        dispatch = src.split("if args.storage_parity:")[1]
+        self.assertIn("run_storage_parity(store, settings)", dispatch.split("\n")[1])
+        self.assertLess(src.index("if args.storage_parity:"), src.index("writes = not args.dry_run"))
