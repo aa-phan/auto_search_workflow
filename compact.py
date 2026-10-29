@@ -13,8 +13,9 @@ text (the repository and its logs are public).
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import freshness as fr
@@ -24,6 +25,11 @@ STORAGE_KEY = "storage"  # the Discovery key holding the storage mode (JSON)
 IDENTITY_CELL_CHARS = 40_000  # one Identity cell; the Sheets limit is 50,000 characters
 IDENTITY_REQUEST_CHARS = 1_000_000  # Identity cell characters in one Sheets write (Google recommends at most 2 MB)
 MODE_DUAL, MODE_COMPACT, MODE_RESTORED = "dual", "compact", "restored"
+FOLD_AGE = timedelta(days=7)  # a filtered or stale row older than this leaves Events (after cutover); the parity check simulates the same cut
+PARITY_DAYS = 3  # complete consecutive UTC days of clean checked runs the bar needs (P3-05)
+PARITY_MIN_RUNS_PER_DAY = 12  # checked runs a UTC day needs to count (about half of the hourly runs; DECISIONS D-57)
+STORAGE_DAYS_KEPT = 14  # days of parity bookkeeping kept in the `storage` key
+MAX_LISTED_DIFFS = 10  # differences named in the `storage` key
 
 KIND_OF = {lg.BASELINED: "b", lg.FILTERED: "f", lg.STALED: "s"}  # disposition -> one-letter kind prefix of an entry
 DISPOSITION_OF = {kind: disposition for disposition, kind in KIND_OF.items()}
@@ -56,6 +62,17 @@ def encode_entry(kind: str, posting_id: str) -> str:
 def decode_entry(entry: str) -> tuple[str, str]:
     """The inverse of `encode_entry`: undo the escapes in the reverse order."""
     return entry[:1], entry[1:].replace("%2C", ",").replace("%25", "%")
+
+
+def identity_entry(ev: lg.Event) -> tuple[str, str] | None:
+    """(stem, encoded entry) for an identity-class event that can be keyed, else None. None means the row always stays in
+    Events: its key has fewer than three segments, or its entry alone would not fit one cell."""
+    disposition = identity_class(ev)
+    parts = stem_and_id(ev.key) if disposition else None
+    if disposition is None or parts is None:
+        return None
+    entry = encode_entry(KIND_OF[disposition], parts[1])
+    return None if len(entry) > IDENTITY_CELL_CHARS else (parts[0], entry)
 
 
 # --------------------------------------------------------------------------- tally
@@ -163,6 +180,13 @@ class IdentitySet:
                 kinds.setdefault(pid, kind)
         self._kinds[stem] = kinds
 
+    def copy(self) -> "IdentitySet":
+        """An independent snapshot (rows are immutable, so lists and dicts are copied, not the rows)."""
+        out = IdentitySet()
+        out._rows = {stem: list(rows) for stem, rows in self._rows.items()}
+        out._kinds = {stem: dict(kinds) for stem, kinds in self._kinds.items()}
+        return out
+
     def stems(self) -> list[str]:
         return sorted(self._rows)
 
@@ -263,15 +287,76 @@ def split_observations(events: Iterable[lg.Event], mode: str) -> Split:
             kept.append(ev)
             continue
         tally[tally_dim(ev)] += 1
-        parts = stem_and_id(ev.key)
-        entry = encode_entry(KIND_OF[disposition], parts[1]) if parts else ""
-        if parts is None or len(entry) > IDENTITY_CELL_CHARS:
+        keyed = identity_entry(ev)
+        if keyed is None:
             kept.append(ev)  # unkeyable: stays in Events (never folded)
             continue
-        identity[parts[0]].append(entry)
+        identity[keyed[0]].append(keyed[1])
         if not (mode == MODE_COMPACT and disposition == lg.BASELINED):
             kept.append(ev)
     return Split(kept, dict(identity), dict(tally))
+
+
+# --------------------------------------------------------------------------- reading the Events rows as identity observations
+
+
+def first_seen_identity(events: Iterable[lg.Event]) -> dict[str, lg.Event]:
+    """The first `seen` event of each key, kept only when it is identity-class (the one `replay` lets win; a later `seen` row
+    for the same key is a duplicate that Tally and every report ignore)."""
+    first: dict[str, lg.Event | None] = {}
+    for ev in events:
+        if ev.event != lg.SEEN or ev.key in first:
+            continue
+        first[ev.key] = ev if identity_class(ev) else None
+    return {key: ev for key, ev in first.items() if ev is not None}
+
+
+def tally_recount(events: Iterable[lg.Event]) -> dict[tuple[str, str], Counter[str]]:
+    """What Tally should hold for these Events rows: per (run id, run time) the identity-class dimension counts of the
+    first-seen rows. Rows written before run ids existed have the blank run id and their own time."""
+    out: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for ev in first_seen_identity(events).values():
+        out[(str(ev.detail.get("run") or ""), ev.time)][tally_dim(ev)] += 1
+    return dict(out)
+
+
+def event_time(ev: lg.Event) -> datetime | None:
+    """The event Time as an aware UTC instant (None when it is not in the ledger's own stamp format)."""
+    try:
+        return datetime.strptime(ev.time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def simulate_compact(events: list[lg.Event], now: datetime) -> list[lg.Event]:
+    """The Events rows a compact store would still hold: minus every keyable baseline `seen` row and minus every keyable
+    filtered or stale `seen` row whose Time is at or before `now - FOLD_AGE` (every `seen` row of such a key goes). Unkeyable
+    rows and every operational row are always kept. Used by the parity check only; nothing is deleted."""
+    cutoff = now - FOLD_AGE
+    dropped: set[str] = set()
+    for key, ev in first_seen_identity(events).items():
+        if identity_entry(ev) is None:
+            continue
+        when = event_time(ev)
+        if identity_class(ev) == lg.BASELINED or (when is not None and when <= cutoff):
+            dropped.add(key)
+    return [ev for ev in events if not (ev.event == lg.SEEN and ev.key in dropped)]
+
+
+def parse_dim(dim: str) -> dict[str, Any]:
+    """The inverse of `tally_dim`: ats, source, disposition, pass, freshness and whether the publication date was known."""
+    ats, source, disposition, pass_kind, freshness, date = (dim.split("|") + [""] * 6)[:6]
+    return {"ats": ats, "source": source, "disposition": disposition, "pass": pass_kind, "freshness": freshness, "date_known": date == "k"}
+
+
+@dataclass(frozen=True)
+class FoldedCount:
+    """Observations that Tally counted but the Events rows no longer hold (`n` > 0), for one run and dimension."""
+
+    run_id: str
+    run_at: str
+    dim: str
+    n: int
 
 
 # --------------------------------------------------------------------------- the merged view and the mode
@@ -289,6 +374,70 @@ class Ledger:
     def identity_keys(self) -> set[str]:
         return self.identity.keys()
 
+    def tally_totals(self) -> dict[tuple[str, str], Counter[str]]:
+        """The Tally counts per (run id, run time): rows with the same run id and time add up."""
+        out: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        for row in self.tally:
+            out[(row.run_id, row.run_at)].update(row.counts)
+        return dict(out)
+
+    def retained_counts(self) -> dict[tuple[str, str], Counter[str]]:
+        """The same counts recomputed from the Events rows this ledger holds."""
+        return tally_recount(self.events)
+
+    def folded(self) -> list[FoldedCount]:
+        """Tally minus the retained recount, per (run id, run time, dimension), only where positive: the observations that
+        no longer have an Events row. Nothing is folded in dual mode, so the list is empty there."""
+        retained = self.retained_counts()
+        out = []
+        for (run_id, run_at), counts in sorted(self.tally_totals().items()):
+            have = retained.get((run_id, run_at), Counter())
+            out += [FoldedCount(run_id, run_at, dim, n - have.get(dim, 0)) for dim, n in sorted(counts.items()) if n > have.get(dim, 0)]
+        return out
+
+    def negative(self) -> list[FoldedCount]:
+        """Where Tally is BELOW the retained recount (a Tally write was lost); `n` is the shortfall."""
+        totals = self.tally_totals()
+        out = []
+        for (run_id, run_at), have in sorted(self.retained_counts().items()):
+            counts = totals.get((run_id, run_at), Counter())
+            out += [FoldedCount(run_id, run_at, dim, n - counts.get(dim, 0)) for dim, n in sorted(have.items()) if n > counts.get(dim, 0)]
+        return out
+
+
+@dataclass
+class Repair:
+    """What the stores lack compared with the Events rows: Identity entries (encoded, by stem) and whole Tally runs."""
+
+    identity: dict[str, list[str]] = field(default_factory=dict)
+    tally: list[TallyRow] = field(default_factory=list)
+
+    @property
+    def ids(self) -> int:
+        return sum(len(v) for v in self.identity.values())
+
+    def __bool__(self) -> bool:
+        return bool(self.identity or self.tally)
+
+
+def repair_plan(ledger: Ledger) -> Repair:
+    """Identity entries for every keyable identity-class Events row whose key Identity lacks, and one Tally row for every
+    (run id, run time) group that has identity-class Events rows but no Tally row. Idempotent: planning again after the writes
+    gives an empty plan, so an interrupted seed is completed without writing an ID or a group twice."""
+    known = ledger.identity.keys()
+    identity: dict[str, list[str]] = defaultdict(list)
+    for key, ev in first_seen_identity(ledger.events).items():
+        keyed = identity_entry(ev)
+        if keyed is not None and key not in known:
+            identity[keyed[0]].append(keyed[1])
+    have = {(row.run_id, row.run_at) for row in ledger.tally}
+    tally = [
+        TallyRow(run_id, run_at, sum(counts.values()), dict(sorted(counts.items())))
+        for (run_id, run_at), counts in sorted(tally_recount(ledger.events).items(), key=lambda kv: (kv[0][1], kv[0][0]))
+        if (run_id, run_at) not in have
+    ]
+    return Repair(dict(identity), tally)
+
 
 def effective_mode(raw: str | None, *, legacy_present: bool) -> str:
     """The storage mode a run writes in. `compact` applies only when the `storage` key says so AND `Events_Legacy` exists;
@@ -303,3 +452,97 @@ def effective_mode(raw: str | None, *, legacy_present: bool) -> str:
     if mode == MODE_RESTORED:
         return MODE_RESTORED
     return MODE_DUAL
+
+
+# --------------------------------------------------------------------------- the `storage` key (parity bookkeeping)
+
+
+DAY_FIELDS = ("runs", "diff_runs", "failed", "admissions")
+
+
+def _utc_day(now: datetime) -> str:
+    return now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _clean_days(raw: Any) -> dict[str, dict[str, int]]:
+    days: dict[str, dict[str, int]] = {}
+    if isinstance(raw, dict):
+        for day, rec in raw.items():
+            if isinstance(day, str) and isinstance(rec, dict):
+                days[day] = {k: (n if (n := _int(rec.get(k)) if not isinstance(rec.get(k), bool) else None) is not None else 0) for k in DAY_FIELDS}
+    return days
+
+
+def _dict(raw: Any) -> dict[str, Any]:
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+@dataclass
+class StorageState:
+    """The Discovery key `storage` (JSON): the storage mode, when the stores were seeded and the parity clock. Reading is
+    tolerant: blank, truncated or hand-edited JSON gives a fresh state (never seeded, no clean day), so nothing is assumed met.
+
+    `days` is keyed by the UTC date of the run's start: `runs` (checked runs), `diff_runs` (runs with a counted difference or a
+    failed check), `failed` (checks that raised) and `admissions` (boards promoted into monitoring in the checked runs). The
+    records `cutover`, `fold` and `restore` stay empty here; later plans fill them and this class preserves them."""
+
+    mode: str = MODE_DUAL
+    seeded_at: str | None = None
+    days: dict[str, dict[str, int]] = field(default_factory=dict)
+    bar_met_at: str | None = None
+    last_check: dict[str, Any] = field(default_factory=dict)
+    last_diffs: list[str] = field(default_factory=list)
+    cutover: dict[str, Any] = field(default_factory=dict)
+    fold: dict[str, Any] = field(default_factory=dict)
+    restore: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)  # fields this version does not know, kept as they were
+
+    _KNOWN = ("mode", "seeded_at", "days", "bar_met_at", "last_check", "last_diffs", "cutover", "fold", "restore")
+
+    @classmethod
+    def load(cls, raw: str | None) -> "StorageState":
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        mode = data.get("mode")
+        seeded = data.get("seeded_at")
+        met = data.get("bar_met_at")
+        diffs = data.get("last_diffs")
+        return cls(
+            mode=mode if mode in (MODE_DUAL, MODE_COMPACT, MODE_RESTORED) else MODE_DUAL,
+            seeded_at=seeded if isinstance(seeded, str) and seeded else None,
+            days=_clean_days(data.get("days")),
+            bar_met_at=met if isinstance(met, str) and met else None,
+            last_check=_dict(data.get("last_check")),
+            last_diffs=[x for x in diffs if isinstance(x, str)] if isinstance(diffs, list) else [],
+            cutover=_dict(data.get("cutover")),
+            fold=_dict(data.get("fold")),
+            restore=_dict(data.get("restore")),
+            extra={k: v for k, v in data.items() if k not in cls._KNOWN},
+        )
+
+    def to_json(self) -> str:
+        body = {
+            **self.extra, "mode": self.mode, "seeded_at": self.seeded_at, "days": self.days, "bar_met_at": self.bar_met_at,
+            "last_check": self.last_check, "last_diffs": self.last_diffs, "cutover": self.cutover, "fold": self.fold, "restore": self.restore,
+        }  # fmt: skip
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    def record_check(
+        self, now: datetime, *, counted: int, declared: int, admissions: int, failed: bool = False, diffs: Iterable[str] = (),
+        compared: int = 0, seconds: float = 0.0,
+    ) -> None:  # fmt: skip
+        """Record one checked run under the UTC day it started in. A counted difference or a failed check restarts the clock."""
+        day = self.days.setdefault(_utc_day(now), {"runs": 0, "diff_runs": 0, "failed": 0, "admissions": 0})
+        day["runs"] += 1
+        if counted > 0 or failed:
+            day["diff_runs"] += 1
+            self.bar_met_at = None
+        if failed:
+            day["failed"] += 1
+        day["admissions"] += max(0, admissions)
+        self.last_check = {"at": lg.stamp(now.astimezone(timezone.utc)), "counted": counted, "declared": declared, "compared": compared, "seconds": round(seconds, 1)}
+        self.last_diffs = list(diffs)

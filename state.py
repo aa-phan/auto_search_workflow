@@ -473,7 +473,7 @@ class SheetState:
 
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its sheet row: header = row 1, an unreadable row still advances the count), Identity and Tally,
-        one read each. The Identity set is kept as this store's cache for `write_identity`."""
+        one read each. The Identity set is kept as this store's cache for `write_identity`; the returned ledger holds a copy."""
         events: list[Event] = []
         event_rows: list[int] = []
         for n, row in enumerate(self.sh.worksheet(EVENTS_TAB).get_all_values()[1:], start=2):
@@ -483,7 +483,7 @@ class SheetState:
         identity_rows = [r for n, row in enumerate(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:], start=2) if (r := compact.IdentityRow.from_row(row, n))]
         self._identity = compact.IdentitySet.from_rows(identity_rows)
         tally = [t for row in self.sh.worksheet(TALLY_TAB).get_all_values()[1:] if (t := compact.TallyRow.from_row(row))]
-        return compact.Ledger(events, event_rows, self._identity, tally)
+        return compact.Ledger(events, event_rows, self._identity.copy(), tally)  # a snapshot: later writes change the cache, never this
 
     def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         """Add the entries (already encoded, grouped by stem) to Identity; returns the number of rows written.
@@ -661,7 +661,7 @@ class CsvState:
 
     def load_ledger(self) -> compact.Ledger:
         """Events (each with its row number: header = row 1, an unreadable row still advances the count), Identity and Tally.
-        The Identity set is kept as this store's cache for `write_identity`."""
+        The Identity set is kept as this store's cache for `write_identity`; the returned ledger holds a copy."""
         events: list[Event] = []
         event_rows: list[int] = []
         for n, row in enumerate(self._rows(EVENTS_TAB), start=2):
@@ -671,7 +671,7 @@ class CsvState:
         identity_rows = [r for n, row in enumerate(self._rows(IDENTITY_TAB), start=2) if (r := compact.IdentityRow.from_row(row, n))]
         self._identity = compact.IdentitySet.from_rows(identity_rows)
         tally = [t for row in self._rows(TALLY_TAB) if (t := compact.TallyRow.from_row(row))]
-        return compact.Ledger(events, event_rows, self._identity, tally)
+        return compact.Ledger(events, event_rows, self._identity.copy(), tally)  # a snapshot: later writes change the cache, never this
 
     def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         """Add the entries (grouped by stem) to Identity; returns the number of rows written. The file is replaced atomically."""

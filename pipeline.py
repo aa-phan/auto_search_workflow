@@ -29,6 +29,7 @@ import eval_budget as eb
 import freshness as fr
 import inventory as inv
 import ledger as lg
+import parity
 import pools
 import search
 from meter import METER
@@ -51,6 +52,7 @@ MAX_SEARCH_HYDRATIONS = 20
 POLL_CUTOFF_S = 15 * 60  # no new board poll starts after this
 EVAL_CUTOFF_S = 20 * 60  # no new Groq call starts after this
 ALERT_CUTOFF_S = 22 * 60  # no new alert send starts after this
+STORAGE_CHECK_CUTOFF_S = 22 * 60  # the storage parity check does not start after this (it is skipped, not recorded; D-57)
 
 
 class FatalRunError(Exception):
@@ -184,7 +186,7 @@ def degraded_reason(run: RunRecord) -> str:
         reasons.append("discovery")
     if "final write failed" in run.notes or "run-start record not written" in run.notes:
         reasons.append("persistence")
-    if "storage write failed" in run.notes:
+    if any(note in run.notes for note in ("storage write failed", "storage parity:", "storage check failed", "storage repair failed")):
         reasons.append("storage")
     if run.alerts_failed:
         reasons.append("alerts")
@@ -199,6 +201,35 @@ def degraded_reason(run: RunRecord) -> str:
     if run.boards_failed and run.boards_failed >= max(3, run.boards_total // 10):
         reasons.append("boards")
     return ",".join(reasons)
+
+
+def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord) -> None:
+    """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes.
+
+    Events stays authoritative in dual mode, so a difference, a raised check or a slow check can only add a note, a degraded
+    outcome and a clock reset: detection, evaluation and alerts are already done when this runs. A check that raises is the
+    counted difference `check_failed` (unknown is never zero differences). Notes and the log line carry kinds and counts only."""
+    failed = False
+    t_check = time.monotonic()
+    try:
+        view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
+        report = parity.check_dual(ledger.events, view, now=now)
+    except Exception as exc:
+        failed = True
+        report = parity.ParityReport([parity.Diff(0, "check_failed", type(exc).__name__)], {}, round(time.monotonic() - t_check, 2))
+        log.error("Storage parity check raised %s", type(exc).__name__)
+        run.notes += f"storage check failed: {type(exc).__name__}; "
+    if report.counted and not failed:
+        run.notes += f"storage parity: {report.counted} differences ({', '.join(f'{k} {n}' for k, n in report.kinds().items())}); "
+    storage.record_check(
+        now, counted=report.counted, declared=report.declared, admissions=run.boards_activated, failed=failed,
+        diffs=report.named(compact.MAX_LISTED_DIFFS), compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
+    )  # fmt: skip
+    today = storage.days.get(now.astimezone(timezone.utc).strftime("%Y-%m-%d"), {})
+    log.info(
+        "Storage: mode=%s, %d counted and %d declared differences, %d job keys and %d Tally runs compared, %d checked runs today, check took %.1f s",
+        storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0), report.seconds,
+    )  # fmt: skip
 
 
 def run_cycle(d: Deps) -> RunRecord:
@@ -332,7 +363,35 @@ def run_cycle(d: Deps) -> RunRecord:
         found_keys: list[str] = []
         discovery_state = d.state.load_discovery_state()
         budget_loaded = True
+        storage = compact.StorageState.load(discovery_state.get(compact.STORAGE_KEY))
+        seeded_before = storage.seeded_at is not None  # a run that seeds checks nothing: its own writes are not in its snapshot yet
         mode = compact.effective_mode(discovery_state.get(compact.STORAGE_KEY), legacy_present=d.state.tab_exists(EVENTS_LEGACY_TAB))
+        if not d.dry_run:
+            # Repair (and, the first time, seed): add what the stores lack compared with the Events rows, Identity first, then the
+            # Tally runs. The plan is a set difference, so a seed that was interrupted is completed without writing an ID or a
+            # run twice. The `storage` key is saved only after the repair succeeded (an empty ledger has nothing to do).
+            repaired = True
+            try:
+                if plan := compact.repair_plan(ledger):
+                    rows = d.state.write_identity(plan.identity, lg.stamp(now)) if plan.identity else 0
+                    if plan.tally:
+                        d.state.append_tally(plan.tally)
+                    log.info(
+                        "Storage %s: %d IDs written in %d Identity rows for %d boards, %d Tally runs written",
+                        "seed" if storage.seeded_at is None else "repair", plan.ids, rows, len(plan.identity), len(plan.tally),
+                    )  # fmt: skip
+            except Exception as exc:
+                repaired = False
+                log.error("Storage repair failed: %s", type(exc).__name__)
+                run.notes += f"storage repair failed: {type(exc).__name__}; "
+            if repaired and storage.seeded_at is None:
+                storage.seeded_at = lg.stamp(now)
+                discovery_state[compact.STORAGE_KEY] = storage.to_json()
+                try:
+                    d.state.save_discovery_state(discovery_state, lg.stamp(now))
+                except Exception as exc:
+                    log.error("Could not record the storage seed: %s", type(exc).__name__)
+                    run.notes += f"storage write failed: {type(exc).__name__}; "
         if d.groq_budget is not None:
             d.groq_budget.restore(discovery_state.get(eb.GROQ_BUDGET_KEY), now)
             if d.groq_budget.rolled_from:
@@ -767,6 +826,19 @@ def run_cycle(d: Deps) -> RunRecord:
             log.warning("Alert cutoff after %s min: %d alerts wait for the next run (still pending, no attempt used)", minutes, run.alerts_deferred)
             run.notes += f"alert cutoff after {minutes:g} min: {run.alerts_deferred} alerts wait for the next run; "
         write()
+        # ---------------------------------------------------------------- 5. storage parity (dual mode only)
+        # After the alert stage, on the start-of-run snapshot: it checks the previous runs' writes and can never delay a poll or an alert.
+        if not d.dry_run and mode == compact.MODE_DUAL and seeded_before:
+            if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
+                log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)", STORAGE_CHECK_CUTOFF_S // 60)
+            else:
+                storage_check(ledger, now, storage, run)
+                discovery_state[compact.STORAGE_KEY] = storage.to_json()
+                try:
+                    d.state.save_discovery_state(discovery_state, lg.stamp(now))
+                except Exception as exc:
+                    log.error("Could not record the storage check: %s", type(exc).__name__)
+                    run.notes += f"storage write failed: {type(exc).__name__}; "
         crashed = False
     finally:
         # Reached on success and on failure. A failing flush must not hide the original error
