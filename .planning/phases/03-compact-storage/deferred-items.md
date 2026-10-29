@@ -5,4 +5,4 @@
 - `storage_report.py` repeats `COMPACT_CELL_CHARS` and `classify()`, now also defined as `compact.IDENTITY_CELL_CHARS` and `compact.identity_class` (plan 03-01 did not list `storage_report.py`). Make it import them in a later Phase 3 plan.
   status: resolved (plan 03-03: `COMPACT_CELL_CHARS = compact.IDENTITY_CELL_CHARS`, `classify` calls `compact.identity_class`)
 - Compact-mode count loss (from plan 03-01, left by plan 03-02): an interrupted compact-mode Identity write leaves durable IDs with no Tally count, and a compact-mode baseline has no Events row to re-derive it from. The in-run repair and check (plan 03-02) cover dual mode only. Decide in plans 03-06/03-07 how the compact-mode checks use `Ledger.negative()` and how a lost count is reported.
-  status: open
+  status: resolved with a stated limit (plan 03-07: `parity.check_compact` counts `tally_negative` from `Ledger.negative()` for every group that still has Events rows and runs in every compact-mode poller run and in `--storage-parity`; a lost count of baselines alone cannot be detected because no Events row remains to recount from; written down in D-57 and STATUS)
