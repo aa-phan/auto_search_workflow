@@ -41,7 +41,7 @@ covered_files:
   - "tests/test_hunter.py"
   - "tests/test_pilot.py"
   - "tests/test_reporting.py"
-covered_digest: "v3:sha256:60b19c10a1e7896b9399e03974589d8712146511d3a6db4079f829f6b8bc4d99"
+covered_digest: "v3:sha256:af1b3e098e27ee0b1f6c44fcdbb63e38b891f13fe26b63452fe8703b11816c28"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -64,7 +64,7 @@ coincidental_reliance_items:
 **Phase Goal:** The owner can see how many recent relevant jobs reach the tracker each day and what Groq can really evaluate, and the evaluation and alert paths stay inside the Groq budget, the run timeout and the delivery contract before any change adds load.
 **Verified:** 2026-10-28T23:55:00Z
 **Status:** passed
-**Re-verification:** Yes. The previous report (`human_needed`, 4/5) was stale: `eval_budget.py`, `hunter.py`, `reporting.py` and `DECISIONS.md` changed after it (code-review fixes WR-01..WR-04), and the five human checks have since been completed by the owner.
+**Re-verification:** Yes. Refreshed after the doc-only commit 42a7083 (STATUS.md, DECISIONS.md D-48 Consequences and REQUIREMENTS.md corrected; no code or verdict change). The previous report (`human_needed`, 4/5) was stale: `eval_budget.py`, `hunter.py`, `reporting.py` and `DECISIONS.md` changed after it (code-review fixes WR-01..WR-04), and the five human checks have since been completed by the owner.
 
 ## Mocked versus live (AGENTS rule 5)
 
@@ -150,11 +150,11 @@ Step 7c: SKIPPED. No probes declared in the phase plans and no `scripts/*/tests/
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
 | MEAS-01 | 02-05, 02-07 | Dashboard yield, age, feedback, cohort separation | ✓ SATISFIED | Truth 1; owner UAT tests 1 and 2 |
-| MEAS-02 | 02-06, 02-08 | Real Groq limits and tokens per call measured; plan decision recorded | ✓ SATISFIED | Truth 2, D-53. REQUIREMENTS.md still shows `[ ]` / Pending (checkbox line 60, table line 140) |
+| MEAS-02 | 02-06, 02-08 | Real Groq limits and tokens per call measured; plan decision recorded | ✓ SATISFIED | Truth 2, D-53. Ticked in REQUIREMENTS.md (commit 42a7083) |
 | MEAS-03 | 02-03, 02-06, 02-07 | Tokens recorded per run; daily budget keeps runs under the limit | ✓ SATISFIED | Truth 3 |
 | MEAS-04 | 02-04, 02-07 | Stop before the 25-minute timeout; fresh first; unscored retryable | ✓ SATISFIED (mocked) | Truth 3; cutoffs never fired live |
 | MEAS-05 | 02-02, 02-07 | `alerted` only on acceptance; no-response failures bounded at 5 | ✓ SATISFIED (mocked) | Truth 4 |
-| GOV-01 | 02-01, 02-08, 02-09 | Owner decisions recorded | ✓ SATISFIED for Phase 2 scope | Truth 5 and D-54. REQUIREMENTS.md still shows `[ ]` / Pending (line 108, table line 144) |
+| GOV-01 | 02-01, 02-08, 02-09 | Owner decisions recorded | ✓ SATISFIED for Phase 2 scope | Truth 5 and D-54. Ticked in REQUIREMENTS.md (commit 42a7083) |
 
 All six phase IDs appear in plan frontmatter and in REQUIREMENTS.md. No orphaned requirements.
 
@@ -173,15 +173,13 @@ None outstanding. All five human items of the previous report were completed in 
 
 ### Warnings (non-blocking)
 
-1. **Not deployed:** local `main` is 18 commits ahead of `origin/main` (`1d63416`). The WR-01..WR-04 fixes, the D-54 workflow comment change and the phase docs are unpushed, so production still runs the pre-fix code. Offline-verified only. The 100,000 budget default is on `origin/main` (pushed 2026-10-28 20:02 UTC).
-2. **Documentation drift:** `STATUS.md` line 10 still says the 100,000 default is "in code but in production only after the next push" although it was pushed. `DECISIONS.md` D-48 "Consequences" still says "The decided SmartRecruiters parking is deployed by plan 02-09", superseded by D-54.
-3. **Bookkeeping:** `REQUIREMENTS.md` still shows MEAS-02 and GOV-01 as `[ ]` / Pending (lines 60, 108, 140, 144); both are satisfied above.
-4. **Reliance advisory:** see `coincidental_reliance_items` in the frontmatter (rolling TPD window is an inference; WR-01 trusts Groq's `retry-after`). Advisory only; does not change score or status.
-5. **Pre-existing, out of scope** (`deferred-items.md`): `TokenBudget.wait` IndexError and the pilot `completions per day` divisor.
+1. **Not deployed:** local `main` is ahead of `origin/main` (`1d63416`). The WR-01..WR-04 fixes, the D-54 workflow comment change and the phase docs are unpushed (the push is about to happen), so production still runs the pre-fix code until then. Offline-verified only. The 100,000 budget default is on `origin/main` (pushed 2026-10-28 20:02 UTC).
+2. **Reliance advisory:** see `coincidental_reliance_items` in the frontmatter (rolling TPD window is an inference; WR-01 trusts Groq's `retry-after`). Advisory only; does not change score or status.
+3. **Pre-existing, out of scope** (`deferred-items.md`): `TokenBudget.wait` IndexError and the pilot `completions per day` divisor.
 
 ### Gaps Summary
 
-No failed truth, no missing or stubbed artifact, no broken link, no outstanding human item. The phase goal is achieved in code, offline tests (629 OK) and the owner's live UAT. What remains is deployment of the review fixes (owner's push), documentation corrections, ticking MEAS-02 and GOV-01 in REQUIREMENTS.md, and the owner's keep-or-restore call on the one missing tracker row.
+No failed truth, no missing or stubbed artifact, no broken link, no outstanding human item. The phase goal is achieved in code, offline tests (629 OK) and the owner's live UAT. What remains is deployment of the review fixes (the push is about to happen) and the owner's keep-or-restore call on the one missing tracker row.
 
 ---
 
