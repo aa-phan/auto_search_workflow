@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import statistics
 import sys
 import types
 import unittest
@@ -47,7 +48,7 @@ class ClassificationTests(unittest.TestCase):
 
 
 class AnalyzeTests(unittest.TestCase):
-    def build(self) -> dict:
+    def build_world(self) -> tuple:
         ev: list[lg.Event] = []
         for b in range(3):  # three boards baselined two days ago, 40 postings each
             ev += [seen(f"greenhouse|co{b}|{i:06d}", ts(days=2), lg.BASELINED) for i in range(40)]
@@ -63,7 +64,11 @@ class AnalyzeTests(unittest.TestCase):
             b = bd.BoardRecord(bd.GREENHOUSE, f"wait{i}", ts(days=3), "x", status="validated", validation=bd.V_VALID, relevant_jobs=2, last_job_count=100)
             recs[b.key] = b
         runs = [st_mod.RunRecord(ts(days=3 - i * 0.5), events_rows=1000 * (i + 1), load_s=2 + i, outcome="ok") for i in range(6)]
-        return sr.analyze(ev, recs, runs, NOW, extra_boards=(2,))
+        return ev, recs, runs, NOW
+
+    def build(self) -> dict:
+        ev, recs, runs, now = self.build_world()
+        return sr.analyze(ev, recs, runs, now, extra_boards=(2,))
 
     def test_baseline_identity_and_operational_rows_are_counted_apart(self) -> None:
         a = self.build()
@@ -116,6 +121,263 @@ class AnalyzeTests(unittest.TestCase):
         a = sr.analyze([], {}, [], NOW)
         self.assertEqual((a["events_total"], a["pending_must_be_preserved"]), (0, 0))
         sr.format_report(a)
+
+
+GRID = {"Events": (200_001, 7), "Identity": (600, 5), "Tally": (500, 4), "Runs": (2000, 77), "Events_Legacy": (10, 7)}
+TABS_HEADER = "TABS (allocated grid cells; the 10,000,000-cell limit counts every tab, blank cells included)"
+
+
+def run_row(day: str, hour: int, events_rows: int, load_s: int = 5, outcome: str = st_mod.OUTCOME_OK, kind: str = st_mod.KIND_PRODUCTION) -> st_mod.RunRecord:
+    return st_mod.RunRecord(f"{day}T{hour:02d}:00:00Z", events_rows=events_rows, load_s=load_s, outcome=outcome, run_kind=kind)
+
+
+class AllocatedCellsTests(unittest.TestCase):
+    """SC3: rows and ALLOCATED grid cells per tab, from the sheet metadata (blank cells count toward the 10,000,000-cell limit)."""
+
+    def test_each_tab_reports_its_rows_columns_and_allocated_cells_and_the_total_with_its_share_of_the_limit(self) -> None:
+        a = sr.analyze([], {}, [], NOW, grid=GRID)
+        self.assertEqual(a["tabs"]["Events"], {"rows": 200_001, "columns": 7, "cells": 1_400_007})
+        self.assertEqual(a["tabs"]["Identity"], {"rows": 600, "columns": 5, "cells": 3000})
+        self.assertEqual(a["tabs"]["Tally"], {"rows": 500, "columns": 4, "cells": 2000})
+        self.assertEqual(a["tabs"]["Runs"]["cells"], 154_000)
+        self.assertEqual(a["allocated_cells"], 1_400_007 + 3000 + 2000 + 154_000 + 70)
+        self.assertEqual(a["allocated_share_pct"], 15.6)
+
+    def test_the_text_lists_events_identity_tally_events_legacy_then_every_other_tab_and_the_total(self) -> None:
+        text = sr.format_report(sr.analyze([], {}, [], NOW, grid=GRID))
+        self.assertIn(TABS_HEADER, text)
+        block = text.split(TABS_HEADER)[1].splitlines()[1:7]
+        self.assertEqual([line.split()[0] for line in block[:5]], ["Events", "Identity", "Tally", "Events_Legacy", "Runs"])
+        self.assertIn("1,400,007 cells", block[0])
+        self.assertIn("total", block[5])
+        self.assertIn("1,559,077", block[5])
+        self.assertIn("15.6% of the 10,000,000-cell limit", block[5])
+
+    def test_without_a_grid_the_report_has_no_tab_section_and_every_older_key_is_unchanged(self) -> None:
+        a = sr.analyze([], {}, [], NOW)
+        self.assertNotIn("tabs", a)
+        self.assertNotIn("TABS (", sr.format_report(a))
+        self.assertIn("EVENTS LEDGER NOW", sr.format_report(a))
+
+    def test_the_median_load_is_over_the_last_24_completed_production_runs(self) -> None:
+        runs = [run_row("2026-10-01", 0, 100, 500)]  # too old: outside the last 24
+        runs += [run_row("2026-10-02", i % 24, 100, 10 + i) for i in range(24)]  # loads 10..33: median 21.5
+        runs += [run_row("2026-10-03", 5, 100, 999, outcome=st_mod.OUTCOME_STARTED), run_row("2026-10-03", 6, 100, 999, kind=st_mod.KIND_REHEARSAL)]
+        a = sr.analyze([], {}, runs, NOW, grid=GRID)
+        self.assertEqual(a["load_s_median_last_24"], 21.5)
+        self.assertIsNone(sr.analyze([], {}, [], NOW)["load_s_median_last_24"])
+
+    def test_the_daily_growth_in_cells_is_seven_cells_per_events_row_over_complete_utc_days_and_none_until_two_days_exist(self) -> None:
+        runs = [run_row("2026-10-15", 3, 1000), run_row("2026-10-16", 3, 1100), run_row("2026-10-16", 20, 1200), run_row("2026-10-17", 3, 1500), run_row("2026-10-18", 1, 99_999)]
+        a = sr.analyze([], {}, runs, NOW, grid=GRID)  # 2026-10-18 is today: never counted. Growth: 10-16: +200, 10-17: +300 -> median 250 rows
+        self.assertEqual(a["daily_growth_cells"], 250 * 7)
+        self.assertIsNone(sr.analyze([], {}, runs[:2], NOW, grid=GRID)["daily_growth_cells"])  # one complete day is no growth figure
+        self.assertIsNone(sr.analyze([], {}, [], NOW, grid=GRID)["daily_growth_cells"])
+
+
+def compact_storage(first_fold: str | None, *, mode: str = compact.MODE_COMPACT) -> compact.StorageState:
+    before = {
+        "events_rows": 195_793, "grid": {"Events": [200_000, 7], "Identity": [1000, 5], "Tally": [1000, 4]}, "cells": {"Events": 1_400_000, "Identity": 5000, "Tally": 4000},
+        "cells_total": 4_000_000, "median_load_s": 41.0, "median_daily_events_growth": 9489,
+    }  # fmt: skip
+    fold = {"first_day": first_fold, "last_day": "2026-10-25", "last_rows": 3, "last_skipped": 0, "rows_total": 30} if first_fold else {}
+    return compact.StorageState(mode=mode, cutover={"at": "2026-10-18T09:00:00Z", "before": before}, fold=fold)
+
+
+AFTER_NOW = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
+AFTER_GRID = {"Events": (39_100, 7), "Identity": (1014, 5), "Tally": (1070, 4), "Events_Legacy": (200_000, 7)}  # Identity +14 rows, Tally +70 rows since the cutover
+
+
+def after_runs() -> list[st_mod.RunRecord]:
+    runs = [run_row("2026-10-16", 20, 195_000, 40), run_row("2026-10-17", 20, 200_000, 41)]  # dual: 5,000 rows a day
+    runs += [run_row("2026-10-18", 8, 200_500, 41), run_row("2026-10-18", 22, 41_000, 12)]  # the cutover day: the ledger shrinks
+    runs += [run_row("2026-10-19", 3, 41_100, 12), run_row("2026-10-19", 22, 38_000, 11)]  # the first fold day: it deletes rows
+    for day, last in (("20", 38_200), ("21", 38_500), ("22", 38_650), ("23", 38_900), ("24", 39_000), ("25", 39_100)):
+        runs.append(run_row(f"2026-10-{day}", 22, last, 10))
+    runs.append(run_row("2026-10-26", 1, 39_150, 10))  # today: incomplete, never counted
+    return runs
+
+
+class BeforeAfterTests(unittest.TestCase):
+    """The BEFORE / AFTER section: the cutover's `before` snapshot beside what is measured now (P3-06, SC3)."""
+
+    def analysis(self, storage: compact.StorageState | None, runs: list[st_mod.RunRecord] | None = None) -> dict:
+        return sr.analyze([], {}, after_runs() if runs is None else runs, AFTER_NOW, grid=AFTER_GRID, storage=storage)
+
+    def test_after_the_first_fold_both_sides_are_printed_and_only_days_after_the_first_fold_count_for_growth(self) -> None:
+        a = self.analysis(compact_storage("2026-10-19"))
+        ba = a["before_after"]
+        self.assertEqual(ba["mode"], "compact")
+        self.assertEqual(ba["after"]["days_used"], [f"2026-10-{d}" for d in range(20, 26)])  # 10-19 (the fold day) and everything earlier are not used
+        # growth in rows over 10-20..10-25: 200, 300, 150, 250, 100, 100 -> median 175 rows = 1,225 cells; plus Identity and Tally: (14 x 5 + 70 x 4) cells over the 7 complete days since the cutover day = 50 a day
+        self.assertEqual(ba["after"]["daily_growth_cells"], 175 * 7 + 50)
+        self.assertEqual(a["daily_growth_cells"], 175 * 7 + 50)
+        self.assertEqual(ba["before"]["daily_growth_cells"], 9489 * 7)
+        self.assertEqual((ba["before"]["events_rows"], ba["after"]["events_rows"]), (195_793, 0))  # analyze() was given no Events rows; the report passes them
+        self.assertEqual(ba["after"]["median_load_s"], 10)  # only runs started at or after the cutover
+        self.assertEqual(ba["before"]["median_load_s"], 41.0)
+        self.assertTrue(ba["measured"])
+        self.assertAlmostEqual(ba["growth_ratio"], 9489 * 7 / (175 * 7 + 50), places=1)
+
+    def test_the_text_prints_the_section_with_before_and_after_figures(self) -> None:
+        text = sr.format_report(self.analysis(compact_storage("2026-10-19")))
+        self.assertEqual(text.count("BEFORE / AFTER THE CUTOVER"), 1)
+        section = text.split("BEFORE / AFTER THE CUTOVER")[1]
+        self.assertIn("66,423", section)  # 9,489 rows x 7 cells a day before
+        self.assertIn("1,275", section)  # measured after the first fold
+        self.assertIn("41.0 s", section)
+        self.assertIn("2026-10-20", section)
+        self.assertIn("2026-10-25", section)
+        self.assertNotIn("projection while dual writing", text)
+
+    def test_between_the_cutover_and_the_first_fold_the_growth_after_is_not_measured_yet(self) -> None:
+        a = self.analysis(compact_storage(None))
+        ba = a["before_after"]
+        self.assertIsNone(ba["after"]["daily_growth_cells"])
+        self.assertFalse(ba["measured"])
+        self.assertIsNone(a["daily_growth_cells"])
+        text = sr.format_report(a)
+        self.assertIn("not measured yet", text.split("BEFORE / AFTER THE CUTOVER")[1])
+
+    def test_the_first_fold_day_itself_and_the_days_before_it_never_enter_the_after_figure(self) -> None:
+        a = self.analysis(compact_storage("2026-10-22"))  # a later first fold: only 10-23, 10-24 and 10-25 follow it
+        self.assertEqual(a["before_after"]["after"]["days_used"], ["2026-10-23", "2026-10-24", "2026-10-25"])
+        self.assertEqual(a["before_after"]["after"]["daily_growth_cells"], 100 * 7 + 50)  # growth 250, 100, 100 -> median 100 rows
+
+    def test_in_dual_mode_the_compact_figure_is_a_labelled_projection_and_no_before_after_is_printed(self) -> None:
+        build = AnalyzeTests().build()
+        text = sr.format_report(sr.analyze([], {}, [], NOW, grid=GRID, storage=compact.StorageState(mode=compact.MODE_DUAL)))
+        self.assertIn("COMPACT STORAGE (projection while dual writing; not measured)", text)
+        self.assertNotIn("BEFORE / AFTER THE CUTOVER", text)
+        self.assertEqual(build["projection"]["3"]["steady_cells_per_day_compact"], 14 + 120)  # the projection exists in the analysis; the section prints it
+        world = AnalyzeTests().build_world()
+        a = sr.analyze(*world, grid=GRID, storage=compact.StorageState(mode=compact.MODE_DUAL))
+        self.assertEqual(a["before_after"]["mode"], "dual")
+        self.assertEqual(a["before_after"]["projection"]["steady_cells_per_day_compact"], build["projection"]["3"]["steady_cells_per_day_compact"])
+        self.assertIn("not measured", sr.format_report(a).split("COMPACT STORAGE")[1])
+
+    def test_a_restored_state_says_compaction_is_off_and_prints_no_after_figure(self) -> None:
+        text = sr.format_report(self.analysis(compact_storage("2026-10-19", mode=compact.MODE_RESTORED)))
+        self.assertIn("restored", text.split("COMPACT STORAGE")[1].splitlines()[0])
+        self.assertNotIn("BEFORE / AFTER THE CUTOVER", text)
+
+    def test_a_before_snapshot_with_missing_figures_prints_n_a_and_never_zero(self) -> None:
+        storage = compact_storage("2026-10-19")
+        storage.cutover["before"] = {"events_rows": 10, "cells_total": 0, "median_load_s": None, "median_daily_events_growth": None}
+        text = sr.format_report(self.analysis(storage))
+        self.assertIn("n/a", text.split("BEFORE / AFTER THE CUTOVER")[1])
+        self.assertIsNone(self.analysis(storage)["before_after"]["growth_ratio"])
+
+
+def _ev(when: datetime, key: str, disposition: str, run: str) -> lg.Event:
+    published = ""
+    freshness = {lg.BASELINED: fr.BASELINE, lg.STALED: fr.STALE}.get(disposition, fr.RECENT)
+    detail: dict[str, object] = {"source": "poll", "run": run}
+    if disposition == lg.BASELINED:
+        detail["pass"] = "baseline"
+    return lg.Event(lg.stamp(when), key, lg.SEEN, freshness, disposition, published, detail)
+
+
+class GrowthSimulationTests(unittest.TestCase):
+    """SC3 offline: 28 days at 700 monitored boards through the REAL `split_observations`, `retained_events` and `fold_plan`, counting allocated cells.
+
+    D-43's rates scaled to 700 boards: 0.328 operational rows and 7.17 title-gated or stale rows per board a day, about 146 baseline rows per admitted
+    board, 24 runs a day. The cutover is at the start of day 14 and every day from 15 starts with a fold. MOCKED: it is a model of the ledger, not a measurement."""
+
+    BOARDS, DAYS, CUTOVER_DAY, RUNS_PER_DAY = 700, 28, 14, 24
+    OPS_PER_DAY = round(164 / 500 * 700)  # 230
+    GATED_PER_DAY = round(7.17 * 700)  # 5,019
+    WAVE_DAY, WAVE_BOARDS, WAVE_ROWS_PER_BOARD = 3, 140, 146
+    START = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    @classmethod
+    def runs_of(cls, day: int) -> list[list[lg.Event]]:
+        """The events of each run of simulated day `day` (1-based): gated rows, operational rows and, on the wave day, the baselines of the admitted boards."""
+        out: list[list[lg.Event]] = []
+        for r in range(cls.RUNS_PER_DAY):
+            when = cls.START + timedelta(days=day - 1, hours=r, minutes=5)
+            run = f"d{day}r{r}"
+            events: list[lg.Event] = []
+            lo, hi = (cls.GATED_PER_DAY * r) // cls.RUNS_PER_DAY, (cls.GATED_PER_DAY * (r + 1)) // cls.RUNS_PER_DAY
+            for i in range(lo, hi):
+                events.append(_ev(when, f"greenhouse|b{i % cls.BOARDS:03d}|g{day}-{i}", lg.STALED if i % 5 == 0 else lg.FILTERED, run))
+            lo, hi = (cls.OPS_PER_DAY * r) // cls.RUNS_PER_DAY, (cls.OPS_PER_DAY * (r + 1)) // cls.RUNS_PER_DAY
+            events += [lg.Event(lg.stamp(when), f"greenhouse|b{i % cls.BOARDS:03d}|o{day}-{i}", lg.EVALUATED, fr.VERIFIED_FRESH, detail={"run": run}) for i in range(lo, hi)]
+            if r == 0 and day == 1:  # the boards that were already monitored before the simulation start: a short baseline each
+                events += [_ev(when, f"greenhouse|b{b:03d}|base{k}", lg.BASELINED, run) for b in range(cls.BOARDS - cls.WAVE_BOARDS) for k in range(20)]
+            if r == 6 and day == cls.WAVE_DAY:  # the admission wave of week 1
+                first = cls.BOARDS - cls.WAVE_BOARDS
+                events += [_ev(when, f"greenhouse|b{b:03d}|wave{k}", lg.BASELINED, run) for b in range(first, cls.BOARDS) for k in range(cls.WAVE_ROWS_PER_BOARD)]
+            out.append(events)
+        return out
+
+    @classmethod
+    def simulate(cls, cutover_day: int | None) -> dict[str, list]:
+        """Allocated cells of Events, Identity and Tally at the end of each day, and what the compact world still holds at the end."""
+        events: list[lg.Event] = []
+        identity = compact.IdentitySet()
+        tally: list[compact.TallyRow] = []
+        mode = compact.MODE_DUAL
+        cells: list[int] = []
+        folded_rows = 0
+        for day in range(1, cls.DAYS + 1):
+            now = cls.START + timedelta(days=day - 1)
+            if cutover_day is not None and day == cutover_day:
+                ledger = compact.Ledger(events, list(range(2, len(events) + 2)), identity, tally)
+                events = compact.retained_events(ledger, now)
+                mode = compact.MODE_COMPACT
+            elif cutover_day is not None and day > cutover_day:
+                plan = compact.fold_plan(compact.Ledger(events, list(range(2, len(events) + 2)), identity, tally), now)
+                gone = set(plan.rows)
+                events = [ev for n, ev in zip(range(2, len(events) + 2), events) if n not in gone]
+                folded_rows += len(gone)
+            additions: dict[str, list[str]] = {}
+            for r, run_events in enumerate(cls.runs_of(day)):
+                split = compact.split_observations(run_events, mode)
+                events += split.events
+                for stem, entries in split.identity.items():
+                    additions.setdefault(stem, []).extend(entries)
+                stamp = lg.stamp(cls.START + timedelta(days=day - 1, hours=r, minutes=5))
+                tally.append(compact.TallyRow(f"d{day}r{r}", stamp, sum(split.tally.values()), dict(sorted(split.tally.items()))))
+            identity.apply(identity.plan_additions(additions, lg.stamp(now)))
+            cells.append(len(events) * 7 + len(identity.all_rows()) * 5 + len(tally) * 4)
+        return {"cells": cells, "events": events, "folded_rows": [folded_rows], "identity": identity, "tally": tally}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dual = cls.simulate(None)
+        cls.compact = cls.simulate(cls.CUTOVER_DAY)
+
+    @staticmethod
+    def growth(cells: list[int], first_day: int, last_day: int) -> float:
+        return statistics.median(cells[d - 1] - cells[d - 2] for d in range(first_day, last_day + 1))
+
+    def test_the_median_daily_growth_in_allocated_cells_after_the_first_folds_is_at_least_ten_times_smaller_than_with_every_row_kept(self) -> None:
+        dual, compacted = self.growth(self.dual["cells"], 22, 28), self.growth(self.compact["cells"], 22, 28)
+        self.assertGreater(dual, 25_000)  # D-43: about 26,200 cells a day at 500 boards, more at 700
+        self.assertLess(compacted, 4_000)  # D-43: about 1,300 cells a day at 500 boards
+        self.assertGreaterEqual(dual / compacted, 10)
+
+    def test_the_admission_wave_is_a_one_time_jump_in_dual_mode_and_leaves_events_at_the_cutover(self) -> None:
+        wave = self.dual["cells"][self.WAVE_DAY - 1] - self.dual["cells"][self.WAVE_DAY - 2]
+        self.assertGreater(wave, self.WAVE_BOARDS * self.WAVE_ROWS_PER_BOARD * 7)
+        events = self.compact["events"]
+        self.assertFalse([e for e in events if e.event == lg.SEEN and e.disposition == lg.BASELINED])  # no baseline row is in Events after the cutover (P3-02)
+        self.assertEqual(sum(1 for e in self.dual["events"] if e.disposition == lg.BASELINED), 560 * 20 + self.WAVE_BOARDS * self.WAVE_ROWS_PER_BOARD)
+
+    def test_the_fold_keeps_one_week_of_gated_rows_and_every_operational_row(self) -> None:
+        events, last = self.compact["events"], self.START + timedelta(days=self.DAYS)
+        gated = [e for e in events if compact.identity_class(e)]
+        oldest = min(compact.event_time(e) for e in gated)
+        self.assertGreater(oldest, last - compact.FOLD_AGE - timedelta(days=1))  # at most about 7 days of title-gated and stale rows
+        self.assertLessEqual(len(gated), 8 * self.GATED_PER_DAY)  # the fold runs at the start of a day: up to 8 days of rows are present at its end
+        self.assertEqual(sum(1 for e in events if not compact.identity_class(e)), sum(1 for e in self.dual["events"] if not compact.identity_class(e)))  # nothing operational was folded
+        self.assertGreater(self.compact["folded_rows"][0], 5 * self.GATED_PER_DAY)
+
+    def test_identity_and_tally_hold_the_same_ids_and_counts_in_both_worlds(self) -> None:
+        self.assertEqual(self.compact["identity"].keys(), self.dual["identity"].keys())
+        total = lambda world: sum(t.total for t in world["tally"])  # noqa: E731
+        self.assertEqual(total(self.compact), total(self.dual))
 
 
 PURPOSE_OF = {lg.BASELINED: "baseline", lg.FILTERED: "identity", lg.STALED: "identity"}
