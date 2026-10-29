@@ -34,7 +34,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
 
 **Phase Numbering:** v1.0 ended at Phase 1, so v2.0 starts at Phase 2. Integer phases are planned milestone work; decimal phases (2.1, 2.2) are urgent insertions.
 
-- [ ] **Phase 2: Measurement, governors and owner decisions** - See what reaches the tracker and what Groq can really evaluate, keep runs inside the Groq budget and the timeout, fix the two alert-recording bugs, record the owner decisions
+- [x] **Phase 2: Measurement, governors and owner decisions** - See what reaches the tracker and what Groq can really evaluate, keep runs inside the Groq budget and the timeout, fix the two alert-recording bugs, record the owner decisions (completed 2026-10-28)
 - [ ] **Phase 3: Compact storage** - Move baseline and identity-only rows to compact Identity and Tally tabs with proven parity, before any board growth
 - [ ] **Phase 4: 72-hour window and recent backfill** - Recent jobs (up to 72 h) reach the tracker with their real age, including a newly admitted board's recent postings
 - [ ] **Phase 5: Evidence-led board growth** - Read the first rebalance and the feedback evidence, then cycle boards by recent activity and feedback and grow the monitored set past 700 in measured steps
@@ -57,7 +57,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
   4. A job is recorded `alerted` only after a channel accepted the message; a send that fails without an HTTP response leaves the job unalerted, is retried, and stops after 5 attempts.
   5. Every owner decision the milestone needs is either recorded in DECISIONS.md or listed with its needed-by phase and its default if unanswered: Groq plan, D-05 amendment (before Phase 4), rule-7 lift for board-cycling scores only (before CYC-02 goes live), per-ATS policy (Paycom skipped, iCIMS deferred; before each adapter), SmartRecruiters after the pilot, repository public or private, date-only alerts (user decision 2026-10-25); the storage design approval that closes the D-03 review (before Phase 3 executes) is surfaced with them.
 
-**Plans**: 9/9 plans executed (waves 1-9, sequential: every plan edits the contract documents)
+**Plans**: 9/9 plans complete (waves 1-9, sequential: every plan edits the contract documents)
 
 Plans:
 **Wave 1**
@@ -209,7 +209,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
-| 2. Measurement, governors and owner decisions | v2.0 | 9/9 | In Progress | - |
+| 2. Measurement, governors and owner decisions | v2.0 | 9/9 | Complete    | 2026-10-28 |
 | 3. Compact storage | v2.0 | 0/TBD | Not started | - |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |

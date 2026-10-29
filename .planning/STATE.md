@@ -2,44 +2,44 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Search-substitute volume
-current_phase: 02
-current_phase_name: Measurement, governors and owner decisions
-status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-10-28T20:58:44.312Z"
-last_activity: 2026-10-26
-last_activity_desc: Phase 02 execution started
-state_head: 7907e707ff2ab47b83e15514813871761e37c22a
+current_phase: 3
+current_phase_name: Compact storage
+status: planning
+stopped_at: Phase 02 complete, ready to plan Phase 3
+last_updated: "2026-10-29T00:04:10.796Z"
+last_activity: 2026-10-28
+last_activity_desc: Phase 02 complete, transitioned to Phase 3
+state_head: d5f3857639b1d3bbcb1160a7da99c4e50d5bc57a
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 9
   completed_plans: 9
-  percent: 17
+  percent: 29
 ---
 
 # Project State
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-25)
+See: `.planning/PROJECT.md` (updated 2026-10-28)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Phase 02 — Measurement, governors and owner decisions
+**Current focus:** Phase 3 — Compact storage
 
 ## Current Position
 
-Phase: 02 (Measurement, governors and owner decisions) — EXECUTING
-Plan: 9 of 9
-Status: Ready to execute
-Last activity: 2026-10-26 — Phase 02 execution started
+Phase: 3 — Compact storage
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-28 — Phase 02 complete, transitioned to Phase 3
 
-Progress: [██░░░░░░░░] 17%
+Progress: [███░░░░░░░] 29%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0 (v2.0)
+- Total plans completed: 9 (v2.0)
 - Average duration: -
 - Total execution time: -
 
@@ -47,7 +47,7 @@ Progress: [██░░░░░░░░] 17%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 02 | 9 | - | - |
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -92,17 +92,17 @@ Roadmap decisions for v2.0 (2026-10-25):
 
 - Daily check scheduled for 2026-10-25 12:00 UTC ran; findings are in STATUS.md. Repeat daily until Phase 3 lands.
 - First weekly rebalance about 2026-10-29 01:00 UTC: watch it in the daily checks; the formal read is EVID-01 in Phase 5.
-- Surface the GOV-01 decisions to the owner at the start of Phase 2 (table in ROADMAP.md).
+- Owner: decide whether tracker row greenhouse|nadiacare|4459849009 stays deleted or is restored (02-UAT test 2 left it open).
 - User to check that the employer behind 6 of 14 recent tracker rows (Alphabe Insight Inc, SmartRecruiters) is genuine.
 
 ### Blockers/Concerns
 
-- Phase 2: Groq plan decided in D-53 (2026-10-28): free-revisit, budget default 100,000 per model in code (commit 0762df7) but NOT pushed; the owner must add or edit the live Settings row `Groq_Daily_Token_Budget`; revisit the plan before Phase 4; the 20-30 target stays conditional (about 75 evaluations / 12 rows a day).
-- Phase 2: 2 ledger-kept jobs are missing from the tracker (should be 0), not investigated; MEAS-01 counts tracker rows.
+- [Phase 2] Groq plan D-53: free, budget default 100,000 per model, pushed 2026-10-28 (1d63416) and read by the owner in the Runs tab; revisit the plan before Phase 4; the 20-30 target stays conditional (about 75 evaluations / 12 rows a day).
+- [Phase 2] Governors (15/20/22 min cutoffs, 5-attempt alert bound, WR-01 lock expiry) are offline-verified only; none has fired in production yet.
+- [Phase 2] 1 ledger-kept job is missing from the tracker (greenhouse|nadiacare|4459849009, 54 of 55); owner keep-or-restore decision pending.
 - Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
-- 02-08 complete 2026-10-28. 02-09 superseded 2026-10-28 by D-54 (owner kept SmartRecruiters); no deployment.
 
 ## Deferred Items
 
@@ -122,6 +122,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-28T05:36:08.761Z
-Stopped at: Completed 02-08-PLAN.md
+Last session: 2026-10-29T00:10:00Z
+Stopped at: Phase 02 complete, ready to plan Phase 3
 Resume file: None

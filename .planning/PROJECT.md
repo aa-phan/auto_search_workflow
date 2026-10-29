@@ -41,6 +41,10 @@ Full list with verification state: `.planning/REQUIREMENTS.md`.
 - ✓ Board registry from public inventories, single admission path, pools with weekly rebalance, floor and early release, Tavily discovery, provider limits (BRD-01..05) — v1.0
 - ✓ Dashboard, missed-run watchdog, pilot / storage / rebalance reports (OPS-01..03) — v1.0
 - ✓ Secrets and personal data hygiene (SEC-01) — v1.0
+- ✓ Measured outcome on the Dashboard: tracker rows per day by cohort, age when found, My_Feedback mix (MEAS-01) — Phase 2
+- ✓ Groq limits measured and plan decided: free plan, 100,000 tokens per model per UTC day (MEAS-02, D-53) — Phase 2
+- ✓ Groq token budget, run deadlines inside the 25-minute timeout, alert recorded only on acceptance (MEAS-03..05; governors offline-verified, not yet fired live) — Phase 2
+- ✓ Owner decisions recorded (GOV-01, D-48..D-54) — Phase 2
 
 ### Active
 
@@ -52,7 +56,6 @@ Full list with verification state: `.planning/REQUIREMENTS.md`.
 - [ ] Faster, feedback-informed board cycling
 - [ ] New ATS adapters
 - [ ] Wider web search
-- [ ] Measured outcome: rows per day, age, feedback
 
 ### Out of Scope
 
@@ -89,9 +92,10 @@ All 47 decisions are in `DECISIONS.md` (locked; later entries amend earlier ones
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | D-03 append-only Events ledger in the Sheet | Durable, auditable state without a database | ⚠️ Revisit (D-43 storage, STOR-01) |
-| D-16 Groq models `gpt-oss-120b` / `20b` | Requested models no longer exist | — Pending owner OK (GOV-01) |
+| D-16 Groq models `gpt-oss-120b` / `20b` | Requested models no longer exist | ✓ Owner OK for budget-driven fallback (D-48 row 2) |
 | D-30 pool parameters (80/20, 7-day trials, margin 1.0, ...) | Initial operating choices | — Pending first weekly evidence (EVID-01) |
-| D-38 SmartRecruiters unparked for the pilot | Owner decision despite robots.txt | ⚠️ Revisit: pilot ended (GOV-01) |
+| D-38 SmartRecruiters unparked for the pilot | Owner decision despite robots.txt | ✓ Kept after the pilot (D-54); reverse at once if SmartRecruiters objects |
+| D-53 Groq free plan, 100,000 tokens per model per day | Owner-read limits (200K TPD) | — Revisit before Phase 4; 20-30 a day target conditional |
 | D-45 graduation floor 2.0 | Stop score-0 trials taking established slots at 700 | — Pending EVID-01 |
 | D-46 tracker without header is refused | Prevent writes by position | ✓ Good (verified live) |
 | D-47 early release + 5,000 re-checks per run | Free slots held by failed trials | ✓ Good so far (220 released, refilled to 679/700) |
@@ -114,4 +118,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-25 after starting milestone v2.0*
+*Last updated: 2026-10-28 after Phase 2*
