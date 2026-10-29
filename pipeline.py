@@ -203,7 +203,7 @@ def degraded_reason(run: RunRecord) -> str:
     return ",".join(reasons)
 
 
-def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord) -> None:
+def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, repaired: str = "") -> None:
     """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes.
 
     Events stays authoritative in dual mode, so a difference, a raised check or a slow check can only add a note, a degraded
@@ -227,8 +227,8 @@ def storage_check(ledger: compact.Ledger, now: datetime, storage: compact.Storag
     )  # fmt: skip
     today = storage.days.get(now.astimezone(timezone.utc).strftime("%Y-%m-%d"), {})
     log.info(
-        "Storage: mode=%s, %d counted and %d declared differences, %d job keys and %d Tally runs compared, %d checked runs today, check took %.1f s",
-        storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0), report.seconds,
+        "Storage: mode=%s, %d counted and %d declared differences, %d job keys and %d Tally runs compared, %d checked runs today, check took %.1f s%s",
+        storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0), report.seconds, repaired,
     )  # fmt: skip
 
 
@@ -371,15 +371,16 @@ def run_cycle(d: Deps) -> RunRecord:
             # Tally runs. The plan is a set difference, so a seed that was interrupted is completed without writing an ID or a
             # run twice. The `storage` key is saved only after the repair succeeded (an empty ledger has nothing to do).
             repaired = True
+            repair_text = ""  # what a repair on an already seeded store did: it joins the run's one storage line
             try:
                 if plan := compact.repair_plan(ledger):
                     rows = d.state.write_identity(plan.identity, lg.stamp(now)) if plan.identity else 0
                     if plan.tally:
                         d.state.append_tally(plan.tally)
-                    log.info(
-                        "Storage %s: %d IDs written in %d Identity rows for %d boards, %d Tally runs written",
-                        "seed" if storage.seeded_at is None else "repair", plan.ids, rows, len(plan.identity), len(plan.tally),
-                    )  # fmt: skip
+                    if storage.seeded_at is None:
+                        log.info("Storage seed: %d IDs written in %d Identity rows for %d boards, %d Tally runs written", plan.ids, rows, len(plan.identity), len(plan.tally))
+                    else:
+                        repair_text = f", repaired {plan.ids} IDs in {len(plan.identity)} boards and {len(plan.tally)} Tally runs at run start"
             except Exception as exc:
                 repaired = False
                 log.error("Storage repair failed: %s", type(exc).__name__)
@@ -830,9 +831,9 @@ def run_cycle(d: Deps) -> RunRecord:
         # After the alert stage, on the start-of-run snapshot: it checks the previous runs' writes and can never delay a poll or an alert.
         if not d.dry_run and mode == compact.MODE_DUAL and seeded_before:
             if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
-                log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)", STORAGE_CHECK_CUTOFF_S // 60)
+                log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)%s", STORAGE_CHECK_CUTOFF_S // 60, repair_text)
             else:
-                storage_check(ledger, now, storage, run)
+                storage_check(ledger, now, storage, run, repair_text)
                 discovery_state[compact.STORAGE_KEY] = storage.to_json()
                 try:
                     d.state.save_discovery_state(discovery_state, lg.stamp(now))
