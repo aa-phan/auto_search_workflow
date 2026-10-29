@@ -1185,6 +1185,11 @@ ZONES = ((UTC, datetime(2026, 10, 29, 0, 7, tzinfo=UTC)), (CHI, datetime(2026, 1
 class CompactParityTests(unittest.TestCase):
     """P3-10: every figure from Identity + Tally + the kept Events rows equals the figure from all Events rows."""
 
+    @staticmethod
+    def figures(sm: dict[str, Any]) -> dict[str, Any]:
+        """The summary without the `storage` section: that section presents the storage state (and the P3-11 note, which exists only when counts are folded), so it differs by design; parity layer 4 skips it too."""
+        return {k: v for k, v in sm.items() if k != "storage"}
+
     def both(self, tz: Any, now: datetime, world: World, view: compact.Ledger) -> tuple[dict[str, Any], dict[str, Any]]:
         old = rp.build_summary(now=now, tz=tz, runs=world.runs, events=world.events, boards={}, discovery={}, tracker=[])
         new = rp.build_summary(now=now, tz=tz, runs=world.runs, events=view.events, boards={}, discovery={}, tracker=[], folded=view.folded())
@@ -1198,7 +1203,7 @@ class CompactParityTests(unittest.TestCase):
                 self.assertLess(len(view.events), len(world.events) - 150)  # the view really dropped rows (baselines and old gated rows)
                 self.assertGreater(sum(fc.n for fc in view.folded()), 150)
                 old, new = self.both(tz, now, world, view)
-                self.assertEqual(old, new)
+                self.assertEqual(self.figures(old), self.figures(new))
                 self.assertEqual((old["checks"], new["checks"]), ([], []))
 
     def test_a_half_folded_view_counts_each_job_once(self) -> None:
@@ -1208,7 +1213,7 @@ class CompactParityTests(unittest.TestCase):
                 view = world.half_folded_view()
                 self.assertEqual(sum(fc.n for fc in view.folded()), 40)  # half of the wave's 80 baselines: Tally minus the rows still present
                 old, new = self.both(tz, now, world, view)
-                self.assertEqual(old, new)
+                self.assertEqual(self.figures(old), self.figures(new))
                 self.assertEqual((old["checks"], new["checks"]), ([], []))
 
     def test_the_rendered_dashboard_has_the_same_values(self) -> None:
@@ -1216,7 +1221,9 @@ class CompactParityTests(unittest.TestCase):
             with self.subTest(tz=str(tz)):
                 world = compact_world(tz, now)
                 old, new = self.both(tz, now, world, world.compact_view(now))
-                self.assertEqual(db.render(old).values(), db.render(new).values())
+                shown = db.render(new).values()
+                self.assertEqual(sum(row[0] == rp.TALLY_NOTE for row in shown), 1)  # the only difference: the P3-11 note under the first-observed row
+                self.assertEqual([row for row in shown if row[0] != rp.TALLY_NOTE], db.render(old).values())
 
     def test_freshness_denominators_count_dated_and_undated_folded_postings(self) -> None:
         for tz, now in ZONES:
@@ -1264,7 +1271,7 @@ class CompactParityTests(unittest.TestCase):
         new = rp.build_summary(now=now, tz=tz, runs=[], events=ledger.events, boards={}, discovery={}, tracker=[], folded=ledger.folded())
         day = next(t for t in new["trend"] if t["date"] == "2026-10-20")
         self.assertEqual((day["recorded"], day["baselined"]), (True, 7))
-        self.assertEqual(old, new)
+        self.assertEqual(self.figures(old), self.figures(new))
 
     def test_a_folded_count_goes_through_the_same_counting_code_as_real_jobs(self) -> None:
         at = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
@@ -1284,6 +1291,202 @@ class CompactParityTests(unittest.TestCase):
         self.assertEqual((p["latency_sample"]["relevant_new_postings_detected"], p["latency_min"]["publication_to_detection"]["n"]), (0, 0))
         self.assertEqual(p["outcomes"]["pending"], 3)  # shown as waiting work, never as a result
         self.assertEqual(sm["failures"]["pending_evaluation"]["jobs"], 0)  # and never as a job the pipeline could evaluate
+
+
+# --------------------------------------------------------------------------- compact storage: the owner's signal (P3-05, P3-06, P3-07, P3-11)
+
+
+SNOW = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+SEEDED = "2026-10-20T08:00:00Z"
+FOLD_DIM = "greenhouse|poll|filtered||recent|u"  # a gated posting, as Tally counts it
+
+
+def storage_discovery(*, mode: str = compact.MODE_DUAL, seeded: str | None = SEEDED, clean_days: int = 0, admission: bool = False, counted: int | None = 0,
+                      diffs: tuple[str, ...] = (), cutover: str | None = None, fold_day: str | None = None, restored: str | None = None) -> dict[str, str]:
+    """A Discovery dict whose `storage` key was made by the real StorageState: `clean_days` complete UTC days before SNOW's day, each with the
+    minimum number of checked runs and no difference; `admission` puts a board admission in the newest of them."""
+    st = compact.StorageState(mode=mode, seeded_at=seeded)
+    for back in range(1, clean_days + 1):
+        st.days[(SNOW - timedelta(days=back)).date().isoformat()] = {"runs": compact.PARITY_MIN_RUNS_PER_DAY, "diff_runs": 0, "failed": 0, "admissions": 1 if admission and back == 1 else 0}
+    if counted is not None:
+        st.last_check = {"at": stamp(SNOW - timedelta(minutes=5)), "counted": counted, "declared": 2, "compared": 40, "seconds": 1.5}
+    st.last_diffs = list(diffs)
+    if cutover:
+        st.cutover = {"at": cutover}
+    if fold_day:
+        st.fold = {"first_day": fold_day, "last_day": fold_day}
+    if restored:
+        st.restore = {"at": restored}
+    return {compact.STORAGE_KEY: st.to_json()}
+
+
+def line_text(sm: dict[str, Any], label: str) -> str | None:
+    return next((str(r[1].value) for r in db.render(sm).rows if len(r) > 1 and r[0].value == label), None)
+
+
+def folded_summary(discovery: dict[str, str] | None = None, n: int = 5) -> dict[str, Any]:
+    at = SNOW - timedelta(days=3)
+    return rp.build_summary(now=SNOW, tz=UTC, runs=[], events=[], boards={}, discovery=discovery or {}, tracker=[], folded=[compact.FoldedCount("x", stamp(at), FOLD_DIM, n)])
+
+
+class DashboardStorageTests(unittest.TestCase):
+    """The owner reads the storage state on the Dashboard: a Storage line, READY TO CUT OVER only when the recorded days meet the bar,
+    a NEEDS ATTENTION row for a parity difference and the P3-11 note wherever totals come from Tally."""
+
+    DIFFS = ("identity_missing greenhouse|acme|11", "tally_count r-1@2026-10-29T10:00:00Z (1 vs 2)", "figure periods.7d.results.new_postings (old 4 new 5)",
+             "identity_missing lever|beta|44", "figure logical.baseline_jobs_per_board.greenhouse|acme (old 3 new 2)")
+
+    def attention(self, sm: dict[str, Any]) -> list[Any]:
+        return [r for r in db.render(sm).rows if r[0].value == "storage parity difference"]
+
+    def test_a_recorded_difference_is_a_needs_attention_row_naming_at_most_three_refs(self) -> None:
+        sm = summary(now=SNOW, discovery=storage_discovery(counted=5, diffs=self.DIFFS))
+        row = next(r for r in sm["failures"]["table"] if r["what"] == "storage parity difference")
+        self.assertEqual((row["severity"], row["ref"], row["count"]), (1, "Identity / Tally", 5))
+        self.assertEqual(row["since"], stamp(SNOW - timedelta(minutes=5)))
+        for kept in self.DIFFS[:3]:
+            self.assertIn(kept, row["detail"])
+        for left_out in self.DIFFS[3:]:
+            self.assertNotIn(left_out, row["detail"])
+        for words in ("Events rows stay authoritative", "nothing was deleted", "3-day clock restarted", "storage_parity"):
+            self.assertIn(words, row["action"])
+        shown = self.attention(sm)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(sm["failures"]["table_total"], 1)
+
+    def test_the_row_never_carries_title_url_or_free_text_even_from_a_hand_edited_key(self) -> None:
+        edited = ("identity_missing https://boards.greenhouse.io/acme/jobs/9 Senior Staff Engineer", "figure x (old 1 new 2)", "tally_missing r-2@2026-10-29T09:00:00Z")
+        sm = summary(now=SNOW, discovery=storage_discovery(counted=3, diffs=edited))
+        text = " ".join(str(c.value) for r in self.attention(sm) for c in r) + " ".join(str(v) for r in sm["failures"]["table"] for v in r.values())
+        for forbidden in ("https://", "greenhouse.io", "Senior Staff Engineer", "http"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("figure x (old 1 new 2)", text)
+
+    def test_no_row_without_a_counted_difference_or_without_a_check(self) -> None:
+        for label, discovery in (("clean check", storage_discovery(counted=0)), ("declared only", storage_discovery(counted=0, diffs=("tracker_identity_job greenhouse|acme|1",))),
+                                 ("never checked", storage_discovery(counted=None)), ("no key", {}), ("not seeded", storage_discovery(seeded=None, counted=0))):
+            with self.subTest(label):
+                sm = summary(now=SNOW, discovery=discovery)
+                self.assertEqual(self.attention(sm), [])
+                self.assertEqual(sm["failures"]["table_total"], 0)
+
+    def test_in_compact_mode_the_action_says_detection_reads_identity_plus_events(self) -> None:
+        sm = summary(now=SNOW, discovery=storage_discovery(mode=compact.MODE_COMPACT, counted=2, diffs=self.DIFFS[:2], cutover="2026-10-25T06:00:00Z"))
+        row = next(r for r in sm["failures"]["table"] if r["what"] == "storage parity difference")
+        self.assertIn("Identity plus Events", row["action"])
+        self.assertNotIn("nothing was deleted", row["action"])
+        self.assertIn("storage_parity", row["action"])
+
+    def test_ready_to_cut_over_appears_once_when_the_recorded_days_meet_the_bar(self) -> None:
+        ready = summary(now=SNOW, discovery=storage_discovery(clean_days=3, admission=True))
+        self.assertTrue(ready["storage"]["bar_met"] and ready["storage"]["ready_to_cut_over"])
+        text = line_text(ready, "Storage") or ""
+        self.assertEqual(text.count("READY TO CUT OVER"), 1)
+        self.assertEqual(sum("READY TO CUT OVER" in str(c.value) for r in db.render(ready).rows for c in r), 1)
+        for needle in ("dual", "seeded 2026-10-20", "last check 0 difference(s)", "3 of 3 clean complete days", "admission seen yes"):
+            self.assertIn(needle, text)
+
+    def test_ready_to_cut_over_never_comes_from_elapsed_time_or_an_unmet_bar(self) -> None:
+        cases = {
+            "two clean days": storage_discovery(clean_days=2, admission=True),
+            "three days, no admission": storage_discovery(clean_days=3, admission=False),
+            "seeded long ago, nothing recorded": storage_discovery(seeded="2026-09-01T00:00:00Z"),
+            "not seeded": storage_discovery(seeded=None, clean_days=3, admission=True),
+            "no key": {},
+        }
+        for label, discovery in cases.items():
+            with self.subTest(label):
+                sm = summary(now=SNOW, discovery=discovery)
+                self.assertFalse(sm["storage"]["ready_to_cut_over"])
+                self.assertNotIn("READY TO CUT OVER", line_text(sm, "Storage") or "")
+        today_dirty = storage_discovery(clean_days=3, admission=True)
+        st = compact.StorageState.load(today_dirty[compact.STORAGE_KEY])
+        st.days[SNOW.date().isoformat()] = {"runs": 3, "diff_runs": 1, "failed": 0, "admissions": 0}
+        sm = summary(now=SNOW, discovery={compact.STORAGE_KEY: st.to_json()})
+        self.assertFalse(sm["storage"]["ready_to_cut_over"])  # a difference found today blocks the bar at once (P3-07)
+
+    def test_compact_and_restored_modes_never_say_ready_even_with_days_that_would_meet_the_bar(self) -> None:
+        for mode in (compact.MODE_COMPACT, compact.MODE_RESTORED):
+            with self.subTest(mode):
+                sm = summary(now=SNOW, discovery=storage_discovery(mode=mode, clean_days=3, admission=True, cutover="2026-10-25T06:00:00Z", restored="2026-10-27T06:00:00Z"))
+                self.assertFalse(sm["storage"]["ready_to_cut_over"])
+                self.assertNotIn("READY TO CUT OVER", " ".join(str(c.value) for r in db.render(sm).rows for c in r))
+
+    def test_the_storage_line_says_what_state_the_storage_is_in(self) -> None:
+        self.assertIn("not seeded yet", line_text(summary(now=SNOW), "Storage") or "")
+        dual = line_text(summary(now=SNOW, discovery=storage_discovery(clean_days=2, counted=1, diffs=self.DIFFS[:1])), "Storage") or ""
+        for needle in ("dual", "seeded 2026-10-20", "last check 1 difference(s)", "2 of 3 clean complete days", "admission seen no"):
+            self.assertIn(needle, dual)
+        unchecked = line_text(summary(now=SNOW, discovery=storage_discovery(counted=None)), "Storage") or ""
+        self.assertIn("no check recorded yet", unchecked)
+        comp = line_text(summary(now=SNOW, discovery=storage_discovery(mode=compact.MODE_COMPACT, cutover="2026-10-25T06:00:00Z", fold_day="2026-10-28")), "Storage") or ""
+        for needle in ("compact since 2026-10-25", "last fold 2026-10-28", "last check 0 difference(s)"):
+            self.assertIn(needle, comp)
+        self.assertIn("no fold yet", line_text(summary(now=SNOW, discovery=storage_discovery(mode=compact.MODE_COMPACT, cutover="2026-10-25T06:00:00Z")), "Storage") or "")
+        back = line_text(summary(now=SNOW, discovery=storage_discovery(mode=compact.MODE_RESTORED, restored="2026-10-27T06:00:00Z")), "Storage") or ""
+        for needle in ("restored 2026-10-27", "compaction off until a new owner decision"):
+            self.assertIn(needle, back)
+
+    def test_the_storage_line_comes_right_after_the_groq_line(self) -> None:
+        labels = [str(r[0].value) for r in db.render(summary(now=SNOW)).rows]
+        self.assertEqual(labels.index("Storage"), labels.index("Groq") + 1)
+
+    def test_a_damaged_storage_key_is_not_seeded_and_never_ready(self) -> None:
+        for raw in ("{not json", "[]", "null", '{"mode": 7, "seeded_at": 5, "days": "x"}'):
+            with self.subTest(raw):
+                sm = summary(now=SNOW, discovery={compact.STORAGE_KEY: raw})
+                self.assertFalse(sm["storage"]["ready_to_cut_over"])
+                self.assertEqual(sm["failures"]["table_total"], 0)
+
+    def test_the_note_about_tally_totals_appears_under_unique_jobs_when_counts_are_folded(self) -> None:
+        sm = folded_summary(storage_discovery())
+        self.assertEqual(sm["storage"]["folded_total"], 5)
+        self.assertEqual(sm["storage"]["detail_note"], rp.TALLY_NOTE)
+        rows = db.render(sm).rows
+        at = next(i for i, r in enumerate(rows) if r[0].value == "Unique jobs first observed")
+        self.assertEqual(rows[at + 1][0].value, rp.TALLY_NOTE)
+        self.assertEqual(rows[at + 1][0].style, "muted")
+        self.assertEqual(rows[at + 2][0].value, "New postings (after a board's first read)")
+        for words in ("baseline totals", "title-gated or stale", "older than 7 days", "Tally tab", "title, URL, publication time"):
+            self.assertIn(words, rp.TALLY_NOTE)
+        self.assertIn(rp.TALLY_NOTE, rp.format_text(sm))
+
+    def test_the_reconciliation_prints_the_note_only_when_it_counted_folded_jobs(self) -> None:
+        at = SNOW - timedelta(days=3)
+        kw = dict(runs=[], events=[], tracker=[], start=SNOW - timedelta(days=7), end=SNOW)
+        folded = rp.reconcile(folded=[compact.FoldedCount("x", stamp(at), FOLD_DIM, 4)], **kw)  # type: ignore[arg-type]
+        self.assertEqual(folded["from_tally"], 4)
+        self.assertIn(rp.TALLY_NOTE, "\n".join(rp.format_reconciliation(folded)))
+        outside = rp.reconcile(folded=[compact.FoldedCount("x", stamp(SNOW - timedelta(days=30)), FOLD_DIM, 4)], **kw)  # type: ignore[arg-type]
+        self.assertEqual(outside["from_tally"], 0)
+        self.assertNotIn("Tally", "\n".join(rp.format_reconciliation(outside)))
+        none = rp.reconcile(**kw)  # type: ignore[arg-type]
+        self.assertNotIn("Tally", "\n".join(rp.format_reconciliation(none)))
+
+    def test_with_nothing_folded_no_note_appears_and_the_grid_is_the_old_one_plus_the_storage_line(self) -> None:
+        sm = summary(now=SNOW, discovery=storage_discovery(clean_days=1))
+        self.assertEqual((sm["storage"]["folded_total"], sm["storage"]["detail_note"]), (0, None))
+        grid = db.render(sm)
+        flat = " ".join(str(c.value) for r in grid.rows for c in r)
+        self.assertNotIn("Tally tab", flat)
+        self.assertNotIn("Tally tab", rp.format_text(sm))
+        rows = grid.rows
+        at = next(i for i, r in enumerate(rows) if r[0].value == "Unique jobs first observed")
+        self.assertEqual(rows[at + 1][0].value, "New postings (after a board's first read)")
+        bare = summary(now=SNOW)  # no storage key at all: the same page apart from the Storage line text
+        without = lambda g: [[c.value for c in r] for r in g.rows if r[0].value != "Storage"]  # noqa: E731
+        self.assertEqual(without(grid), without(db.render(bare)))
+        self.assertEqual(len(db.render(bare).rows), len(grid.rows))
+
+    def test_format_text_has_one_storage_line(self) -> None:
+        text = rp.format_text(summary(now=SNOW, discovery=storage_discovery(clean_days=3, admission=True, counted=0)))
+        lines = [ln for ln in text.splitlines() if ln.startswith("STORAGE")]
+        self.assertEqual(len(lines), 1)
+        for needle in ("dual", "seeded 2026-10-20", "3 of 3", "ready to cut over: yes"):
+            self.assertIn(needle, lines[0])
+        unmet = [ln for ln in rp.format_text(summary(now=SNOW)).splitlines() if ln.startswith("STORAGE")]
+        self.assertEqual(len(unmet), 1)
+        self.assertIn("not seeded", unmet[0])
 
 
 if __name__ == "__main__":

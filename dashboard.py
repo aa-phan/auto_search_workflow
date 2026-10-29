@@ -147,6 +147,12 @@ def _groq_text(G: dict[str, Any]) -> str:
     return f"{today} · 7d: scored by {split} · {calls} · cached {cached} of prompt · {cuts}"
 
 
+def _storage_text(S: dict[str, Any]) -> str:
+    """The Storage line: mode, seeded date, last check, clean complete days, admission, and the words the owner acts on. Readiness comes from
+    `reporting._storage` (the recorded days through `StorageState.bar`), never from elapsed time, and only in dual mode after seeding."""
+    return " · ".join(rp.storage_parts(S)) + (" · READY TO CUT OVER" if S["ready_to_cut_over"] else "")
+
+
 def render(sm: dict[str, Any]) -> Grid:
     """The page, top to bottom: banner, cards, four charts, one small table, a few key lines, what needs attention.
     Deliberately sparse: detail tables were removed from the page (the numbers behind the charts sit in a hidden
@@ -316,6 +322,9 @@ def render(sm: dict[str, Any]) -> Grid:
         return out
 
     row("Unique jobs first observed", three(["results", "unique_jobs_observed"]))
+    if sm["storage"]["detail_note"]:  # P3-11: some of these totals come from the Tally tab, which holds counts without per-job detail
+        i = g.add([Cell(sm["storage"]["detail_note"], "muted")], 20)
+        g.merges.append((i, 0, COLUMNS - 1))
     row("New postings (after a board's first read)", three(["results", "new_postings"]))
     row("Reached scoring", three(["results", "eligible_matches_scored"]))
     row("Kept for the tracker", three(["results", "matches_kept"]))
@@ -339,6 +348,7 @@ def render(sm: dict[str, Any]) -> Grid:
     else:
         line("Search credits", "not recorded yet: remaining budget unknown")
     line("Groq", _groq_text(sm["groq"]))
+    line("Storage", _storage_text(sm["storage"]))
     rot = D["rotation"]
     line("Discovery", f"{D['unique_eligible_boards_found_by_search']['7d']} eligible boards found (7d) · {D['unique_verified_fresh_search_matches']['7d']} fresh matches via search · " + (UNKNOWN if rot is None else f"rotation at slot {rot['cursor']} of {fmt(rot['total_slots'])}"))
     v_, t_ = C["validation"], C["trials"]

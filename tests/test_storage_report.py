@@ -215,8 +215,10 @@ class ReconcileParityTests(unittest.TestCase):
                     with self.subTest(tz=str(tz), view=label, start=start.isoformat()):
                         old = rp.reconcile(runs=world.runs, events=world.events, tracker=[], start=start, end=now)
                         new = rp.reconcile(runs=world.runs, events=view.events, tracker=[], start=start, end=now, folded=view.folded())
-                        self.assertEqual(old, new)
+                        self.assertEqual({k: v for k, v in old.items() if k != "from_tally"}, {k: v for k, v in new.items() if k != "from_tally"})  # from_tally only drives the P3-11 note
                         self.assertEqual(old["jobs_first_observed"]["total"], new["jobs_first_observed"]["total"])
+                        self.assertEqual(old["from_tally"], 0)
+                        self.assertEqual(new["from_tally"] > 0, bool(view.folded()) and start.year == 2020)
 
     def test_the_all_time_window_counts_baselines_gated_and_stale_from_the_tally(self) -> None:
         now = ZONES[0][1]

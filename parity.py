@@ -162,6 +162,7 @@ def _state_counts(events: list[lg.Event], ledger: compact.Ledger, now: datetime,
 
 
 PRESENTATION_KEYS = (("storage",),)  # summary sections that only present the storage state (plan 03-04); never compared
+RECONCILE_PRESENTATION = (("from_tally",),)  # the reconciliation's count of jobs that only Tally holds (the P3-11 note); it differs by design
 ROW_COUNT_FIGURES = frozenset({"source_freshness.ledger_events_read", "source_freshness.latest_ledger_event", "exclusions.events_from_rehearsal_runs"})
 ALL_TIME_START = datetime(2020, 1, 1, tzinfo=timezone.utc)  # the all-time reconciliation window starts before any ledger row
 RECONCILE_WINDOWS = (("7d", timedelta(days=7)), ("all", None))
@@ -265,7 +266,7 @@ def _figures(events: list[lg.Event], ledger: compact.Ledger, now: datetime, tz: 
         window = {"start": now - span if span else ALL_TIME_START, "end": now}
         a = rp.reconcile(runs=runs, events=events, tracker=rows, **window)
         b = rp.reconcile(runs=runs, events=ledger.events, tracker=rows, folded=folded, **window)
-        add(compare_figures(a, b, prefix=f"reconcile.{label}", skip=(), compared=leaves))
+        add(compare_figures(a, b, prefix=f"reconcile.{label}", skip=RECONCILE_PRESENTATION, compared=leaves))
         compared[f"figures_reconcile_{label}"] = leaves[-1]
     a = storage_report.logical_counts(events)
     b = storage_report.logical_counts(ledger.events, folded=folded, identity=ledger.identity)

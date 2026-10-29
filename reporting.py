@@ -60,6 +60,9 @@ _AGE_BOUNDS_MIN = (("le1h", 60), ("h1_12", 12 * 60), ("h12_24", 24 * 60), ("h24_
 DATE_FOUND_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M")  # hunter.DISPLAY_FORMAT first; Sheets may re-render USER_ENTERED cells
 DEGRADED_BOARD_SHARE = 0.2  # a provider is "degraded" when this share (and at least 3) of its monitored boards failed their last poll
 FOLDED_PUBLISHED = datetime(1970, 1, 1, tzinfo=timezone.utc)  # stands for "the publication date was known" on a folded count: it only feeds `date_known`, never an age
+TALLY_NOTE = (
+    "Note: baseline totals and title-gated or stale totals older than 7 days come from the Tally tab, without per-job detail (title, URL, publication time)."
+)  # P3-11: shown wherever a figure includes folded counts
 _BACKOFF_RE = re.compile(r"provider backoff after HTTP 429: not polled this run: ([^;]+)")
 
 
@@ -307,6 +310,52 @@ def _count_seen(c: Counter[str], f: JobFacts, n: int = 1) -> None:
         c["new_date_known" if f.date_known else "new_date_unknown"] += n
 
 
+_SAFE_DIFF = re.compile(r"^[a-z_0-9]+ [A-Za-z0-9_.:|@-]+( \([A-Za-z0-9 .:@=,-]+\))?$")  # `kind ref (numbers)`: never a URL or free text
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _count_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _storage(now: datetime, discovery: dict[str, str], folded_total: int) -> dict[str, Any]:
+    """What the owner reads about the storage (D-57): the Discovery key `storage` as the poller recorded it, and whether its own days
+    meet the parity bar (P3-05). Readiness is recomputed here by `StorageState.bar` from the recorded days (never taken from a stored flag
+    and never from elapsed time), and only in dual mode after seeding; the Dashboard stays read-only toward this state. `detail_note` is the
+    P3-11 sentence, set when some figure includes folded Tally counts."""
+    st = compact.StorageState.load(discovery.get(compact.STORAGE_KEY))
+    bar = st.bar(now)
+    seeded = parse_stamp(st.seeded_at)
+    check = st.last_check
+    diffs = [d for d in st.last_diffs if _SAFE_DIFF.match(d)]  # the key lives in a Sheet tab the owner can edit; only `kind ref (numbers)` is ever shown
+    return {
+        "mode": st.mode, "seeded_at": _stamp(seeded), "last_check_at": _stamp(parse_stamp(check.get("at"))),
+        "last_counted": _count_or_none(check.get("counted")), "last_declared": _count_or_none(check.get("declared")), "last_diffs": diffs,
+        "days_counted": bar.days_counted, "admission_seen": bar.admission_seen, "bar_met": bar.met,
+        "ready_to_cut_over": bool(bar.met and st.mode == compact.MODE_DUAL and seeded is not None),
+        "cutover_at": _stamp(parse_stamp(st.cutover.get("at"))), "restored_at": _stamp(parse_stamp(st.restore.get("at"))),
+        "last_fold_day": day if isinstance(day := st.fold.get("last_day"), str) and _DAY.match(day) else None,
+        "folded_total": folded_total, "detail_note": TALLY_NOTE if folded_total > 0 else None,
+    }  # fmt: skip
+
+
+def storage_parts(s: dict[str, Any]) -> list[str]:
+    """The clauses of the one-line storage state, shared by the Dashboard's Storage line and the plain-text report (the readiness words
+    are added by each, so a reader of either sees the same facts)."""
+    day = lambda v: (v or "")[:10]  # noqa: E731
+    last = "no check recorded yet" if s["last_counted"] is None else f"last check {s['last_counted']} difference(s)"
+    if s["seeded_at"] is None:
+        return ["not seeded yet (Identity and Tally are filled by the first run after deployment)"]
+    if s["mode"] == compact.MODE_COMPACT:
+        return [f"compact since {day(s['cutover_at']) or 'a date that was not recorded'}", f"last fold {s['last_fold_day']}" if s["last_fold_day"] else "no fold yet", last]
+    if s["mode"] == compact.MODE_RESTORED:
+        return [f"restored {day(s['restored_at']) or 'on a date that was not recorded'}", "compaction off until a new owner decision", last]
+    return [
+        "dual (Identity and Tally written beside Events)", f"seeded {day(s['seeded_at'])}", last,
+        f"{s['days_counted']} of {compact.PARITY_DAYS} clean complete days", f"admission seen {'yes' if s['admission_seen'] else 'no'}",
+    ]  # fmt: skip
+
+
 def _folded_fact(fc: compact.FoldedCount) -> JobFacts:
     """One representative job for a folded Tally count (`fc.n` jobs of one run and dimension). Its key is synthetic and it is
     never put in `facts` (the yield view, the Groq section, failures and the tracker join read real jobs only). It carries the
@@ -489,7 +538,8 @@ def build_summary(
     # ---- Groq consumption (MEAS-02 / MEAS-03)
     groq = _groq(now, finished, facts, discovery, periods, local)
     # ---- failures
-    failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing=yld["reconcile"]["missing_from_tracker"])
+    storage = _storage(now, discovery, sum(fc.n for fc in clean.folded))
+    failures = _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing=yld["reconcile"]["missing_from_tracker"], storage=storage)
     # ---- feedback
     feedback = _feedback(clean.tracker, min_alert_score)
     # ---- daily trend (last 30 local days, newest first); None = nothing was recorded that day (unknown, not zero)
@@ -524,7 +574,7 @@ def build_summary(
             "tracker_fixture_rows": clean.excluded_fixture_rows, "duplicate_run_records_merged": clean.duplicate_run_records,
         },
         "periods": per_period, "health": health, "discovery": disc, "coverage": coverage, "failures": failures, "feedback": feedback,
-        "yield": yld, "groq": groq, "trend": trend, "checks": checks,
+        "yield": yld, "groq": groq, "trend": trend, "checks": checks, "storage": storage,
     }  # fmt: skip
     summary["headline"] = headline(summary)
     return summary
@@ -772,7 +822,7 @@ def _coverage(now, finished, boards, discovery, established_target, exploration_
     }  # fmt: skip
 
 
-def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing: list[dict[str, Any]] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finished, health, tracker_missing: list[dict[str, Any]] | None = None, storage: dict[str, Any] | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     pend_eval = [f for f in facts.values() if f.seen_at and f.disposition == lg.PENDING and f.eval_at is None and lg.STAGE_EVALUATE not in f.abandoned]
     pend_alert = [f for f in facts.values() if f.eval_at and f.eval_alert and not f.alert_times and lg.STAGE_ALERT not in f.abandoned]
     pending_hyd = dsc.load_pending(discovery.get(dsc.PENDING_KEY))
@@ -820,6 +870,14 @@ def _failures(now, clean, facts, discovery, run_timeout_s, started_only, finishe
         rows.append({"severity": 1, "what": "tracker missing kept jobs", "ref": "Job Tracker", "count": len(tracker_missing), "since": None, "last": None,
                      "detail": ", ".join(m["key"] for m in tracker_missing[:3]) + (f" and {len(tracker_missing) - 3} more" if len(tracker_missing) > 3 else ""),
                      "action": "Look these keys up in the hidden Events tab (their evaluated row has the URL); if you deleted the rows on purpose, tell the agent; the program never rewrites tracker rows."})  # fmt: skip
+    if storage and storage["last_counted"]:  # P3-07: the newest check counted differences; refs are job keys, run ids and figure paths, never text (T-03-18)
+        shown = storage["last_diffs"][:3]
+        more = storage["last_counted"] - len(shown)
+        compact_mode = storage["mode"] == compact.MODE_COMPACT
+        rows.append({"severity": 1, "what": "storage parity difference", "ref": "Identity / Tally", "count": storage["last_counted"], "since": storage["last_check_at"], "last": None,
+                     "detail": ("; ".join(shown) + (f"; and {more} more" if more > 0 else "")) if shown else "named in the storage_parity run's log",
+                     "action": ("Detection reads Identity plus Events: run the storage_parity workflow input and read that run's log." if compact_mode else
+                                "The old Events rows stay authoritative and nothing was deleted; the 3-day clock restarted. Run the storage_parity workflow input for the full list.")})  # fmt: skip
     rows.sort(key=lambda x: (x["severity"], -(x["count"] or 0), str(x["ref"])))
     unique_failing = {f.key for f in facts.values() if f.errors}
     return {
@@ -1068,6 +1126,10 @@ def format_text(s: dict[str, Any]) -> str:
         out.append(f"  {o:10s} {p7['outcomes'][o]:6d}" + (f"  ({round(100 * p7['outcomes'][o] / n)}% of {n})" if n else ""))
     fr7 = p7["freshness"]
     out.append(f"  freshness of new postings that passed the cheap gates: {fr7['verified_fresh']} verified fresh of {fr7['dated']} dated ({fr7['verified_fresh_share_of_dated_pct']}%); {fr7['date_unknown']} have no date")
+    sg = s["storage"]
+    out += ["", "STORAGE " + ", ".join(storage_parts(sg) + ([f"ready to cut over: {'yes' if sg['ready_to_cut_over'] else 'no'}"] if sg["mode"] == compact.MODE_DUAL and sg["seeded_at"] else []))]
+    if sg["detail_note"]:
+        out.append(sg["detail_note"])
     return "\n".join(out)
 
 
@@ -1142,6 +1204,7 @@ def reconcile(
     missing = sorted(({"key": key, "evaluated": _stamp(facts[key].eval_at)} for key in visible_all - tkeys - tracker_deleted), key=lambda m: (m["evaluated"] or "", m["key"]))
     return {
         "window": {"from": _stamp(start), "to": _stamp(end), "hours": round((end - start).total_seconds() / 3600, 1)},
+        "from_tally": folded_in,  # jobs in the first-observed cohort that only Tally counts (presentation: the parity check does not compare it)
         "excluded": {"rehearsal_runs": clean.excluded_rehearsal_runs, "events_from_rehearsal_runs": clean.excluded_rehearsal_events, "tracker_fixture_rows": clean.excluded_fixture_rows},
         "jobs_first_observed": {  # one cohort: each job once, by the time of its first observation
             "total": first_observed, "baseline_existing_postings": out["baseline"], "new_postings": first_observed - out["baseline"],
@@ -1177,6 +1240,7 @@ def format_reconciliation(r: dict[str, Any]) -> list[str]:
     lines = [
         f"  window {w['from']} -> {w['to']} ({w['hours']:g} h); excluded: {x['rehearsal_runs']} rehearsal run(s), {x['events_from_rehearsal_runs']} of their events, {x['tracker_fixture_rows']} tracker fixture row(s)",
         f"  JOBS FIRST OBSERVED IN THE WINDOW (one cohort, each job once): {j['total']} = {j['baseline_existing_postings']} existing postings recorded at a board's first read + {j['new_postings']} new postings",
+        *([f"    {TALLY_NOTE}"] if r.get("from_tally") else []),
         f"    of the {j['new_postings']} new: {j['stopped_by_title_gate']} stopped by the title gate, {j['stale_at_observation']} stale on observation, {j['relevant_pending_or_evaluated']} relevant (queued for evaluation)",
         f"    of the {j['relevant_pending_or_evaluated']} relevant: {j['awaiting_evaluation']} awaiting evaluation, {j['abandoned']} abandoned, {sum(rej.values())} rejected after reading the posting "
         f"(location {rej['location']}, experience {rej['experience']}, language {rej['language']}, closed {rej['closed']}), {j['reached_scoring']} reached scoring",
