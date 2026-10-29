@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Search-substitute volume
-current_phase: 3
+current_phase: 03
 current_phase_name: Compact storage
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-10-29T15:13:14.577Z"
-last_activity: 2026-10-28
-last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: 47d68d45a570fc1c398670ee64ecc5983df05bed
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-10-29T16:53:17.738Z"
+last_activity: 2026-10-29
+last_activity_desc: Phase 03 execution started
+state_head: f36a142eb5fbd664b208cee3cd6b9b66d64f6444
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 18
-  completed_plans: 9
+  completed_plans: 10
   percent: 33
 ---
 
@@ -25,14 +25,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-10-28)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Phase 3 — Compact storage
+**Current focus:** Phase 03 — Compact storage
 
 ## Current Position
 
-Phase: 3 (Compact storage) — READY TO EXECUTE
-Plan: Not started
+Phase: 03 (Compact storage) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-10-28 — Phase 02 complete, transitioned to Phase 3
+Last activity: 2026-10-29 — Phase 03 execution started
 
 Progress: [███░░░░░░░] 33%
 
@@ -62,6 +62,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P06 | 12 min | 2 tasks | 7 files |
 | Phase 02 P07 | 1h | 3 tasks | 2 files |
 | Phase 02 P08 | ~1h across two invocations | 3 tasks | 6 files |
+| Phase 03 P01 | 12 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,8 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: Owner-read Groq console figures (read 2026-10-26, recorded in D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer given 2026-10-28 (D-53).
 - [Phase 02]: D-53: Groq plan free-revisit (stay free, revisit before Phase 4); resume to Groq ok; Groq_Daily_Token_Budget default 100000 per model (half the owner-read 200,000, rolling window); 20-30 a day target conditional (about 75 evaluations / 12 rows a day)
 - [Phase 02]: D-54 (2026-10-28): owner keeps SmartRecruiters polled; P2-14 parking withdrawn; plan 02-09 superseded, nothing deployed.
+- [Phase 03]: Identity is keyed by the job-key stem ats|board_lowercased, never BoardRecord.key or a URL
+- [Phase 03]: Compact mode needs the Discovery key storage=compact AND Events_Legacy; a Tally failure is contained in both modes; a compact-mode Identity failure stops the run before save_boards
 
 ### Pending Todos
 
@@ -124,6 +127,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-29T07:54:46.569Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-compact-storage/03-CONTEXT.md
+Last session: 2026-10-29T16:53:17.686Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
