@@ -2052,7 +2052,7 @@ def run_storage_cutover(store: Any, settings: Settings, *, dry_run: bool, now: d
     try:
         discovery = state.load_discovery_state()
         storage = compact.StorageState.load(discovery.get(compact.STORAGE_KEY))
-        legacy = state.tab_exists(EVENTS_LEGACY_TAB)
+        legacy = state.tab_exists(EVENTS_LEGACY_TAB, fresh=True)
         if storage.mode == compact.MODE_RESTORED:
             return refuse("the stored mode is restored: compacting again needs a new owner decision (and a new seed of the parity clock).")
         if storage.mode == compact.MODE_COMPACT:
@@ -2133,6 +2133,12 @@ def _finish_cutover(
     legacy_rows = state.load_events_from(EVENTS_LEGACY_TAB)
     legacy_seen = {ev.key for ev in legacy_rows if ev.event == lg.SEEN}
     held = {ev.key for ev in ledger.events if ev.event == lg.SEEN} | ledger.identity.keys()
+    loaded = max((r.events_rows for r in runs), default=0)
+    if not legacy_rows or len(legacy_rows) < loaded:  # the old ledger holds every row any run ever loaded from Events: a tab with fewer is not it
+        return refuse(
+            f"{EVENTS_LEGACY_TAB} exists but holds fewer rows ({len(legacy_rows):,}) than a recorded run loaded from Events ({loaded:,}), so it is not the old ledger of a finished swap; "
+            "the stored mode stays dual. Rename the ledger tab back to Events (DECISIONS D-57); nothing was changed."
+        )
     missing = legacy_seen - held
     if missing:
         return refuse(
@@ -2147,6 +2153,13 @@ def _finish_cutover(
             in_legacy[row] -= 1
         else:
             after.append(ev)
+    newest = max((t for ev in legacy_rows if (t := compact.event_time(ev)) is not None), default=None)
+    older = [ev for ev in after if newest is not None and (t := compact.event_time(ev)) is not None and t < newest]
+    if older:  # after a swap Events is the compact copy of the old ledger plus rows written later: nothing it lacks can be older than the old ledger's newest row
+        return refuse(
+            f"{EVENTS_LEGACY_TAB} exists, but Events holds {len(older):,} rows that it lacks and that are older than its newest row, so Events is not the copy of {EVENTS_LEGACY_TAB} plus newer rows; "
+            "the stored mode stays dual. Nothing was changed."
+        )
     at = min((ev.time for ev in after if compact.event_time(ev) is not None), default=lg.stamp(now))  # the first row written after the swap bounds the cutover time from below
     grid = state.sheet_grid()
     grid[EVENTS_TAB] = grid.pop(EVENTS_LEGACY_TAB, grid.get(EVENTS_TAB, (0, 0)))  # the old Events grid is the one the legacy tab holds now
@@ -2169,6 +2182,107 @@ def _finish_cutover(
         return 2
     dashboard.refresh(store, settings)
     print(f"STORAGE CUTOVER done at {lg.stamp(now)}: mode compact (an interrupted cutover was finished from the existing tabs)\n{plan}\n{_before_text(before)}")
+    return 0
+
+
+def run_storage_restore(store: Any, settings: Settings, *, dry_run: bool, now: datetime | None = None) -> int:
+    """`--storage-restore` (D-57, P3-06 made concrete): undo the cutover. EMERGENCY ONLY, and only while no fold has deleted a row.
+
+    Renaming Events_Legacy back by hand would lose every Events row written after the cutover, so jobs first seen after it (pending, evaluated,
+    alerted) would look new and could be alerted again. This command first appends every current Events row with Time at or after `cutover.at` to
+    Events_Legacy (rows already there from an earlier attempt are not added twice), checks the count, and only then renames Events -> Events_Failed
+    and Events_Legacy -> Events in ONE spreadsheet batch and sets the stored mode to `restored`. It deletes nothing. Exit codes as the cutover.
+    A swap done but not recorded (the key still says compact, Events_Legacy is gone and Events_Failed exists) is finished by running it again."""
+    now = now or fr.utcnow()
+    state = store.state
+
+    def refuse(why: str) -> int:
+        print(f"STORAGE RESTORE refused: {why} Nothing was written.")
+        return 1
+
+    swapped = False
+    try:
+        discovery = state.load_discovery_state()
+        storage = compact.StorageState.load(discovery.get(compact.STORAGE_KEY))
+        legacy = state.tab_exists(EVENTS_LEGACY_TAB, fresh=True)
+        mode = compact.effective_mode(discovery.get(compact.STORAGE_KEY), legacy_present=legacy)
+        if mode != compact.MODE_COMPACT:
+            if storage.mode == compact.MODE_COMPACT and not legacy and state.tab_exists(EVENTS_FAILED_TAB):
+                return _finish_restore(store, settings, state, storage, discovery, now=now, dry_run=dry_run)
+            return refuse(
+                f"the effective storage mode is {mode} (stored {storage.mode}, {EVENTS_LEGACY_TAB} {'present' if legacy else 'missing'}): a restore undoes a finished cutover, and only that."
+            )
+        if first_day := storage.fold.get("first_day"):
+            return refuse(
+                f"a fold has already deleted rows from Events (first fold day {first_day}), so renaming {EVENTS_LEGACY_TAB} back would lose every row the fold removed after the cutover. "
+                f"Restoring now needs a replay of {EVENTS_LEGACY_TAB}, the post-cutover Events and Identity (DECISIONS D-57); this command does not do that."
+            )
+        at = compact.parse_stamp(storage.cutover.get("at"))
+        if at is None:
+            return refuse("the cutover record has no valid time (`cutover.at`), so the rows written after the cutover cannot be told from the old ones.")
+        rows = [ev for ev in state.load_events() if (t := compact.event_time(ev)) is not None and t >= at]
+        already = Counter(tuple(ev.to_row()) for ev in state.load_events_from(EVENTS_LEGACY_TAB) if (t := compact.event_time(ev)) is not None and t >= at)
+        missing: list[lg.Event] = []
+        for ev in rows:
+            row = tuple(ev.to_row())
+            if already[row] > 0:
+                already[row] -= 1  # appended by an earlier attempt that was interrupted before the rename
+            else:
+                missing.append(ev)
+        plan = (
+            f"{len(rows):,} Events rows with Time at or after {lg.stamp(at)} ({len(missing):,} not yet there) are appended to {EVENTS_LEGACY_TAB}; then Events -> {EVENTS_FAILED_TAB} "
+            f"and {EVENTS_LEGACY_TAB} -> Events in one spreadsheet batch; mode restored (compacting again needs a new owner decision); nothing is deleted"
+        )
+        if dry_run:
+            print("\n".join(["STORAGE RESTORE (dry run; nothing was written)", f"gate: effective storage mode compact, {EVENTS_LEGACY_TAB} present, no fold yet", f"plan: {plan}"]))
+            return 0
+        state.append_events_to(EVENTS_LEGACY_TAB, missing)
+        held = [ev for ev in state.load_events_from(EVENTS_LEGACY_TAB) if (t := compact.event_time(ev)) is not None and t >= at]
+        if len(held) != len(rows):
+            print(f"STORAGE RESTORE failed: {EVENTS_LEGACY_TAB} holds {len(held):,} rows from the cutover time on after the append, {len(rows):,} expected. Events was not renamed; nothing was deleted. Run the restore again.")
+            return 2
+        state.swap_events("restore")
+        swapped = True
+        storage.mode = compact.MODE_RESTORED
+        storage.restore = compact.restore_record(now, appended_rows=len(rows))
+        discovery[compact.STORAGE_KEY] = storage.to_json()
+        state.save_discovery_state(discovery, lg.stamp(now))
+    except Exception as exc:  # the exception type only: its text may carry an API response, and the log is public
+        log.error("Storage restore failed: %s", type(exc).__name__)
+        if swapped:
+            print(
+                f"STORAGE RESTORE failed after the tab swap ({type(exc).__name__}): Events is the old ledger again and {EVENTS_FAILED_TAB} holds the compact one, but the storage key was not saved. "
+                "The poller writes as dual and notes `storage state: compact without Events_Legacy`; run the restore again to finish the record. Nothing was deleted."
+            )
+        else:
+            print(f"STORAGE RESTORE failed ({type(exc).__name__}): Events was not renamed; rows already appended to {EVENTS_LEGACY_TAB} are not added twice by the next attempt; nothing was deleted. Run the restore again.")
+        return 2
+    dashboard.refresh(store, settings)  # contained
+    print("\n".join([
+        f"STORAGE RESTORE done at {lg.stamp(now)}: mode restored",
+        f"Events is the old ledger again plus the {len(rows):,} rows written since the cutover; the compact tab is kept as {EVENTS_FAILED_TAB}; nothing was deleted",
+        "Every observation is written to Events again (with Identity and Tally); no parity check runs; compacting again needs a new owner decision.",
+    ]))
+    return 0
+
+
+def _finish_restore(store: Any, settings: Settings, state: Any, storage: compact.StorageState, discovery: dict[str, str], *, now: datetime, dry_run: bool) -> int:
+    """The tabs were swapped back (Events_Legacy is gone, Events_Failed exists) but the storage key still says compact: write the record only."""
+    plan = f"the tabs were already swapped back ({EVENTS_LEGACY_TAB} is gone, {EVENTS_FAILED_TAB} exists): finish the record, mode restored; no rows are touched"
+    if dry_run:
+        print(f"STORAGE RESTORE (dry run; nothing was written)\nplan: {plan}")
+        return 0
+    try:
+        storage.mode = compact.MODE_RESTORED
+        storage.restore = dict(compact.restore_record(now, appended_rows=None), completed_at=lg.stamp(now))
+        discovery[compact.STORAGE_KEY] = storage.to_json()
+        state.save_discovery_state(discovery, lg.stamp(now))
+    except Exception as exc:
+        log.error("Storage restore failed: %s", type(exc).__name__)
+        print(f"STORAGE RESTORE failed ({type(exc).__name__}): the storage key was not saved; run the restore again. Nothing was deleted.")
+        return 2
+    dashboard.refresh(store, settings)
+    print(f"STORAGE RESTORE done at {lg.stamp(now)}: mode restored (an interrupted restore was finished from the existing tabs)\n{plan}")
     return 0
 
 
@@ -2243,11 +2357,13 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--inventory-cache", help="directory for last-known-good inventory copies (default state/inventory)")
     parser.add_argument("--storage-report", action="store_true", help="print what the Events ledger is made of and a sized proposal for compact baselines / archiving; read only, changes nothing")
     parser.add_argument("--storage-parity", action="store_true", help="check that Identity and Tally reproduce the Events rows and print the 3-day parity clock; read only, writes nothing (exit 0 no counted differences, 1 differences, 2 cannot be checked)")
-    parser.add_argument("--storage-cutover", action="store_true", help="OWNER STEP (D-57): replace Events by its compact copy once the parity bar is met; refuses otherwise; deletes nothing, the old tab is kept hidden as Events_Legacy (with --dry-run: print the gate and the plan, write nothing)")
+    swap = parser.add_mutually_exclusive_group()
+    swap.add_argument("--storage-cutover", action="store_true", help="OWNER STEP (D-57): replace Events by its compact copy once the parity bar is met; refuses otherwise; deletes nothing, the old tab is kept hidden as Events_Legacy (with --dry-run: print the gate and the plan, write nothing)")
+    swap.add_argument("--storage-restore", action="store_true", help="EMERGENCY ONLY (D-57): undo the cutover before the first fold (appends the rows written since, renames the tabs back); refuses after the first fold; deletes nothing (with --dry-run: print the plan, write nothing)")
     parser.add_argument("--dashboard", action="store_true", help="rebuild the Dashboard tab from the state now (writes only that tab); with --dry-run print the text version and write nothing")
     parser.add_argument("--rebalance-report", action="store_true", help="print the dry-run board rebalance report (pool targets, coverage, queue ages, planned decisions); writes nothing")
     args = parser.parse_args(argv)
-    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.storage_parity or args.storage_cutover or args.pilot_report is not None
+    inventory_mode = args.import_inventory or args.validate or args.inventory_report or args.rebalance_report or args.search_usage or args.dashboard or args.storage_report or args.storage_parity or args.storage_cutover or args.storage_restore or args.pilot_report is not None
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = Config.from_env()
@@ -2288,17 +2404,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.rebalance_report:
         allow_sr = args.allow_smartrecruiters or (os.getenv("ALLOW_SMARTRECRUITERS_BULK") or "").strip() == "1"
         return run_rebalance_report(store, settings, allow_sr)
-    writes = not args.dry_run and (bool(args.import_inventory or args.validate or args.storage_cutover) if inventory_mode else not (args.url or args.delivery_test))
+    writes = not args.dry_run and (bool(args.import_inventory or args.validate or args.storage_cutover or args.storage_restore) if inventory_mode else not (args.url or args.delivery_test))
     if writes and (why := local_write_refusal(
         uses_sheet=bool(cfg.sheet_id), in_actions=(os.getenv("GITHUB_ACTIONS") or "").strip() == "true",
         allow_local=(os.getenv("ALLOW_LOCAL_SHEET_WRITES") or "").strip() == "1",
     )):  # fmt: skip
         log.error("%s", why)
         return 4
-    if args.storage_cutover:  # the owner's tab swap: the poller's lease (same workflow, same 25-minute window), none for a dry run
+    if args.storage_cutover or args.storage_restore:  # the owner's tab swap and its undo: the poller's lease (same workflow, same 25-minute window), none for a dry run
+        command = run_storage_cutover if args.storage_cutover else run_storage_restore
         try:
             with writer_lease(store, "poller", enabled=not args.dry_run):
-                return run_storage_cutover(store, settings, dry_run=args.dry_run)
+                return command(store, settings, dry_run=args.dry_run)
         except WriterBusy as exc:
             log.error("Not started: another process is writing this registry (%s). Nothing was changed.", exc)
             return 3

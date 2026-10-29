@@ -188,7 +188,7 @@ def degraded_reason(run: RunRecord) -> str:
         reasons.append("discovery")
     if "final write failed" in run.notes or "run-start record not written" in run.notes:
         reasons.append("persistence")
-    if any(note in run.notes for note in ("storage write failed", "storage parity:", "storage check failed", "storage repair failed")):
+    if any(note in run.notes for note in ("storage write failed", "storage parity:", "storage check failed", "storage repair failed", "storage cutover incomplete", "storage state: compact without Events_Legacy")):
         reasons.append("storage")
     if run.alerts_failed:
         reasons.append("alerts")
@@ -380,7 +380,9 @@ def run_cycle(d: Deps) -> RunRecord:
         budget_loaded = True
         storage = compact.StorageState.load(discovery_state.get(compact.STORAGE_KEY))
         seeded_before = storage.seeded_at is not None  # a run that seeds checks nothing: its own writes are not in its snapshot yet
-        mode = compact.effective_mode(discovery_state.get(compact.STORAGE_KEY), legacy_present=d.state.tab_exists(EVENTS_LEGACY_TAB))
+        decision = compact.effective_mode(discovery_state.get(compact.STORAGE_KEY), legacy_present=d.state.tab_exists(EVENTS_LEGACY_TAB))
+        mode = decision
+        run.notes += decision.note  # a cutover that was not finished, or a compact key without its old tab: written as dual, degraded, no check (D-57)
         if not d.dry_run:
             # Repair (and, the first time, seed): add what the stores lack compared with the Events rows, Identity first, then the
             # Tally runs. The plan is a set difference, so a seed that was interrupted is completed without writing an ID or a
@@ -844,7 +846,7 @@ def run_cycle(d: Deps) -> RunRecord:
         write()
         # ---------------------------------------------------------------- 5. storage parity (dual mode only)
         # After the alert stage, on the start-of-run snapshot: it checks the previous runs' writes and can never delay a poll or an alert.
-        if not d.dry_run and mode == compact.MODE_DUAL and seeded_before:
+        if not d.dry_run and mode == compact.MODE_DUAL and seeded_before and not decision.note:
             if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
                 log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)%s", STORAGE_CHECK_CUTOFF_S // 60, repair_text)
             else:

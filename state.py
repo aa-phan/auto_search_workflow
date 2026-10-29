@@ -478,8 +478,10 @@ class SheetState:
         for chunk in _chunks([e.to_row() for e in events]):
             ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
 
-    def tab_exists(self, title: str) -> bool:
-        if self._titles is None:
+    def tab_exists(self, title: str, *, fresh: bool = False) -> bool:
+        """Is there a tab with this title? The titles are cached by `ensure()`; `fresh` lists them again (the cutover and the restore ask
+        about tabs that a person or an earlier attempt may have created or renamed since this process started)."""
+        if self._titles is None or fresh:
             self._titles = {w.title for w in self.sh.worksheets()}
         return title in self._titles
 
@@ -538,7 +540,11 @@ class SheetState:
     def protect_tab(self, title: str, description: str) -> None:
         """Warning-only protection of the whole tab. Cosmetic like the tab tidy-up: a failure is logged and the tab works without it."""
         try:
-            self.sh.batch_update({"requests": [_warning_protection(self.sh.worksheet(title).id, description)]})
+            ws = self.sh.worksheet(title)
+            for sheet in self.sh.fetch_sheet_metadata().get("sheets", []):
+                if sheet.get("properties", {}).get("sheetId") == ws.id and any(p.get("warningOnly") and set(p.get("range", {})) == {"sheetId"} for p in sheet.get("protectedRanges", [])):
+                    return  # already protected (a repeated cutover must not stack protections)
+            self.sh.batch_update({"requests": [_warning_protection(ws.id, description)]})
         except Exception as exc:
             log.warning("Could not protect the %s tab: %s", title, exc)
 
@@ -727,7 +733,7 @@ class CsvState:
         with self._path(EVENTS_TAB).open("a", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(e.to_row() for e in events)
 
-    def tab_exists(self, title: str) -> bool:
+    def tab_exists(self, title: str, *, fresh: bool = False) -> bool:
         return self._path(title).exists()
 
     # -- the tab swap of the cutover and the restore (D-57): nothing here deletes, clears or rewrites an Events or Events_Legacy row

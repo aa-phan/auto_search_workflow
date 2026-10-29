@@ -322,12 +322,17 @@ def tally_recount(events: Iterable[lg.Event]) -> dict[tuple[str, str], Counter[s
     return dict(out)
 
 
-def event_time(ev: lg.Event) -> datetime | None:
-    """The event Time as an aware UTC instant (None when it is not in the ledger's own stamp format)."""
+def parse_stamp(text: Any) -> datetime | None:
+    """A ledger stamp (`2026-10-29T17:46:37Z`) as an aware UTC instant; None when it is anything else."""
     try:
-        return datetime.strptime(ev.time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def event_time(ev: lg.Event) -> datetime | None:
+    """The event Time as an aware UTC instant (None when it is not in the ledger's own stamp format)."""
+    return parse_stamp(ev.time)
 
 
 def simulate_compact(events: list[lg.Event], now: datetime) -> list[lg.Event]:
@@ -377,8 +382,8 @@ def cutover_record(now: datetime, *, retained_rows: int, legacy_rows: int, check
     return {"at": lg.stamp(now.astimezone(timezone.utc)), "retained_rows": retained_rows, "legacy_rows": legacy_rows, "checksum": checksum, "before": before}
 
 
-def restore_record(now: datetime, *, appended_rows: int) -> dict[str, Any]:
-    """The `restore` record: when the cutover was undone and how many post-cutover rows were appended to the old ledger first."""
+def restore_record(now: datetime, *, appended_rows: int | None) -> dict[str, Any]:
+    """The `restore` record: when the cutover was undone and how many post-cutover rows the old ledger was given first (None when a rerun only finished the record)."""
     return {"at": lg.stamp(now.astimezone(timezone.utc)), "appended_rows": appended_rows}
 
 

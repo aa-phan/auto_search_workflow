@@ -309,7 +309,7 @@ class CutoverGateTests(CutoverCase):
         self.seeded_with_met_bar()
         rows = [list(r) for r in self.sh.sheets[stm.EVENTS_TAB].values[1:]]
         del rows[2]  # an old row that Events holds and the tab does not: Events is not the copy of this tab plus newer rows
-        self.legacy_tab(rows)
+        self.legacy_tab(rows + [rows[-1]])  # (the tab still has as many rows as any run loaded, so only the age of the missing row refuses it)
         self.refused("Events_Legacy", "older than")
 
     def test_a_dry_run_with_a_passing_gate_prints_the_plan_and_writes_nothing(self) -> None:
@@ -355,6 +355,23 @@ class CutoverGateTests(CutoverCase):
         self.assertNotIn(stm.EVENTS_LEGACY_TAB, self.sh.sheets)
         self.assertEqual(self.renames(), [])
         self.assertEqual(self.storage().mode, compact.MODE_DUAL)
+
+    def test_a_read_back_with_the_same_count_but_a_changed_row_refuses_on_the_checksum(self) -> None:
+        self.seeded_with_met_bar()
+        original = [list(r) for r in self.sh.sheets[stm.EVENTS_TAB].values]
+        real = self.w.state.build_events_new
+
+        def altered(events: list[lg.Event]) -> list[lg.Event]:
+            back = real(events)
+            return back[:-1] + [lg.Event(back[-1].time, back[-1].key + "x", back[-1].event, back[-1].freshness, back[-1].disposition, back[-1].published, back[-1].detail)]
+
+        with mock.patch.object(self.w.state, "build_events_new", side_effect=altered):
+            code, text = self.cutover()
+        self.assertEqual(code, 1, text)
+        self.assertIn("read back", text)
+        self.assertIn("checksum", text)
+        self.assertEqual(self.sh.sheets[stm.EVENTS_TAB].values, original)
+        self.assertEqual(self.renames(), [])
 
     def test_a_copy_that_would_not_pass_parity_refuses_before_any_rename(self) -> None:
         self.seeded_with_met_bar()
