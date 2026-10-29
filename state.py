@@ -16,6 +16,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+import dataclasses
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Iterable
@@ -246,6 +247,22 @@ def _chunks(rows: list[list[Any]], n: int = APPEND_CHUNK):
         yield rows[i : i + n]
 
 
+def _events_missing_message(other: str) -> str:
+    return (
+        f"The Events tab is missing but {other} exists. Refusing to create an empty Events ledger: every job already seen would "
+        "look new and be evaluated and alerted again. Restore the tab (rename the one that holds the ledger back to Events) or "
+        "finish the swap described in DECISIONS D-57."
+    )
+
+
+def _identity_protection(sheet_id: int) -> dict[str, Any]:
+    """Whole-sheet, warning-only protection: a hand edit of Identity asks for confirmation, the service account still writes."""
+    return {"addProtectedRange": {"protectedRange": {
+        "range": {"sheetId": sheet_id}, "warningOnly": True,
+        "description": "Identity: posting IDs used to recognise jobs already seen. A hand edit can make old jobs look new (DECISIONS D-57).",
+    }}}  # fmt: skip
+
+
 # --------------------------------------------------------------------------- advisory writer lease
 
 
@@ -275,9 +292,14 @@ class SheetState:
     def __init__(self, spreadsheet: Any) -> None:
         self.sh = spreadsheet
         self._row_of: dict[str, int] = {}  # board key -> sheet row, learned at load time
+        self._titles: set[str] | None = None  # worksheet titles as of the last `ensure()`
+        self._identity: compact.IdentitySet | None = None  # the Identity rows as loaded and written by this store
 
     def ensure(self) -> None:
         tabs = {w.title: w for w in self.sh.worksheets()}
+        for other in (EVENTS_LEGACY_TAB, EVENTS_NEW_TAB):
+            if EVENTS_TAB not in tabs and other in tabs:
+                raise RuntimeError(_events_missing_message(other))
         for title, columns, rows in (
             (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
             (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20), (LOCK_TAB, LOCK_COLUMNS, 5),
@@ -287,12 +309,19 @@ class SheetState:
                 continue
             ws = self.sh.add_worksheet(title=title, rows=rows, cols=len(columns))
             ws.append_rows([columns], value_input_option="RAW")
+            tabs[title] = ws
             try:
                 ws.freeze(rows=1)
                 ws.hide()  # internal state: out of the user's way, still readable by the script
             except Exception as exc:
                 log.warning("Could not tidy the %s tab: %s", title, exc)
+            if title == IDENTITY_TAB:
+                try:
+                    self.sh.batch_update({"requests": [_identity_protection(ws.id)]})
+                except Exception as exc:  # cosmetic like the tidy-up above: the tab works without the warning
+                    log.warning("Could not protect the %s tab: %s", title, exc)
             log.info("Created the hidden %s tab", title)
+        self._titles = set(tabs)
         self._widen_header(BOARDS_TAB, BOARD_COLUMNS)
         self._widen_header(RUNS_TAB, RUN_COLUMNS)
 
@@ -437,6 +466,84 @@ class SheetState:
         for chunk in _chunks([e.to_row() for e in events]):
             ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
 
+    def tab_exists(self, title: str) -> bool:
+        if self._titles is None:
+            self._titles = {w.title for w in self.sh.worksheets()}
+        return title in self._titles
+
+    def load_ledger(self) -> compact.Ledger:
+        """Events (each with its sheet row: header = row 1, an unreadable row still advances the count), Identity and Tally,
+        one read each. The Identity set is kept as this store's cache for `write_identity`."""
+        events: list[Event] = []
+        event_rows: list[int] = []
+        for n, row in enumerate(self.sh.worksheet(EVENTS_TAB).get_all_values()[1:], start=2):
+            if ev := Event.from_row(row):
+                events.append(ev)
+                event_rows.append(n)
+        identity_rows = [r for n, row in enumerate(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:], start=2) if (r := compact.IdentityRow.from_row(row, n))]
+        self._identity = compact.IdentitySet.from_rows(identity_rows)
+        tally = [t for row in self.sh.worksheet(TALLY_TAB).get_all_values()[1:] if (t := compact.TallyRow.from_row(row))]
+        return compact.Ledger(events, event_rows, self._identity, tally)
+
+    def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
+        """Add the entries (already encoded, grouped by stem) to Identity; returns the number of rows written.
+
+        Requests are budgeted by cell characters (`compact.IDENTITY_REQUEST_CHARS`), never by row count; a stem is split across
+        requests only when it alone exceeds the budget. Chunks go out in ascending order, so an interrupted write leaves the
+        stem's highest chunk without the completion marker. Rows that exist are updated in place (single-cell `A{row}` anchor),
+        new chunks are appended and their row numbers read back. The cache follows each successful request, so after a failure
+        it equals what the sheet holds, and a repeat is idempotent (entries are deduplicated by ID)."""
+        if self._identity is None:
+            self.load_ledger()
+        assert self._identity is not None
+        planned = self._identity.plan_additions(additions, stamp)
+        if not planned:
+            return 0
+        budget = compact.IDENTITY_REQUEST_CHARS
+
+        def chars(r: compact.IdentityRow) -> int:
+            return sum(len(c) for c in r.to_row())  # every cell the request carries counts against the budget
+
+        requests: list[list[compact.IdentityRow]] = []
+        current: list[compact.IdentityRow] = []
+        used = 0
+        for stem in dict.fromkeys(r.stem for r in planned):
+            group = [r for r in planned if r.stem == stem]
+            weight = sum(chars(r) for r in group)
+            if current and used + weight > budget:
+                requests.append(current)
+                current, used = [], 0
+            if weight <= budget:
+                current += group
+                used += weight
+                continue
+            for r in group:  # one stem larger than a whole request: split it between chunks
+                if current and used + chars(r) > budget:
+                    requests.append(current)
+                    current, used = [], 0
+                current.append(r)
+                used += chars(r)
+        if current:
+            requests.append(current)
+        ws = self.sh.worksheet(IDENTITY_TAB)
+        for request in requests:
+            known = [r for r in request if r.row_no]
+            fresh = [r for r in request if not r.row_no]
+            if known:
+                ws.batch_update([{"range": f"A{r.row_no}", "values": [r.to_row()]} for r in known], value_input_option="RAW")
+                self._identity.apply(known)
+            if fresh:
+                ws.append_rows([r.to_row() for r in fresh], value_input_option="RAW", table_range="A1")
+                stems, chunks = ws.col_values(1), ws.col_values(2)
+                at = {(a, b): i for i, (a, b) in enumerate(zip(stems, chunks), start=1) if i > 1}
+                self._identity.apply([dataclasses.replace(r, row_no=at.get((r.stem, str(r.chunk)), 0)) for r in fresh])
+        return len(planned)
+
+    def append_tally(self, rows: list[compact.TallyRow]) -> None:
+        ws = self.sh.worksheet(TALLY_TAB)
+        for chunk in _chunks([r.to_row() for r in rows]):  # a seed writes hundreds of rows at once: never one request per row
+            ws.append_rows(chunk, value_input_option="RAW", table_range="A1")
+
     def append_run(self, run: RunRecord) -> None:
         self.sh.worksheet(RUNS_TAB).append_rows([run.to_row()], value_input_option="RAW", table_range="A1")
 
@@ -496,6 +603,9 @@ class CsvState:
 
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
+        for other in (EVENTS_LEGACY_TAB, EVENTS_NEW_TAB):
+            if not self._path(EVENTS_TAB).exists() and self._path(other).exists():
+                raise RuntimeError(_events_missing_message(other))
         for title, columns in (
             (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS),
             (DISCOVERY_TAB, DISCOVERY_COLUMNS), (IDENTITY_TAB, IDENTITY_COLUMNS), (TALLY_TAB, TALLY_COLUMNS),

@@ -209,7 +209,9 @@ class InterruptedBaselineTests(unittest.TestCase):
         self.assertEqual(identity.keys(), {f"greenhouse|acme|{i}" for i in ids31(5050)})
         rows = identity.rows("greenhouse|acme")
         self.assertEqual([r.baselined_at != "" for r in rows], [False] * (len(rows) - 1) + [True])  # the marker is on the highest chunk only
-        self.assertEqual(len(ledger.tally), 2)  # the first run reached the write point and recorded its count; so did the second
+        # The interrupted run failed before its Tally write (Events, Identity, Tally, Boards): its 2,424 durable IDs have no count. Only the
+        # second run's 2,626 observations are tallied. A count lost is visible to parity (plan 03-02); a posting ID lost would be a flood.
+        self.assertEqual([t.total for t in ledger.tally], [5050 - 2 * 1212])
 
     def test_the_same_fault_in_dual_mode_is_contained_and_events_stays_authoritative(self) -> None:
         self.w.sh.fail_on_write_to(stm.IDENTITY_TAB, 3)
