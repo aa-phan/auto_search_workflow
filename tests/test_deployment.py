@@ -230,7 +230,7 @@ class RepositoryHygieneTests(unittest.TestCase):
 
     def test_telegram_is_required_for_every_run_that_can_deliver_but_not_for_the_read_only_reports(self) -> None:
         text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
-        self.assertIn("(inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report || inputs.storage_parity) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
+        self.assertIn("(inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report || inputs.storage_parity || inputs.storage_cutover || inputs.storage_restore) && 'no' || 'yes'", text)  # schedule and poll: inputs empty -> 'yes'
         self.assertIn('required="$required TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"', text)
 
     def test_storage_parity_input_is_read_only_and_excluded_from_the_poller(self) -> None:
@@ -252,8 +252,36 @@ class RepositoryHygieneTests(unittest.TestCase):
         poller = next(ln for ln in text.splitlines() if ln.strip().startswith("if:") and "!inputs.delivery_test" in ln)
         self.assertIn("!inputs.storage_parity", poller)  # the poller step never runs beside it
         require = next(ln for ln in text.splitlines() if "REQUIRE_TELEGRAM:" in ln)
-        self.assertIn("inputs.storage_parity) && 'no'", require)  # it never delivers, so Telegram is not required (the whole expression is pinned in the test above)
+        self.assertIn("inputs.storage_parity ||", require)  # it never delivers, so Telegram is not required (the whole expression is pinned in the test above)
         self.assertEqual(text.count("--storage-parity"), 1)
+
+    def test_storage_cutover_and_restore_inputs_are_boolean_owner_steps_excluded_from_the_poller(self) -> None:
+        """T-03-28: boolean inputs, fixed commands with no input text inside `run:`, never a delivering run, never beside the poller step (static check)."""
+        text = (ROOT / ".github" / "workflows" / "job_hunter.yml").read_text()
+        inputs_block = text.split("    inputs:\n")[1].split("\n\n")[0]
+        names = re.findall(r"^      ([a-z_]+):\n", inputs_block, re.M)
+        self.assertLessEqual(len(names), 25)  # GitHub allows 25 top-level workflow_dispatch inputs
+        poller = next(ln for ln in text.splitlines() if ln.strip().startswith("if:") and "!inputs.delivery_test" in ln)
+        require = next(ln for ln in text.splitlines() if "REQUIRE_TELEGRAM:" in ln)
+        for name, step_name, command, word in (
+            ("storage_cutover", "Storage cutover (owner step, D-57)", "python hunter.py --storage-cutover", "OWNER STEP"),
+            ("storage_restore", "Storage restore (emergency, D-57)", "python hunter.py --storage-restore", "EMERGENCY ONLY"),
+        ):
+            with self.subTest(name):
+                self.assertIn(name, names)
+                declared = re.search(rf"^      {name}:\n((?:        .*\n)+)", inputs_block + "\n", re.M)
+                assert declared is not None
+                self.assertIn("type: boolean", declared.group(1))
+                self.assertIn("default: false", declared.group(1))
+                self.assertIn(word, declared.group(1))
+                step = re.search(rf"^      - name: {re.escape(step_name)}\n((?:        .*\n?)+)", text, re.M)
+                assert step is not None
+                body = [ln.strip() for ln in step.group(1).strip().splitlines()]
+                self.assertEqual(body, [f"if: ${{{{ inputs.{name} }}}}", f"run: {command}"])  # fixed command: no `${{ inputs.` inside `run:`
+                self.assertNotIn("${{", body[1])
+                self.assertIn(f"!inputs.{name}", poller)  # the poller step never runs beside it
+                self.assertIn(f"inputs.{name}", require)  # it never delivers, so Telegram is not required
+                self.assertEqual(text.count(command), 1)
 
     def test_smartrecruiters_override_is_explicit_in_both_workflows_slowed_and_announced(self) -> None:
         import inventory as inv

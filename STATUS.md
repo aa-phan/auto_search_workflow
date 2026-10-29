@@ -35,6 +35,21 @@ Written 2026-10-29. **Built and verified offline (mocked); deployed to productio
 - The parity clock starts the next full UTC day after the seed day (the seed day never counts). Three clean complete days, each with at least 12 checked runs, and one board admission among them are needed before the Dashboard says `READY TO CUT OVER`; the cutover is a separate owner step (plan 03-06).
 - `Events` keeps growing at today's rate until the cutover, plus `Identity` and `Tally`.
 
+## Phase 3 plan 03-06 (cutover and restore): built, verified offline only
+
+Written 2026-10-29. `python hunter.py --storage-cutover` (workflow input `storage_cutover`) and `--storage-restore` (`storage_restore`) exist in the code and in `job_hunter.yml`, **but neither has been pushed, dispatched or run against the real Sheet; production stays in dual mode.** Every check below ran on the in-memory Sheets fake (`tests/fake_sheets.py`), which interprets the tab renames, the protection and the metadata itself: whether Google applies the two renames in one batch, in order, and keeps the hidden flag is **not verified live** (plan 03-09 does the real swap). Not verified live either: the real seconds of the copy of about 200,000 rows, the Sheets quota on the append, and the protection on `Events_Legacy`.
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Cutover end to end: gate, `Events_New` copy, read back (count and SHA-256), would-be parity, one batch of two ordered renames, mode `compact` and the `cutover` record with the before snapshot, Dashboard refresh; a poller run on the swapped state sees no old job as new and alerts the new job once (ROADMAP success criterion 3, the swap itself) | pass | **mocked** |
+| Refusals with zero writes: bar not met, stale bar, hand-edited key, not seeded, mode compact, mode restored, a tab named `Events_Legacy` that is not the old ledger, a fresh parity difference; dry run prints the plan and writes nothing | pass | **mocked** |
+| Faults: a read-back that loses a row or changes one, a copy that fails parity, an error at the rename (all leave `Events` untouched); an interrupted cutover is noted by the next poller run (`storage cutover incomplete`, degraded, no check) and finished by running it again without copying | pass | **mocked** |
+| Restore before any fold keeps every post-cutover row and no job is alerted twice afterwards; refused after `storage.fold.first_day`; repeatable after an interruption | pass | **mocked** |
+| A `compact` key without `Events_Legacy` writes as dual and says so; mode `restored` writes every observation to `Events` again with no check | pass | **mocked** |
+| Workflow inputs `storage_cutover` and `storage_restore` (boolean, fixed commands, excluded from the poller and from `REQUIRE_TELEGRAM`; 13 inputs of GitHub's 25) | pass | **mocked** (static test of the workflow file; the workflow was never run) |
+
+**Not built yet:** the fold (plan 03-07, the point of no return for the restore) and the before/after report. The earliest `READY TO CUT OVER` is still 2026-11-02 00:00 UTC (see "Phase 3 live verification (dual write)"). Mutation checks are listed in the plan 03-06 SUMMARY.
+
 ## Phase 3 live verification (dual write)
 
 Pushed `main` (`c8c559d..f8c8263`) at 2026-10-29 17:46:37 UTC on the owner's choice `deploy-and-dispatch`. Everything marked **live** below was read from public GitHub Actions logs (`gh`) of runs on f8c8263; the agent has no Sheet credentials, so anything inside the Sheet is an **owner check pending**. Log values below are counts, run ids and setting names only; the three logs were scanned for secret patterns before quoting (0 matches each). The workflow conclusion is the only outcome read: the run outcome cell (`ok` / `degraded`) lives in `Runs` and is not in the public log.

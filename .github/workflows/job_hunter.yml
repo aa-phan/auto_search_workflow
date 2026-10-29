@@ -37,6 +37,14 @@ on:
         description: "Check that Identity and Tally reproduce the Events rows (compact storage, D-57); read only: prints the differences and the 3-day parity clock, writes nothing"
         type: boolean
         default: false
+      storage_cutover:
+        description: "OWNER STEP (D-57): replace Events by its compact copy once the Dashboard says READY TO CUT OVER; refuses otherwise; deletes nothing, the old tab is kept hidden as Events_Legacy"
+        type: boolean
+        default: false
+      storage_restore:
+        description: "EMERGENCY ONLY (D-57): undo the cutover before the first fold; refuses after it"
+        type: boolean
+        default: false
       dashboard:
         description: "Only rebuild the Dashboard tab from the existing state (no polling, scoring, discovery or alerts); writes only that tab"
         type: boolean
@@ -108,7 +116,7 @@ jobs:
       # rebalance) do not deliver, so they may run before Telegram is configured.
       - name: Check configuration
         env:
-          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report || inputs.storage_parity) && 'no' || 'yes' }}
+          REQUIRE_TELEGRAM: ${{ (inputs.pilot_report || inputs.rebalance_report || inputs.dashboard || inputs.storage_report || inputs.storage_parity || inputs.storage_cutover || inputs.storage_restore) && 'no' || 'yes' }}
         run: |
           missing=""
           required="GROQ_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON GOOGLE_SHEET_ID"
@@ -125,7 +133,7 @@ jobs:
       # every search path). When the month's credits are used up, discovery is skipped and polling continues.
       # Unfiltered search only runs when 'backfill' is ticked by hand.
       - name: Poll boards, detect new jobs, score, deliver
-        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test && !inputs.dashboard && !inputs.storage_report && !inputs.storage_parity }}
+        if: ${{ !inputs.rebalance_report && !inputs.pilot_report && !inputs.delivery_test && !inputs.dashboard && !inputs.storage_report && !inputs.storage_parity && !inputs.storage_cutover && !inputs.storage_restore }}
         run: python hunter.py ${{ inputs.discover && '--discover' || '' }} ${{ inputs.backfill && '--backfill' || '' }}
 
       # Read-only reports (tick by hand): they read the registry, ledger, Runs and tracker and write nothing.
@@ -155,3 +163,14 @@ jobs:
       - name: Storage parity (read only)
         if: ${{ inputs.storage_parity }}
         run: python hunter.py --storage-parity
+
+      # Owner step (D-57): replaces Events by its compact copy. It refuses unless the parity bar is met and a fresh parity check in the same
+      # run counts no difference; it deletes nothing (the old tab is kept hidden as Events_Legacy) and runs under the poller's writer lease.
+      - name: Storage cutover (owner step, D-57)
+        if: ${{ inputs.storage_cutover }}
+        run: python hunter.py --storage-cutover
+
+      # Emergency only (D-57): undoes the cutover while no fold has run; refuses after the first fold. Same lease, deletes nothing.
+      - name: Storage restore (emergency, D-57)
+        if: ${{ inputs.storage_restore }}
+        run: python hunter.py --storage-restore
