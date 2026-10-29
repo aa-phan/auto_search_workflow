@@ -5,16 +5,16 @@ milestone_name: Search-substitute volume
 current_phase: 03
 current_phase_name: Compact storage
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-10-29T17:28:41.605Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-10-29T17:41:02.158Z"
 last_activity: 2026-10-29
 last_activity_desc: Phase 03 execution started
-state_head: 258b6389d69a3d39584d455d4370e2d17063b40f
+state_head: 98b70569ddf59131235a68c4e0e566f86b0e9eb3
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 18
-  completed_plans: 12
+  completed_plans: 13
   percent: 33
 ---
 
@@ -30,7 +30,7 @@ See: `.planning/PROJECT.md` (updated 2026-10-28)
 ## Current Position
 
 Phase: 03 (Compact storage) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-10-29 — Phase 03 execution started
 
@@ -65,6 +65,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P01 | 12 min | 3 tasks | 10 files |
 | Phase 03 P02 | 15 min | 3 tasks | 9 files |
 | Phase 03 P03 | 17 min | 3 tasks | 13 files |
+| Phase 03 P04 | 10 min | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,9 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 03]: 03-03: a folded Tally count passes through the same counting code as real jobs (weight n), has a synthetic key, is never in facts and is never pending — P3-10: no forked counter; a Tally count is never a freshness, latency or alert fact
 - [Phase 03]: 03-03: parity layer 4 compares summary, 7-day and all-time reconciliation and logical counts; a differing leaf is a counted figure named by dotted path with numbers only — Identity or Tally damage that changes a figure is counted beside its own kind
 - [Phase 03]: 03-03: declared classes added: tracker_identity_job (Pitfall 9) and the three row-count figures when a folded key has a duplicate seen row — Both leave nothing lost and must not flap the parity clock
+- [Phase 03]: 03-04: READY TO CUT OVER needs the bar met by StorageState.bar(now) AND stored mode dual AND a valid seed time; recomputed on every build, never stored or inferred from elapsed time — P3-05, P3-06, T-03-17: a hand-edited Discovery key must not claim readiness; compact and restored never show it
+- [Phase 03]: 03-04: the storage parity NEEDS ATTENTION row shows only stored differences shaped 'kind ref (numbers)' (at most 3) and never changes the headline status — P3-07, T-03-18: refs are keys, run ids and figure paths; a hand-edited key cannot put a URL or free text on the page
+- [Phase 03]: 03-04: --storage-parity is read only (no lease, no write, no Groq key); exit 0 no counted differences, 1 differences, 2 not seeded or stored mode not dual — T-03-16: a read-only check that writes would change the state it reports; the parity layer 4 skips the presentation keys storage and from_tally but still compares every figure
 
 ### Pending Todos
 
@@ -136,6 +140,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-29T17:28:41.551Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-10-29T17:41:02.104Z
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None
