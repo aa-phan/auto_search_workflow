@@ -104,6 +104,20 @@ Pushed `main` (`c8c559d..f8c8263`) at 2026-10-29 17:46:37 UTC on the owner's cho
 
 **Observations to carry forward (not acted on, AGENTS rule 7):** the parity run read 202,028 Identity entries and 203,234 seen keys against the seed's 201,789 IDs (the difference is the new postings the runs since the seed observed, as the zero-difference check implies; the entry and key counts are not the same unit as the seed's ID count and were not reconciled further here); two runs were dispatched by hand (the seed run at 17:47 and the parity run at 18:05), so the run statistics for 2026-10-29 17:00 to 18:10 UTC include them.
 
+### Cutover tooling deployed (2026-10-30; plan 03-08)
+
+Pushed `main` (`2eedc23..2556c41`) at 2026-10-30 00:59:02 UTC on the owner's choice `deploy`. The cutover tooling from plans 03-06 and 03-07 is therefore live: the `storage_cutover` and `storage_restore` workflow inputs, the 7-day fold (compact mode only), the before/after storage report and the compact-mode integrity check. The restore input is the P3-06 refinement the owner accepted at deploy: CONTEXT named only the cutover, and a hand rename of `Events_Legacy` would lose the rows written after the cutover, so the restore appends them first and is refused once a fold has run. Nothing was dispatched for this deployment (no cutover, restore or any other run); the only run on 2556c41 so far is the hourly external dispatch.
+
+| Check | Result | Live or mocked |
+|---|---|---|
+| Deployment | `origin/main` is 2556c41; the first run on it is 40983170540 (hourly dispatch, 2026-10-30 01:00:08 UTC, finished about 01:04), workflow `success` | **live** (git, `gh run list` headSha) |
+| Dual mode unchanged, as read from run 40983170540 | `Storage: mode=dual, 0 counted and 0 declared differences, 204000 job keys and 433 Tally runs compared, 2 checked runs today, 0 of 3 complete days toward the bar, admission seen no, check took 24.1 s`; `Run: boards 695 ok / 5 failed of 700 (+0 new) \| new jobs 65 (65 verified fresh) \| evaluated 1 \| alerts 0 sent / 0 failed`; no `storage` note and no `storage fold` line anywhere in the log (the one WARNING is the existing SmartRecruiters setting notice). The log was scanned for secret patterns before quoting (0 matches). Counted differences as read: **0** | **live** (public log) |
+| Cutover, restore, fold, compact integrity check, storage report before/after | covered by offline tests only (mocked Sheet); never run live, because compact mode needs the owner's cutover | **mocked** |
+
+**The parity clock as read.** The clock reading from the newest log is `0 of 3 complete days toward the bar, admission seen no`, with 2 checked runs on 2026-10-30, the first countable UTC day (the 00:00 run on 2eedc23 and the 01:00 run on 2556c41). A day counts only with at least 12 checked runs and no counted difference, so no complete day is banked yet; the earliest the Dashboard can say `READY TO CUT OVER` stays 2026-11-02 00:00 UTC, and any counted difference restarts it. Deploying new code did not reset the clock.
+
+**Next (owner):** dispatch `storage_cutover` (Actions > Job Hunter > Run workflow, tick only that input) when the Dashboard says READY TO CUT OVER (P3-06); see DEPLOY.md. The input refuses before that. The agent does not dispatch it.
+
 ## Phase 2 governors and measurement (D-49..D-52; plans 02-02..02-06)
 
 **Built and verified offline (mocked); deployed to production 2026-10-26 18:25 UTC (fc197c1). Live evidence is in "Phase 2 live verification" below; everything not listed there as live stays mocked.** Run `.venv/bin/python -m unittest discover -s tests` for the current count: **620 tests pass offline** at the end of plan 02-06 (612 at the end of 02-05; 520 offline tests were last recorded before this phase).
