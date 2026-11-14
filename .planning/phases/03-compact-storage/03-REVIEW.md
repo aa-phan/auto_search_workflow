@@ -2,56 +2,59 @@
 phase: 03-compact-storage
 reviewed: 2026-11-14T00:00:00Z
 depth: standard
-files_reviewed: 11
+files_reviewed: 5
 files_reviewed_list:
   - DECISIONS.md
   - SPEC.md
   - STATUS.md
   - compact.py
-  - hunter.py
-  - parity.py
-  - pipeline.py
-  - state.py
-  - tests/test_compact.py
-  - tests/test_storage_cutover.py
   - tests/test_storage_parity.py
 findings:
   critical: 0
   warning: 1
-  info: 8
-  total: 9
+  info: 10
+  total: 11
 status: issues_found
 ---
 
 # Phase 3: Code Review Report
 
 **Reviewed:** 2026-11-14
-**Depth:** standard (incremental re-review: `git diff 4a9d568 HEAD` for the five fix commits a2247a9, 58d9ec2, 024319f, 6648949, 8b02697 and the doc commit 60786e7, each hunk read in its surrounding code: `pipeline.run_cycle`, `storage_fold`, `storage_check`, `state.SheetState` / `CsvState`, `compact.StorageState`, `parity.check_compact`, `hunter.run_storage_restore`)
-**Files Reviewed:** 11
+**Depth:** standard (incremental re-review: `git diff 2d521bc HEAD` for fix commit e83d563 (WR-06) and its doc changes, each hunk read in its surrounding code: `compact.StorageState.record_compact_check` / `last_identity_entries`, `pipeline.storage_check`, `parity._identity_loss` / `_identity_invariants` / `check_compact`, `hunter.run_storage_parity`)
+**Files Reviewed:** 5
 **Status:** issues_found
 
 ## Summary
 
-I re-read the five fixes adversarially, looking for a way each one still fails or breaks something that worked. **All five earlier warnings are resolved and I found no regression and no BLOCKER.** One new WARNING and two new INFO items remain, and the six earlier INFO items are still open.
+The WR-06 fix is correct and complete for the finding as stated. `kept = max(previous or 0, identity_entries) if identity_entries is not None else previous` handles each case I traced:
 
-Resolved (each traced against the diff; none of the fixes was found incomplete):
+- **First check, no recorded count.** `previous` is None, so `max(0, n)` records `n`. A first check whose count is None records nothing, and the key is absent (pinned by `test_a_first_check_with_no_identity_count_to_record_records_none`).
+- **Failed or uncounted check.** `pipeline.storage_check` passes `identity_entries=None` when the check raised, and `check_compact` always sets `compared["identity_entries"]`. The mark is kept in both cases. A raised check also counts 1 itself, so the fold is held back anyway.
+- **Growth above the mark.** The mark rises, `_identity_loss` compares `entries < entries_before`, and a count equal to or above the mark counts 0.
+- **Other writers of `identity_entries`.** There are none. `compact.py:754-756` is the only writer. `last_identity_entries()` is read at `pipeline.py:234`, `hunter.py:2025` and `compact.py:752`. The dual-mode `record_check` (`compact.py:732`) rebuilds `last_check` without the key. That only matters before the cutover, and the first compact check after the cutover then records afresh, as STATUS says.
+- **Restore and dual modes.** `record_compact_check` runs only in compact mode (`pipeline.py:244`). `restored` and `dual` never touch the mark, and `--storage-restore` is refused once a fold has run. Nothing else can shrink Identity legitimately in those modes.
+- **The `--storage-parity` command.** It reads the same mark and is read-only. The loss therefore shows as exit 1 on every invocation.
+
+The tests pin the fix:
+
+- `test_the_recorded_identity_count_is_a_high_water_mark` exercises record, fall, repeated fall, None, return to the mark and growth.
+- The integration tests assert the mark is kept, the run is degraded on every later run, and a repair clears it.
+- I ran `.venv/bin/python -m unittest discover -s tests`: `Ran 934 tests ... OK`. STATUS says 931 after WR-05 and 934 after WR-06, which matches.
+
+The docs match the code. SPEC, DECISIONS D-57 and STATUS all say "high-water mark, never lowered automatically", state the operational cost (degraded every run, fold held back, `Events` growing) and state that there is no acknowledgement step. Every check is labelled mocked and "not deployed", and no live Sheets, Groq or Telegram claim is made. That satisfies AGENTS rule 5. No behaviour contradicts SPEC or DECISIONS, so rule 1 is not triggered.
+
+**One new WARNING (WR-07).** The mark counts raw entries, duplicates included. Repairing an `identity_duplicate` therefore turns into a permanent `identity_shrunk`. There are two new INFO items. IN-01..IN-08 are carried forward unchanged.
+
+Resolved:
 
 | Earlier finding | Fix commit | Verification |
 |---|---|---|
-| WR-01 restore guard open after a partial fold | a2247a9 | `storage_fold` saves `fold.started_day` before the first delete, and skips the fold for the run if that save fails. `fold_record` turns the marker into `first_day`, even for a fold that then finds nothing left. `hunter.run_storage_restore` refuses on either field. `SheetState.fold_touched` and `CsvState.fold_touched` are set before the first request, so a lost reply counts as "touched". The marker is taken back only when no request went out. The `getattr(state, "fold_touched", True)` default is conservative. |
-| WR-02 Identity loss undetected, `ensure()` recreates an empty tab | 58d9ec2 | `ensure()` refuses a missing Identity or Tally tab in compact mode, in both `SheetState` and `CsvState`. Restored mode and a missing Discovery tab still recreate it. `identity_shrunk` and `identity_unreadable` are counted. Limit: see WR-06. |
-| WR-03 Tally write failure became a permanent undercount | 024319f | `carry_tally` stores the counts-only row in `storage.pending_tally`. It is written at the next run start before `repair_plan`, deduplicated against the snapshot by (Run_ID, Run_At), and the repair skips the groups it is still waiting for. Malformed entries are dropped on load. The carry is bounded. See IN-08 for two quality points. |
-| WR-04 stale Identity cache overwrote the sheet | 6648949 | `write_identity` drops the cache on any exception (`BaseException`) and re-reads Identity before the next plan. Both lost-reply shapes (batch_update applied, and append applied with a failed row read-back) have tests that pass. |
-| WR-05 the fold ignored the same run's integrity check | 8b02697 | `storage_check` returns `report.counted`, and a check that raised returns 1. The fold runs only when `check_counted == 0`. `None` (the check did not run) also skips it. Declared differences do not block it. |
-
-**Doc check.**
-- SPEC.md, DECISIONS.md D-57 and STATUS.md match the code. They name the new fields (`started_day`, `pending_tally`, `identity_shrunk`, `identity_unreadable`, `identity_entries`) and the new `ensure()` refusal.
-- They state the one-shot reporting of `identity_shrunk` and that a persistent difference holds the fold back.
-- They label every check as mocked, say "NOT deployed", and claim no live Sheets, Groq or Telegram verification. That honours AGENTS rule 5.
-- The "Ran 931 tests ... OK" claim is correct: I ran `.venv/bin/python -m unittest discover -s tests` and got `Ran 931 tests ... OK`.
-- Freshness is untouched. Identity stays ATS + board + posting ID. Seen, evaluated and alerted stay separate. WR-03 and WR-01 each turn a transient error into a retried state instead of a permanent record, as AGENTS rule 4 asks.
-
-**Test run:** offline only (`tests/fake_sheets.py`, the CSV store, hand-built ledgers). Nothing was verified against the live Sheets API.
+| WR-01 restore guard open after a partial fold | a2247a9 | `storage_fold` saves `fold.started_day` before the first delete and skips the fold for the run if that save fails. `fold_record` turns the marker into `first_day`. `hunter.run_storage_restore` refuses on either field. `fold_touched` is set before the first request. The marker is taken back only when no request went out. |
+| WR-02 Identity loss undetected, `ensure()` recreates an empty tab | 58d9ec2 | `ensure()` refuses a missing Identity or Tally tab in compact mode. `identity_shrunk` and `identity_unreadable` are counted. The one-shot weakness was WR-06, now fixed. See WR-07 for a remaining edge. |
+| WR-03 Tally write failure became a permanent undercount | 024319f | `carry_tally` stores the counts-only row in `storage.pending_tally`. It is written at the next run start and deduplicated against the snapshot. See IN-08. |
+| WR-04 stale Identity cache overwrote the sheet | 6648949 | `write_identity` drops the cache on any exception and re-reads Identity before the next plan. |
+| WR-05 the fold ignored the same run's integrity check | 8b02697 | `storage_check` returns `report.counted`. The fold runs only when it is 0. |
+| WR-06 `identity_shrunk` reported once, then the lower count became the reference | e83d563 | `record_compact_check` keeps `max(previous or 0, current)`. Traced for first check, failed check, growth, restore and dual modes, and every other writer. Tests, 934 in all, pass offline. Docs match. See WR-07 and IN-09 for residual points. |
 
 ## Critical Issues
 
@@ -59,23 +62,33 @@ None.
 
 ## Warnings
 
-### WR-06: `identity_shrunk` is reported once, then the lowered count becomes the new reference
+### WR-07: The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`
 
-**File:** `compact.py:739-757` (`record_compact_check`), `pipeline.py:247-251` (`storage_check`), `parity.py:362-372` (`_identity_loss`)
-**Issue:** The WR-02 fix compares this check's Identity entry count with `last_check.identity_entries`. `record_compact_check` then stores the current count even when it is lower (`kept = identity_entries if identity_entries is not None else previous`). Trace:
+**File:** `compact.py:752-756` (`record_compact_check`), `parity.py:111-128` (`_identity_invariants`, which sums `len(row.entries())`), `parity.py:362-372` (`_identity_loss`)
+**Issue:** The mark is the raw entry count (`entries += len(found)` per row). It includes entries that `_identity_invariants` itself flags as `identity_duplicate`. `record_compact_check` raises the mark on every check, including one that counted a difference. Trace:
 
-1. Check N records 100 entries.
-2. Rows are deleted from Identity by a hand edit or a bad sort.
-3. Check N+1 sees 80, counts `identity_shrunk` (80 vs 100), degrades the run and skips that day's fold. It records 80.
-4. Check N+2 compares 80 with 80, so it counts 0. Runs return to OK, NEEDS ATTENTION clears, and the fold runs again on the damaged Identity.
+1. A bad write or hand edit leaves a posting ID twice in one stem, so the count goes from 100 to 101. The check counts `identity_duplicate 1`, degrades the run and holds the fold back.
+2. That same check records 101 as the new mark.
+3. The owner removes the duplicate, which is the correct repair for the flagged difference. The count falls to 100.
+4. The next check sees 100 against 101 and counts `identity_shrunk`. This persists on every run, because nothing re-adds an ID and the mark never falls. Removing a duplicate loses no posting ID. The owner is forced to put a junk entry back, or edit the Discovery `storage` key, to clear a difference that the previous fix made it cure.
 
-The loss is permanent, because Identity is append-only and nothing re-adds baseline-only IDs. The signal lasts one run, about an hour. A weekend owner never sees it. `last_diffs` is overwritten by the next clean check. SPEC and STATUS document "reported for the run that sees it, then the lower count is the new reference", so this is a deliberate design, but it defeats the purpose of the fix. WR-02's own impact statement was that baseline-only IDs lost silently make old postings look new, and boards under `FLOOD_MIN_JOBS` re-evaluate and re-add every old posting. After one hour that damage is silent again. The fold's per-key test only protects the rows it deletes, not the baseline IDs.
+This is a defect in the new semantics. Before WR-06 the shrink reported once and cleared. After WR-06, the repair of a flagged, genuinely recoverable difference creates a permanent false positive. It shares the cause of the "no acknowledgement" cost, but it is a different failure: here the owner did the right thing and there is no right way out. It is not the "no ack mechanism" complaint. The same applies to `identity_count` repairs that change the entry count. Fixing a hand-written `Count` does not alter entries, but removing a malformed or duplicated entry does.
 
-**Fix:** Keep a high-water mark. Never lower `last_check.identity_entries` automatically:
+**Fix:** Make the mark measure distinct posting IDs, which is what dedupe uses, and raise it only from a check that has no Identity-level difference. A minimal version counts distinct `(stem, id)` pairs in `_identity_invariants`:
 ```python
-kept = max(previous or 0, identity_entries) if identity_entries is not None else previous
+seen = set()
+for row in ident.all_rows():
+    found = row.entries()
+    seen.update((row.stem, compact.decode_entry(e)[1]) for e in found)
+...
+return out, len(seen)   # used for compared["identity_entries"]
 ```
-A permanent `identity_shrunk` then holds the fold back and keeps the run degraded until the owner restores the tab or acknowledges the loss. The acknowledgement can be a documented reset of `last_check.identity_entries`, or a `--storage-ack-identity` step. A deliberate, owner-approved rebuild of Identity is the only legitimate way to shrink it. Update SPEC, D-57 and the STATUS note ("reported for the run that sees it") with the change, and extend `test_an_id_that_only_identity_holds_and_was_removed_is_counted_identity_shrunk_on_the_next_run`, which currently asserts the one-shot behaviour (`last_check["identity_entries"] == recorded - 1`).
+This is less correct for the integer-sum use elsewhere, so alternatively skip the raise when the check counted any `identity_duplicate` or `identity_unreadable`:
+```python
+raise_ok = identity_entries is not None and not identity_dirty  # pass a flag from storage_check
+kept = max(previous or 0, identity_entries) if raise_ok else previous
+```
+Add a test: record 100, inject one duplicate (101, counted `identity_duplicate`), remove it, and assert the next check counts 0.
 
 ## Info
 
@@ -112,7 +125,7 @@ A permanent `identity_shrunk` then holds the fold back and keeps the run degrade
 ### IN-06: Read-only commands read three tabs sequentially without the lease
 
 **File:** `state.py:608-621` and `state.py:893-906` (`load_ledger`), `hunter.py` (`run_storage_parity`, `run_storage_report`, `run_pilot_report`), `dashboard.py:594`
-**Issue:** `load_ledger` reads Events, then Identity, then Tally with separate calls. A manual `--storage-parity` or `--dashboard` that overlaps a poller run can see Events from before the run and Tally or Identity from after it, which gives counted differences that disappear on the next run. The WR-02 fix now also compares the Identity entry count in `--storage-parity` against `last_check.identity_entries`, which a racing poller run advances. Mitigated by the one-run-at-a-time concurrency group. Still open.
+**Issue:** `load_ledger` reads Events, then Identity, then Tally with separate calls. A manual `--storage-parity` or `--dashboard` that overlaps a poller run can see Events from before the run and Tally or Identity from after it, which gives counted differences that disappear on the next run. The WR-02 fix now also compares the Identity entry count in `--storage-parity` against `last_check.identity_entries`, which a racing poller run advances. After WR-06 the mark only grows, so a racing read can only produce a false `identity_shrunk` in the direction of an old snapshot against a newer mark. Mitigated by the one-run-at-a-time concurrency group. Still open.
 **Fix:** Document that a parity difference should be re-run before it is trusted, or read all three tabs in one `values_batch_get`.
 
 ### IN-07: `first_day` is dated by the fold that ends, not by the one that started
@@ -128,6 +141,18 @@ A permanent `identity_shrunk` then holds the fold back and keeps the run degrade
 1. Every run appends a Tally row, including runs that observed nothing (`total` 0). `test_a_carried_row_stays_until_it_can_be_written...` shows this: the carry holds `[3, 0]`. A zero-count row has nothing to lose, because no baseline count is missing and `repair_plan` has nothing to rebuild. Carrying it spends one of the 20 slots for nothing and adds a Discovery write per failing run.
 2. When the carry is full, the newest row is the one left out (`keep_tally` returns False). The newest row is the one most likely to hold fresh baseline counts, so the permanent undercount WR-03 fixed comes back after 20 consecutive failures. Realistically a Tally outage that long also fails the Discovery save that persists the carry. The cap is deliberate, so this is a robustness note, not a defect.
 **Fix:** In `carry_tally`, return early when `row.total == 0`. When the carry is full, either drop the oldest zero-count row first or log and note `storage tally carry full` in `run.notes`, so the owner sees the gap. The log line is currently the only trace.
+
+### IN-09: The new tests do not pin the claim that matters most for the fix, "the fold stays held back"
+
+**File:** `tests/test_storage_parity.py:777-801` and `:906-937`
+**Issue:** The WR-06 purpose, stated in SPEC, D-57 and STATUS, is that an unrepaired loss "holds the fold back" on every later run. The new tests assert the note, the degraded outcome, the counted figure and the mark across three runs. None asserts `storage fold skipped: integrity check counted 1 differences` or that no rows were deleted for `identity_shrunk` specifically. The code path is right: `storage_check` returns `report.counted` and `pipeline` gates on it, and `tests/test_storage_cutover.py:984-1018` cover the gate with another difference. A future change to how `identity_shrunk` counts, or marking it declared, would not fail any test that names the fold. There is also a stray second blank line before `test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable` (about `tests/test_storage_parity.py:937`).
+**Fix:** In `test_a_loss_nobody_repairs_is_counted_on_every_later_check...`, assert each degraded run's notes contain `storage fold skipped` when a fold is due, or add one test in the fold case class that removes a baseline-only ID and checks the Events row count is unchanged across two runs. Remove the extra blank line.
+
+### IN-10: The documented repair path has no tooling and the mark can be stuck high by a transient over-read
+
+**File:** `STATUS.md` (WR-06 cost paragraph), `SPEC.md:111`, `compact.py:754`
+**Issue:** The docs give "restore the missing IDs to `Identity`, for example from `Events_Legacy`" as the only repair. No command does it. The poller's start-of-run repair rebuilds only Tally groups, not Identity, and `Identity` is a codec cell (chunked, escaped entries with a `Count` column), so a hand edit is error-prone, which the test itself needs seven lines of cell surgery to do. Also, because the mark can only rise, a single over-read (a transient read that returns extra rows, or duplicates as in WR-07) leaves it stuck high for good. The user chose not to add an acknowledgement input, so this is only an operational cost, not a defect. It is better recorded than discovered during an incident.
+**Fix:** Add a short runbook note to DEPLOY.md or STATUS ("to clear a stuck `identity_shrunk`, set `last_check.identity_entries` in the Discovery `storage` key to the true count, after confirming nothing is lost"), and consider a read-only `--storage-parity` line that prints the mark and the current count, so the owner can see which side moved.
 
 ---
 
