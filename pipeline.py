@@ -366,6 +366,20 @@ def run_cycle(d: Deps) -> RunRecord:
     split: compact.Split | None = None  # the run's observations, split once between Events, Identity and Tally
     identity_done = tally_done = False
 
+    def carry_tally(row: compact.TallyRow) -> None:
+        """A Tally append failed (WR-03): keep the row, counts only, in the `storage` key; the next run start appends it before any repair. In compact mode
+        the repair cannot rebuild a run's baseline counts (no Events row holds them), so without this a transient Sheets error would be a permanent
+        undercount (AGENTS rule 4). A failed save of the key leaves the row in memory only, which is the old behaviour."""
+        if not storage.keep_tally(row):
+            log.error("Tally carry is full (%d rows): this run's Tally row is not kept", compact.MAX_PENDING_TALLY)
+            return
+        if not budget_loaded:
+            return  # the Discovery body was not read yet: writing it now would overwrite keys this run never saw
+        try:
+            save_storage()
+        except Exception as exc:
+            log.error("Could not carry the Tally row to the next run: %s", type(exc).__name__)
+
     def persist_observations(*, save_registry: bool) -> None:
         """The one observation write point (rule 1, extended): Events, then Identity, then Tally, then (when asked) Boards.
         In dual mode an Identity or Tally failure is contained: Events stays authoritative and the next run repairs it. In
@@ -389,16 +403,19 @@ def run_cycle(d: Deps) -> RunRecord:
                 run.notes += f"storage write failed: {type(exc).__name__}; "
             identity_done = True
         if not tally_done:
+            row = compact.TallyRow(run.run_id, lg.stamp(now), sum(split.tally.values()), dict(sorted(split.tally.items())))
             try:
-                d.state.append_tally([compact.TallyRow(run.run_id, lg.stamp(now), sum(split.tally.values()), dict(sorted(split.tally.items())))])
+                d.state.append_tally([row])
             except Exception as exc:
                 log.error("Could not write Tally: %s", exc)
                 run.notes += f"storage write failed: {type(exc).__name__}; "
+                carry_tally(row)
             tally_done = True
         if save_registry:
             d.state.save_boards(dirty.values())
 
     budget_loaded = False  # set once this run holds the Discovery tab's rows; save_budget does nothing before that
+    storage = compact.StorageState()  # replaced by the stored state once the Discovery tab is read; never saved before that
 
     def save_storage() -> None:
         """Write the `storage` key (the whole small Discovery body, as every other save of it does); raises on failure, the caller decides."""
@@ -465,8 +482,33 @@ def run_cycle(d: Deps) -> RunRecord:
             # run twice. The `storage` key is saved only after the repair succeeded (an empty ledger has nothing to do).
             repaired = True
             repair_text = ""  # what a repair on an already seeded store did: it joins the run's one storage line
+            waiting: set[tuple[str, str]] = set()  # Tally groups whose carried row could not be written yet: the repair must not write a shorter one (WR-03)
+            if storage.pending_tally:
+                # A Tally append that failed in an earlier run (WR-03): write the carried rows (counts only) before any repair. A row already in the
+                # snapshot (its append went through and only the clearing save failed) is dropped, never written twice. The snapshot learns the rows,
+                # so the repair and the check below see the group as present.
+                have = {(t.run_id, t.run_at) for t in ledger.tally}
+                todo = [t for t in storage.pending_tally if (t.run_id, t.run_at) not in have]
+                try:
+                    if todo:
+                        d.state.append_tally(todo)
+                        ledger.tally.extend(todo)
+                except Exception as exc:
+                    log.error("Could not write the carried Tally rows: %s", type(exc).__name__)
+                    run.notes += f"storage repair failed: {type(exc).__name__}; "
+                    waiting = {(t.run_id, t.run_at) for t in storage.pending_tally}
+                else:
+                    log.info("Storage: %d carried Tally rows written at run start", len(todo))
+                    storage.pending_tally = []
+                    try:
+                        save_storage()
+                    except Exception as exc:  # the rows are written; the key still lists them, and the next run drops them as already present
+                        log.error("Could not clear the carried Tally rows: %s", type(exc).__name__)
+                        run.notes += f"storage write failed: {type(exc).__name__}; "
             try:
-                if plan := compact.repair_plan(ledger):
+                plan = compact.repair_plan(ledger)
+                plan.tally = [t for t in plan.tally if (t.run_id, t.run_at) not in waiting]
+                if plan:
                     rows = d.state.write_identity(plan.identity, lg.stamp(now)) if plan.identity else 0
                     if plan.tally:
                         d.state.append_tally(plan.tally)

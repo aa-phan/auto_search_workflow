@@ -1144,6 +1144,84 @@ class FoldTests(FoldCase):
             self.assertNotIn(forbidden, run.notes + "\n".join(m for m in logs.output if "Storage fold" in m))
 
 
+class CarriedTallyTests(CutoverCase):
+    """WR-03: in compact mode a run's baseline counts live nowhere but Tally, so a failed Tally append must not become a permanent undercount.
+    The row (counts only) is carried in the `storage` key and written at the next run start, before any repair. MOCKED: the Sheets fake."""
+
+    zeta = bd.BoardId(bd.GREENHOUSE, "zeta")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.seeded_with_met_bar()
+        self.assertEqual(self.cutover()[0], 0)
+
+    def run_with_new_baselines(self, *, tally_fails: bool) -> pl.RunRecord:
+        """A run that baselines the board zeta (2 jobs: no Events row in compact mode) and sees a gated job on acme (one kept Events row, same run)."""
+        self.w.now = max(self.w.now, NOW)
+        later = self.w.now + timedelta(minutes=30)
+        self.w.listings[self.board.key] = [job("acme", i) for i in OLD_IDS] + [job("acme", "77", title="Senior Plumber", published=ago(minutes=30, base=later))]
+        self.w.listings[self.zeta.key] = [job("zeta", "1"), job("zeta", "2")]
+        if not tally_fails:
+            return self.w.run(minutes_later=30, seeds=[self.zeta])
+        with mock.patch.object(self.w.state, "append_tally", side_effect=RuntimeError("injected tally failure")):
+            return self.w.run(minutes_later=30, seeds=[self.zeta])
+
+    def tally_rows(self, run_id: str) -> list[compact.TallyRow]:
+        return [t for t in self.w.state.load_ledger().tally if t.run_id == run_id]
+
+    def test_a_failed_tally_append_is_carried_in_the_storage_key_and_written_whole_by_the_next_run(self) -> None:
+        run = self.run_with_new_baselines(tally_fails=True)
+        self.assertIn("storage write failed: RuntimeError", run.notes)
+        self.assertEqual(self.tally_rows(run.run_id), [])  # the append did fail
+        gated = [r for r in self.sh.sheets[stm.EVENTS_TAB].values if r[2] == lg.SEEN and r[1] == "greenhouse|acme|77"]
+        self.assertEqual(len(gated), 1)  # one kept row of the run: a repair from Events alone would write 1 observation, not 3
+        carried = self.storage().pending_tally
+        self.assertEqual([(t.run_id, t.total) for t in carried], [(run.run_id, 3)])
+        self.assertNotIn("zeta", compact.StorageState.load(self.w.state.load_discovery_state()[compact.STORAGE_KEY]).to_json())  # counts only: no key, title or URL
+        nxt = self.poll(30)
+        self.assertEqual(nxt.outcome, stm.OUTCOME_OK, nxt.notes)
+        rows = self.tally_rows(run.run_id)
+        self.assertEqual([t.total for t in rows], [3])  # written once, whole
+        self.assertEqual(self.storage().pending_tally, [])
+        self.assertEqual(self.w.state.load_ledger().negative(), [])
+
+    def test_a_carried_row_that_is_already_in_tally_is_dropped_not_written_twice(self) -> None:
+        run = self.run_with_new_baselines(tally_fails=True)
+        row = self.storage().pending_tally[0]
+        self.w.state.append_tally([row])  # the append went through; only the save that clears the key was lost
+        self.poll(30)
+        self.assertEqual([t.total for t in self.tally_rows(run.run_id)], [3])
+        self.assertEqual(self.storage().pending_tally, [])
+
+    def test_a_carried_row_stays_until_it_can_be_written_and_the_repair_never_writes_a_shorter_one(self) -> None:
+        run = self.run_with_new_baselines(tally_fails=True)
+        with mock.patch.object(self.w.state, "append_tally", side_effect=RuntimeError("still failing")):
+            again = self.poll(30)
+        self.assertIn("storage repair failed: RuntimeError", again.notes)
+        self.assertEqual(self.tally_rows(run.run_id), [])  # no partial group from the kept gated row
+        self.assertEqual([t.total for t in self.storage().pending_tally], [3, 0])  # the failing run carries its own (empty) row as well
+        last = self.poll(30)
+        self.assertEqual(last.outcome, stm.OUTCOME_OK, last.notes)
+        self.assertEqual([t.total for t in self.tally_rows(run.run_id)], [3])
+        self.assertEqual(self.storage().pending_tally, [])
+
+    def test_a_run_whose_tally_append_works_carries_nothing(self) -> None:
+        run = self.run_with_new_baselines(tally_fails=False)
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        self.assertEqual(self.storage().pending_tally, [])
+        self.assertNotIn("pending_tally", self.w.state.load_discovery_state()[compact.STORAGE_KEY])
+
+    def test_the_carry_is_bounded_and_malformed_entries_are_ignored(self) -> None:
+        state = compact.StorageState()
+        for i in range(compact.MAX_PENDING_TALLY + 3):
+            kept = state.keep_tally(compact.TallyRow(f"r{i}", f"2026-10-18T09:{i:02d}:00Z", 1, {"d": 1}))
+            self.assertEqual(kept, i < compact.MAX_PENDING_TALLY)
+        self.assertTrue(state.keep_tally(compact.TallyRow("r0", "2026-10-18T09:00:00Z", 1, {"d": 1})))  # a repeat is not a second copy
+        self.assertEqual(len(compact.StorageState.load(state.to_json()).pending_tally), compact.MAX_PENDING_TALLY)
+        bad = json.dumps({"pending_tally": [1, {"run_id": "x"}, {"run_at": "t", "counts": "no"}, {"run_id": "ok", "run_at": "t", "total": "2", "counts": {"d": 2}}]})
+        self.assertEqual([(t.run_id, t.total) for t in compact.StorageState.load(bad).pending_tally], [("ok", 2)])
+
+
 class DispatchTests(unittest.TestCase):
     """`main` wiring: the poller lease, the local write refusal (D-37) and the flags. Mocked store; nothing is read or written."""
 

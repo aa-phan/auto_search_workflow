@@ -31,6 +31,7 @@ PARITY_DAYS = 3  # complete consecutive UTC days of clean checked runs the bar n
 PARITY_MIN_RUNS_PER_DAY = 12  # checked runs a UTC day needs to count (about half of the hourly runs; DECISIONS D-57)
 STORAGE_DAYS_KEPT = 14  # days of parity bookkeeping kept in the `storage` key
 MAX_LISTED_DIFFS = 10  # differences named in the `storage` key
+MAX_PENDING_TALLY = 20  # Tally rows a failed append may carry in the `storage` key (each is a few hundred characters: the key must stay far below the 45,000-character Discovery cell cap)
 MAX_DIFF_CHARS = 200  # one named difference is cut to this many characters (the key must stay far below the 45,000-character Discovery cell cap)
 
 KIND_OF = {lg.BASELINED: "b", lg.FILTERED: "f", lg.STALED: "s"}  # disposition -> one-letter kind prefix of an entry
@@ -629,6 +630,18 @@ class BarStatus:
     streak: int
 
 
+def _pending_tally(raw: Any) -> list[TallyRow]:
+    """The carried Tally rows of the `storage` key; anything malformed is dropped (a hand edit never stops a run)."""
+    out: list[TallyRow] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("run_at"), str) or not item["run_at"] or not isinstance(item.get("counts"), dict):
+            continue
+        counts = {str(k): n for k, v in item["counts"].items() if not isinstance(v, bool) and (n := _int(v)) is not None}
+        total = _int(item.get("total")) if not isinstance(item.get("total"), bool) else None
+        out.append(TallyRow(str(item.get("run_id") or ""), item["run_at"], sum(counts.values()) if total is None else total, counts))
+    return out[:MAX_PENDING_TALLY]
+
+
 def _dict(raw: Any) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
@@ -651,9 +664,10 @@ class StorageState:
     cutover: dict[str, Any] = field(default_factory=dict)
     fold: dict[str, Any] = field(default_factory=dict)
     restore: dict[str, Any] = field(default_factory=dict)
+    pending_tally: list[TallyRow] = field(default_factory=list)  # Tally rows (counts only) whose append failed: written at the next run start (WR-03)
     extra: dict[str, Any] = field(default_factory=dict)  # fields this version does not know, kept as they were
 
-    _KNOWN = ("mode", "seeded_at", "days", "bar_met_at", "last_check", "last_diffs", "cutover", "fold", "restore")
+    _KNOWN = ("mode", "seeded_at", "days", "bar_met_at", "last_check", "last_diffs", "cutover", "fold", "restore", "pending_tally")
 
     @classmethod
     def load(cls, raw: str | None) -> "StorageState":
@@ -677,6 +691,7 @@ class StorageState:
             cutover=_dict(data.get("cutover")),
             fold=_dict(data.get("fold")),
             restore=_dict(data.get("restore")),
+            pending_tally=_pending_tally(data.get("pending_tally")),
             extra={k: v for k, v in data.items() if k not in cls._KNOWN},
         )
 
@@ -685,7 +700,19 @@ class StorageState:
             **self.extra, "mode": self.mode, "seeded_at": self.seeded_at, "days": self.days, "bar_met_at": self.bar_met_at,
             "last_check": self.last_check, "last_diffs": self.last_diffs, "cutover": self.cutover, "fold": self.fold, "restore": self.restore,
         }  # fmt: skip
+        if self.pending_tally:  # absent when empty, so a state that never had a failed append serialises as before
+            body["pending_tally"] = [{"run_id": t.run_id, "run_at": t.run_at, "total": t.total, "counts": t.counts} for t in self.pending_tally]
         return json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    def keep_tally(self, row: TallyRow) -> bool:
+        """Carry a Tally row whose append failed until the next run start can write it (WR-03). At most MAX_PENDING_TALLY rows are carried
+        (the oldest first); returns False when the row had to be left out because the carry is full."""
+        if any((t.run_id, t.run_at) == (row.run_id, row.run_at) for t in self.pending_tally):
+            return True
+        if len(self.pending_tally) >= MAX_PENDING_TALLY:
+            return False
+        self.pending_tally = [*self.pending_tally, row]
+        return True
 
     def record_check(
         self, now: datetime, *, counted: int, declared: int, admissions: int, failed: bool = False, diffs: Iterable[str] = (),
