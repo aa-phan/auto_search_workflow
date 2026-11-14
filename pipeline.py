@@ -263,17 +263,46 @@ def storage_check(
     )  # fmt: skip
 
 
-def storage_fold(ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, state: Any) -> bool:
+def storage_fold(
+    ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, state: Any, save: Callable[[], None] | None = None,
+) -> bool:
     """The 7-day fold (P3-03), on the start-of-run snapshot: plan what is durable in Identity and Tally, delete those Events rows, record the
     result in `storage.fold`. Returns True when the record changed (the caller saves it). A failure adds the note `storage fold failed: <type>`
     (degraded), leaves `fold.last_day` unset so the next run plans again from a fresh load, and never touches detection or alerts, which are done.
-    Notes and the log carry counts only: no key, title or URL."""
+    Notes and the log carry counts only: no key, title or URL.
+
+    The restore guard (WR-01): before the first delete request, `fold.started_day` is written with `save` (the `storage` key). If that write fails
+    the fold is skipped for this run (nothing was deleted, so nothing needs guarding). The marker closes the restore (`first_day` or `started_day`)
+    and the fold that ends cleanly turns it into `first_day`. A failure that proves nothing was sent (the freshness check refused, a read
+    failed) takes the marker back, so a transient error never makes the restore impossible; a failure after a request went out keeps it,
+    because the reply may have been lost with the rows already gone."""
     try:
         plan = compact.fold_plan(ledger, now)
+    except Exception as exc:
+        log.error("Storage fold raised %s", type(exc).__name__)
+        run.notes += f"storage fold failed: {type(exc).__name__}; "
+        return False
+    before = dict(storage.fold)
+    if plan.rows and save is not None:
+        storage.fold = dict(before, started_day=now.astimezone(timezone.utc).strftime("%Y-%m-%d"))
+        try:
+            save()
+        except Exception as exc:
+            storage.fold = before
+            log.error("Could not record the fold marker, the fold is skipped: %s", type(exc).__name__)
+            run.notes += f"storage write failed: {type(exc).__name__}; "
+            return False
+    try:
         deleted = state.fold_events(plan.rows, plan.row_keys) if plan.rows else 0
     except Exception as exc:
         log.error("Storage fold raised %s", type(exc).__name__)
         run.notes += f"storage fold failed: {type(exc).__name__}; "
+        if plan.rows and save is not None and not getattr(state, "fold_touched", True):
+            storage.fold = before  # no delete request went out: the restore stays possible
+            try:
+                save()
+            except Exception as exc2:  # the marker stays on the sheet: the restore is refused until a fold ends cleanly (conservative)
+                log.error("Could not take back the fold marker: %s", type(exc2).__name__)
         return False
     storage.fold = compact.fold_record(storage.fold, now, rows=deleted, skipped=plan.skipped)
     if deleted or plan.skipped:
@@ -366,6 +395,11 @@ def run_cycle(d: Deps) -> RunRecord:
             d.state.save_boards(dirty.values())
 
     budget_loaded = False  # set once this run holds the Discovery tab's rows; save_budget does nothing before that
+
+    def save_storage() -> None:
+        """Write the `storage` key (the whole small Discovery body, as every other save of it does); raises on failure, the caller decides."""
+        discovery_state[compact.STORAGE_KEY] = storage.to_json()
+        d.state.save_discovery_state(discovery_state, lg.stamp(now))
 
     def save_budget() -> None:
         """Persist the Groq daily budget in the Discovery tab (key `groq_budget`) when it changed. Never in a dry run, never
@@ -900,10 +934,9 @@ def run_cycle(d: Deps) -> RunRecord:
         if not d.dry_run and mode == compact.MODE_COMPACT and not decision.note and storage.fold_due(now):
             if d.clock() >= t0 + FOLD_CUTOFF_S:
                 log.info("Storage: fold skipped, the run clock passed %d min (it is tried again next run)", FOLD_CUTOFF_S // 60)
-            elif storage_fold(ledger, now, storage, run, d.state):
-                discovery_state[compact.STORAGE_KEY] = storage.to_json()
+            elif storage_fold(ledger, now, storage, run, d.state, save_storage):
                 try:
-                    d.state.save_discovery_state(discovery_state, lg.stamp(now))
+                    save_storage()
                 except Exception as exc:
                     log.error("Could not record the storage fold: %s", type(exc).__name__)
                     run.notes += f"storage write failed: {type(exc).__name__}; "

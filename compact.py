@@ -457,10 +457,12 @@ def delete_ranges(rows: Iterable[int]) -> list[tuple[int, int]]:
 def fold_record(previous: dict[str, Any], now: datetime, *, rows: int, skipped: int) -> dict[str, Any]:
     """The `fold` record of the `storage` key after a fold that ran to its end: `last_day` (the UTC day: at most one fold a day),
     `last_rows` and `last_skipped` of this fold, `rows_total` over all folds and `first_day`, set once by the first fold that deleted a row
-    (the restore is refused from then on; a fold that deleted nothing changes nothing irreversible). Counts and dates only."""
+    (the restore is refused from then on; a fold that deleted nothing changes nothing irreversible). A `started_day` in `previous` is the
+    marker the fold wrote BEFORE its destructive call (WR-01): a fold that may have deleted rows was started and did not end cleanly, so
+    the one that ends now sets `first_day` even when it finds nothing left to delete, and the marker is gone from the result. Counts and dates only."""
     total = (_int(previous.get("rows_total")) or 0) + rows
     out: dict[str, Any] = {"last_day": _utc_day(now), "last_rows": rows, "last_skipped": skipped, "rows_total": total}
-    first = previous.get("first_day") or (_utc_day(now) if rows > 0 else "")
+    first = previous.get("first_day") or (_utc_day(now) if rows > 0 or previous.get("started_day") else "")
     if first:
         out["first_day"] = first
     return out

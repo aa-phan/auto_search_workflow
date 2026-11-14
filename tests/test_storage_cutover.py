@@ -720,6 +720,11 @@ class FoldPlanTests(unittest.TestCase):
         three = compact.fold_record(two, datetime(2026, 10, 21, 5, tzinfo=timezone.utc), rows=3, skipped=1)
         self.assertEqual((three["first_day"], three["rows_total"]), ("2026-10-20", 10))
 
+    def test_a_started_marker_makes_the_fold_that_ends_set_first_day_even_when_it_deleted_nothing(self) -> None:
+        marked = {"started_day": "2026-10-19"}
+        out = compact.fold_record(marked, datetime(2026, 10, 20, 5, tzinfo=timezone.utc), rows=0, skipped=0)
+        self.assertEqual(out, {"first_day": "2026-10-20", "last_day": "2026-10-20", "last_rows": 0, "last_skipped": 0, "rows_total": 0})  # the marker itself is gone
+
     def test_a_fold_is_due_only_in_compact_mode_after_the_cutover_day_and_once_a_day(self) -> None:
         state = compact.StorageState(mode=compact.MODE_COMPACT, cutover={"at": "2026-10-18T09:00:00Z"})
         self.assertFalse(state.fold_due(datetime(2026, 10, 18, 23, 59, 59, tzinfo=timezone.utc)))  # the cutover's own UTC day
@@ -958,7 +963,7 @@ class FoldTests(FoldCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("storage fold failed: RuntimeError; ", run.notes)
         self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
-        self.assertEqual(self.storage().fold, {})  # last_day unset: the next run tries again
+        self.assertEqual(self.storage().fold, {"started_day": "2026-10-19"})  # last_day unset (the next run tries again); the restore guard (WR-01) is closed
         gone = FOLDED - self.seen_keys()
         self.assertTrue(0 < len(gone) < 4, gone)  # half of it happened
         self.assertEqual(parity.compare_figures(whole, figures()), [])  # each job still counted once
@@ -1012,6 +1017,88 @@ class FoldTests(FoldCase):
         self.assertEqual(self.storage().fold, {})
         self.assertEqual(FOLDED - self.seen_keys(), set())
         run = self.run_at(FOLD_DAY)  # the same UTC day (and instant): it is still due
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        self.assertEqual(self.storage().fold["rows_total"], 4)
+
+    # -- the restore guard (WR-01): the marker is written before the first delete request, and a fold that deleted nothing never closes the restore
+    def restore_code(self) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return h.run_storage_restore(self.store, settings(), dry_run=False, now=FOLD_DAY + timedelta(minutes=5))
+
+    def test_a_fold_that_failed_after_its_first_delete_batch_closes_the_restore_until_a_fold_ends_cleanly(self) -> None:
+        real, calls = self.sh.batch_update, []
+
+        def flaky(body: dict[str, Any]) -> dict[str, Any]:
+            if any("deleteDimension" in r for r in body["requests"]):
+                calls.append(body)
+                if len(calls) == 2:
+                    raise RuntimeError("injected failure after the first delete batch")
+            return real(body)
+
+        with mock.patch.object(compact, "FOLD_REQUESTS_PER_BATCH", 1), mock.patch.object(self.sh, "batch_update", side_effect=flaky):
+            self.run_at(FOLD_DAY)
+        self.assertEqual(self.storage().fold.get("started_day"), "2026-10-19")
+        self.assertNotIn("last_day", self.storage().fold)  # still retried
+        before = self.snapshot()
+        self.assertEqual(self.restore_code(), 1)  # rows are gone: the restore is refused although first_day is not recorded yet
+        self.assertEqual(self.snapshot(), before)
+        run = self.run_at(FOLD_DAY)
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        fold = self.storage().fold
+        self.assertEqual((fold["first_day"], "started_day" in fold), ("2026-10-19", False))  # the marker became first_day
+        self.assertEqual(self.restore_code(), 1)
+
+    def test_a_fold_whose_record_was_not_saved_still_leaves_first_day_set_by_the_next_run(self) -> None:
+        real = self.w.state.save_discovery_state
+
+        def refuse_the_result(values: dict[str, str], stamp: str) -> None:
+            if '"last_day"' in str(values.get(compact.STORAGE_KEY, "")).split('"fold":')[-1].split("}")[0]:
+                raise RuntimeError("injected: the fold record is not saved")
+            real(values, stamp)
+
+        with mock.patch.object(self.w.state, "save_discovery_state", side_effect=refuse_the_result):
+            run = self.run_at(FOLD_DAY)
+        self.assertEqual(FOLDED - self.seen_keys(), FOLDED)  # every planned row is gone
+        self.assertIn("storage write failed", run.notes)
+        self.assertEqual(self.storage().fold, {"started_day": "2026-10-19"})  # the marker was saved before the delete
+        run = self.run_at(FOLD_DAY)  # nothing is left to delete: rows = 0
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        self.assertEqual(self.storage().fold["first_day"], "2026-10-19")  # without the marker this stayed unset for good
+        self.assertEqual(self.storage().fold["last_rows"], 0)
+        self.assertEqual(self.restore_code(), 1)
+
+    def test_a_fold_refused_before_any_request_leaves_no_marker_and_the_restore_possible(self) -> None:
+        real = compact.fold_plan
+
+        def stale(ledger: compact.Ledger, now: datetime) -> compact.FoldPlan:
+            plan = real(ledger, now)
+            return compact.FoldPlan(plan.rows, plan.skipped_not_in_identity, plan.skipped_no_tally, {n: "greenhouse|acme|WRONG" for n in plan.rows})
+
+        before = self.events()
+        with mock.patch.object(compact, "fold_plan", side_effect=stale):
+            run = self.run_at(FOLD_DAY)
+        self.assertIn("storage fold failed: RuntimeError; ", run.notes)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.events()[: len(before)], before)
+        self.assertEqual(self.storage().fold, {})  # no marker, no first_day: nothing was deleted, so a transient refusal is not a permanent record
+        self.assertEqual(self.restore_code(), 0)
+
+    def test_a_marker_that_cannot_be_saved_skips_the_fold_and_deletes_nothing(self) -> None:
+        real = self.w.state.save_discovery_state
+
+        def refuse_the_marker(values: dict[str, str], stamp: str) -> None:
+            if "started_day" in str(values.get(compact.STORAGE_KEY, "")):
+                raise RuntimeError("injected: the marker is not saved")
+            real(values, stamp)
+
+        before = self.events()
+        with mock.patch.object(self.w.state, "save_discovery_state", side_effect=refuse_the_marker):
+            run = self.run_at(FOLD_DAY)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.events()[: len(before)], before)
+        self.assertIn("storage write failed: RuntimeError", run.notes)
+        self.assertEqual(self.storage().fold, {})
+        run = self.run_at(FOLD_DAY)  # still due the same day
         self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
         self.assertEqual(self.storage().fold["rows_total"], 4)
 

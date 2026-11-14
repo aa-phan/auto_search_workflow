@@ -300,6 +300,7 @@ class SheetState:
     """State in hidden tabs of the user's spreadsheet."""
 
     UPDATE_CHUNK = 500
+    fold_touched = False  # set by `fold_events` when a delete request has gone out (WR-01): False after a failure means nothing was deleted
 
     def __init__(self, spreadsheet: Any) -> None:
         self.sh = spreadsheet
@@ -554,6 +555,7 @@ class SheetState:
         `compact.FOLD_REQUESTS_PER_BATCH` requests per `spreadsheets.batchUpdate` (atomic per call); an interrupted fold leaves a consistent
         sheet and the next fold plans again. With `expect` (row -> key) every row must still hold that key in a `seen` row, read fresh,
         before the first request: a row shifted by a hand edit refuses the whole fold. Only the Events tab is touched, never Events_Legacy."""
+        self.fold_touched = False
         ranges = compact.delete_ranges(rows)
         if not ranges:
             return 0
@@ -567,6 +569,7 @@ class SheetState:
             {"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": first - 1, "endIndex": last}}} for first, last in ranges
         ]
         for i in range(0, len(requests), compact.FOLD_REQUESTS_PER_BATCH):
+            self.fold_touched = True  # from the first request on, a failure cannot prove that nothing was deleted (the reply may have been lost)
             self.sh.batch_update({"requests": requests[i : i + compact.FOLD_REQUESTS_PER_BATCH]})
         return sum(last - first + 1 for first, last in ranges)
 
@@ -693,6 +696,8 @@ class SheetState:
 class CsvState:
     """Local-file fallback (development, or Sheets not configured)."""
 
+    fold_touched = False  # see SheetState.fold_touched
+
     def __init__(self, directory: Path) -> None:
         self.dir = directory
         self._identity: compact.IdentitySet | None = None  # the Identity rows as loaded and written by this store
@@ -809,6 +814,7 @@ class CsvState:
     def fold_events(self, rows: list[int], expect: dict[int, str] | None = None) -> int:
         """The local twin of the Sheet's fold: rewrite `events.csv` atomically without these row numbers (header = row 1). With `expect`
         every row must still hold that key in a `seen` row, or nothing is rewritten. Only the Events file is touched."""
+        self.fold_touched = False
         drop = set(rows)
         if not drop:
             return 0
@@ -823,6 +829,7 @@ class CsvState:
         fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(row for n, row in enumerate(table, start=1) if n not in drop)
+        self.fold_touched = True
         os.replace(tmp, p)  # atomic
         return len(drop)
 

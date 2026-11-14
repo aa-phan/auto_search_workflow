@@ -2222,9 +2222,9 @@ def run_storage_restore(store: Any, settings: Settings, *, dry_run: bool, now: d
             return refuse(
                 f"the effective storage mode is {mode} (stored {storage.mode}, {EVENTS_LEGACY_TAB} {'present' if legacy else 'missing'}): a restore undoes a finished cutover, and only that."
             )
-        if first_day := storage.fold.get("first_day"):
+        if first_day := storage.fold.get("first_day") or storage.fold.get("started_day"):
             return refuse(
-                f"a fold has already deleted rows from Events (first fold day {first_day}), so renaming {EVENTS_LEGACY_TAB} back would lose every row the fold removed after the cutover. "
+                f"a fold has already deleted rows from Events, or was started and may have (fold day {first_day}), so renaming {EVENTS_LEGACY_TAB} back would lose every row the fold removed after the cutover. "
                 f"Restoring now needs a replay of {EVENTS_LEGACY_TAB}, the post-cutover Events and Identity (DECISIONS D-57); this command does not do that."
             )
         at = compact.parse_stamp(storage.cutover.get("at"))
