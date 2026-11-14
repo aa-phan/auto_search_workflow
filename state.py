@@ -614,10 +614,16 @@ class SheetState:
             if ev := Event.from_row(row):
                 events.append(ev)
                 event_rows.append(n)
-        identity_rows, unreadable = _identity_rows(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:])
-        self._identity = compact.IdentitySet.from_rows(identity_rows)
+        unreadable = self._load_identity()
+        assert self._identity is not None
         tally = [t for row in self.sh.worksheet(TALLY_TAB).get_all_values()[1:] if (t := compact.TallyRow.from_row(row))]
         return compact.Ledger(events, event_rows, self._identity.copy(), tally, unreadable)  # a snapshot: later writes change the cache, never this
+
+    def _load_identity(self) -> int:
+        """Read the Identity tab into this store's cache (what `write_identity` plans from); returns the number of unreadable rows."""
+        rows, unreadable = _identity_rows(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:])
+        self._identity = compact.IdentitySet.from_rows(rows)
+        return unreadable
 
     def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         """Add the entries (already encoded, grouped by stem) to Identity; returns the number of rows written.
@@ -626,9 +632,20 @@ class SheetState:
         requests only when it alone exceeds the budget. Chunks go out in ascending order, so an interrupted write leaves the
         stem's highest chunk without the completion marker. Rows that exist are updated in place (single-cell `A{row}` anchor),
         new chunks are appended and their row numbers read back. The cache follows each successful request, so after a failure
-        it equals what the sheet holds, and a repeat is idempotent (entries are deduplicated by ID)."""
+        it equals what the sheet holds, and a repeat is idempotent (entries are deduplicated by ID). That holds only for a failure that
+        applied nothing: a request Google applied whose reply was lost (a read timeout after the write) leaves the cache BEHIND the sheet, and
+        a later write planned from it would overwrite the cell without the entries already written. So any exception drops the cache, and the
+        next call reads the Identity tab again before it plans (WR-04)."""
         if self._identity is None:
-            self.load_ledger()
+            self._load_identity()
+        assert self._identity is not None
+        try:
+            return self._write_identity(additions, stamp)
+        except BaseException:
+            self._identity = None
+            raise
+
+    def _write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         assert self._identity is not None
         planned = self._identity.plan_additions(additions, stamp)
         if not planned:

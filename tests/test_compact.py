@@ -281,7 +281,7 @@ class SheetIdentityTests(unittest.TestCase):
         self.assertEqual(self.ws.values[2][3], "2")
         self.assertEqual(self.reload().identity.keys(), {f"{STEM}|{i:031d}" for i in (0, 1, 2, 100, 101)} | {f"{STEM}|{'7' * 39_990}", f"{STEM}|q"})
 
-    def test_a_failed_request_leaves_the_cache_equal_to_what_the_sheet_holds(self) -> None:
+    def test_a_failed_request_drops_the_cache_so_the_next_write_plans_from_the_sheet(self) -> None:
         self.state.load_ledger()
         with mock.patch.object(compact, "IDENTITY_REQUEST_CHARS", 45_000):
             self.sh.fail_on_write_to(stm.IDENTITY_TAB, 3)
@@ -290,12 +290,50 @@ class SheetIdentityTests(unittest.TestCase):
         held = self.reload().identity
         self.assertEqual([r.chunk for r in held.rows(STEM)], [1, 2])
         self.assertEqual(held.baselined_at(STEM), "")  # no marker: the set is incomplete
-        self.assertEqual(self.state._identity.keys(), held.keys())  # type: ignore[union-attr]
-        # the redo re-derives the rest and is idempotent for what is already there
+        self.assertIsNone(self.state._identity)  # WR-04: dropped, because after a lost reply the cache can be behind the sheet
+        # the redo reads the sheet again, re-derives the rest and is idempotent for what is already there
         self.state.write_identity({STEM: entries(5050)}, STAMP2)
         done = self.reload().identity
         self.assertEqual(len(done), 5050)
         self.assertEqual(done.baselined_at(STEM), STAMP2)
+
+    def test_a_request_applied_by_the_sheet_whose_reply_was_lost_is_not_overwritten_by_the_next_write(self) -> None:
+        """WR-04: Google applied the write and the client saw a timeout. The cache is behind the sheet; the next write must plan from the sheet,
+        or it rewrites the cell without the entries the lost reply had written."""
+        self.state.write_identity({STEM: ["b1", "b2"]}, STAMP1)
+        real = self.ws.batch_update
+
+        def reply_lost(data: list[dict[str, object]], **kw: object) -> None:
+            real(data, **kw)  # applied ...
+            raise TimeoutError("read timed out")  # ... but the client never heard
+
+        with mock.patch.object(self.ws, "batch_update", side_effect=reply_lost):
+            with self.assertRaises(TimeoutError):
+                self.state.write_identity({STEM: ["b3"]}, STAMP2)
+        self.assertEqual({e for r in self.reload().identity.rows(STEM) for e in r.entries()}, {"b1", "b2", "b3"})
+        self.state.write_identity({STEM: ["b4"]}, "2026-10-29T12:00:00Z")
+        held = self.reload().identity
+        self.assertEqual({e for r in held.rows(STEM) for e in r.entries()}, {"b1", "b2", "b3", "b4"})  # b3 survived
+        self.assertEqual(len(self.ws.values), 2)  # and no second row for the same chunk
+
+    def test_an_appended_chunk_whose_row_number_could_not_be_read_back_is_not_appended_twice(self) -> None:
+        """The other lost-reply shape: the append went through and the read-back of the row numbers failed."""
+        real = self.ws.col_values
+        calls: list[int] = []
+
+        def broken(col: int) -> list[str]:
+            calls.append(col)
+            if len(calls) == 1:
+                raise TimeoutError("read timed out")
+            return real(col)
+
+        with mock.patch.object(self.ws, "col_values", side_effect=broken):
+            with self.assertRaises(TimeoutError):
+                self.state.write_identity({STEM: ["b1"]}, STAMP1)
+        self.assertEqual(len(self.ws.values), 2)  # the chunk is in the sheet
+        self.state.write_identity({STEM: ["b2"]}, STAMP2)
+        self.assertEqual(len(self.ws.values), 2)  # extended in place, not appended as a second chunk 1
+        self.assertEqual({e for r in self.reload().identity.rows(STEM) for e in r.entries()}, {"b1", "b2"})
 
     def test_the_fake_rejects_a_cell_over_fifty_thousand_characters(self) -> None:
         with self.assertRaises(ValueError):
