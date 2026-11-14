@@ -3,10 +3,10 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
-  - id: WR-06
+  - id: WR-07
     severity: warning
-    disposition: fixed
-    title: "`identity_shrunk` is reported once, then the lowered count becomes the new reference"
+    disposition: open
+    title: "The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`"
   - id: IN-01
     severity: info
     disposition: open
@@ -39,6 +39,18 @@ findings:
     severity: info
     disposition: open
     title: "The Tally carry holds zero-total rows and drops the newest row when full"
+  - id: IN-09
+    severity: info
+    disposition: open
+    title: "The new tests do not pin the claim that matters most for the fix, \"the fold stays held back\""
+  - id: IN-10
+    severity: info
+    disposition: open
+    title: "The documented repair path has no tooling and the mark can be stuck high by a transient over-read"
+  - id: WR-06
+    severity: warning
+    disposition: fixed
+    title: "`identity_shrunk` is reported once, then the lowered count becomes the new reference"
   - id: WR-01
     severity: warning
     disposition: fixed
@@ -59,16 +71,16 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 8
-total: 14
-recorded: 2026-11-14T22:43:02.484Z
+open: 11
+total: 17
+recorded: 2026-11-14T22:46:27.098Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-06 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-07 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -77,6 +89,9 @@ recorded: 2026-11-14T22:43:02.484Z
 | IN-06 | info | open | - |
 | IN-07 | info | open | - |
 | IN-08 | info | open | - |
+| IN-09 | info | open | - |
+| IN-10 | info | open | - |
+| WR-06 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-01 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-02 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-03 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
