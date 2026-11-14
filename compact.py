@@ -495,6 +495,7 @@ class Ledger:
     event_rows: list[int]  # the sheet row of each event above (header = row 1)
     identity: IdentitySet
     tally: list[TallyRow]
+    identity_unreadable: int = 0  # Identity rows that hold something but did not parse (no stem or a non-integer Chunk): their IDs are not in `identity` (WR-02)
 
     def identity_keys(self) -> set[str]:
         return self.identity.keys()
@@ -708,12 +709,23 @@ class StorageState:
         if self.bar_met_at is None and counted == 0 and not failed and self.bar(now).met:
             self.bar_met_at = lg.stamp(now.astimezone(timezone.utc))
 
+    def last_identity_entries(self) -> int | None:
+        """The Identity entry count the last compact check recorded (None before the first one: nothing to compare with)."""
+        return _int(self.last_check.get("identity_entries"))
+
     def record_compact_check(
-        self, now: datetime, *, counted: int, declared: int, failed: bool = False, diffs: Iterable[str] = (), compared: int = 0, seconds: float = 0.0
+        self, now: datetime, *, counted: int, declared: int, failed: bool = False, diffs: Iterable[str] = (), compared: int = 0, seconds: float = 0.0,
+        identity_entries: int | None = None,
     ) -> None:  # fmt: skip
         """Record a compact-mode integrity check: `last_check` and `last_diffs` only. The parity bar and its clock belong to dual writing; after the
-        cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was."""
+        cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was. `identity_entries` (WR-02) is the number of Identity
+        entries this check saw; Identity is append-only, so the next check counts a smaller number as `identity_shrunk`. A check that failed or did
+        not count Identity keeps the previous figure."""
+        previous = self.last_identity_entries()
         self.last_check = {"at": lg.stamp(now.astimezone(timezone.utc)), "counted": counted, "declared": declared, "compared": compared, "seconds": round(seconds, 1)}
+        kept = identity_entries if identity_entries is not None else previous
+        if kept is not None:
+            self.last_check["identity_entries"] = kept
         self.last_diffs = [str(text)[:MAX_DIFF_CHARS] for text in list(diffs)[:MAX_LISTED_DIFFS]]
 
     def fold_due(self, now: datetime) -> bool:

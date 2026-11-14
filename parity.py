@@ -359,19 +359,33 @@ def _summary_checks(ledger: compact.Ledger, now: datetime, tz: tzinfo, runs: lis
     return [Diff(4, "figure_checks", f"checks.{_segment(p.split(':', 1)[0])}", f"{i + 1} of {len(problems)}") for i, p in enumerate(problems)]
 
 
+def _identity_loss(ledger: compact.Ledger, entries_before: int | None) -> list[Diff]:
+    """Compact layer 1, the part Events cannot see (WR-02): Identity is append-only, so its entry count never falls. `identity_shrunk` is a count
+    below the one the previous check recorded (`entries_before`, None when there is none); `identity_unreadable` is a number of rows that hold
+    something but did not parse, whose IDs `seen()` therefore never sees. Numbers only."""
+    out: list[Diff] = []
+    entries = sum(len(r.entries()) for r in ledger.identity.all_rows())
+    if entries_before is not None and entries < entries_before:
+        out.append(Diff(1, "identity_shrunk", "Identity", f"{entries} vs {entries_before}"))
+    if ledger.identity_unreadable:
+        out.append(Diff(1, "identity_unreadable", "Identity", f"{ledger.identity_unreadable} rows"))
+    return out
+
+
 def check_compact(
     ledger: compact.Ledger, *, now: datetime, tz: tzinfo = timezone.utc, runs: Iterable[Any] = (), boards: dict[str, Any] | None = None,
-    discovery: dict[str, str] | None = None, tracker: Iterable[dict[str, str]] = (),
+    discovery: dict[str, str] | None = None, tracker: Iterable[dict[str, str]] = (), identity_entries_before: int | None = None,
 ) -> ParityReport:  # fmt: skip
     """The integrity check of compact mode (plan 03-07): Events no longer holds every row, so there is no full ledger to compare with; instead
     Identity and Tally must be consistent with what Events keeps. Four parts: the Identity codec invariants and every kept identity-class key in
     Identity (`identity_missing`, `identity_kind`, `stem`, `identity_count`, `identity_cell`, `identity_marker`, `identity_duplicate`,
-    `identity_entry`); no kept Tally group missing or below its retained count (`tally_missing`, `tally_negative`, `tally_count`); and the
-    merged Dashboard summary with an empty consistency-check list (`figure_checks`). `ledger` is the merged view as loaded: Events rows,
-    Identity, Tally. Pure and read-only; a difference never changes detection, evaluation or alerts."""
+    `identity_entry`); Identity itself never losing entries (`identity_shrunk` against `identity_entries_before`, the count the previous
+    check recorded, and `identity_unreadable` rows); no kept Tally group missing or below its retained count (`tally_missing`,
+    `tally_negative`, `tally_count`); and the merged Dashboard summary with an empty consistency-check list (`figure_checks`). `ledger` is the
+    merged view as loaded: Events rows, Identity, Tally. Pure and read-only; a difference never changes detection, evaluation or alerts."""
     t0 = time.monotonic()
     compared: dict[str, int] = {}
-    diffs = _kept_in_identity(ledger, compared) + _tally_integrity(ledger, compared)
+    diffs = _kept_in_identity(ledger, compared) + _identity_loss(ledger, identity_entries_before) + _tally_integrity(ledger, compared)
     diffs += _summary_checks(ledger, now, tz, list(runs), boards or {}, discovery or {}, list(tracker), compared)
     return ParityReport(diffs, compared, round(time.monotonic() - t0, 2))
 

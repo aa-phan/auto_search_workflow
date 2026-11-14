@@ -2022,7 +2022,7 @@ def run_storage_parity(store: Any, settings: Settings) -> int:
         return 2
     ledger = state.load_ledger()
     if storage.mode == compact.MODE_COMPACT:  # Events no longer holds every row: check what Identity and Tally promise about the rows it keeps
-        report = parity.check_compact(ledger, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
+        report = parity.check_compact(ledger, now=now, tz=getattr(store, "display_tz", timezone.utc), runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store), identity_entries_before=storage.last_identity_entries())
     else:
         report = _parity_report(store, ledger, compact.simulate_compact(ledger.events, now), now=now, runs=state.load_runs(), boards=state.load_boards(), discovery=discovery, tracker=_read_tracker(store))
     print(parity.format_report(report, storage, now))

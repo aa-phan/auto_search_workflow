@@ -228,7 +228,10 @@ def storage_check(
             log.warning("Storage check: the tracker could not be read (%s); it is compared as empty", type(exc).__name__)
     try:
         if mode == compact.MODE_COMPACT:
-            report = parity.check_compact(ledger, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
+            report = parity.check_compact(
+                ledger, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker,
+                identity_entries_before=storage.last_identity_entries(),
+            )  # fmt: skip
         else:
             view = compact.Ledger(compact.simulate_compact(ledger.events, now), [], ledger.identity, ledger.tally)
             report = parity.check_dual(ledger.events, view, now=now, tz=tz, runs=runs or [], boards=boards or {}, discovery=discovery or {}, tracker=tracker)
@@ -243,6 +246,7 @@ def storage_check(
         storage.record_compact_check(
             now, counted=report.counted, declared=report.declared, failed=failed, diffs=report.named(compact.MAX_LISTED_DIFFS),
             compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
+            identity_entries=None if failed else report.compared.get("identity_entries"),
         )  # fmt: skip
         log.info(
             "Storage: mode=compact, %d counted and %d declared differences, %d kept job keys and %d Tally runs compared, check took %.1f s%s",

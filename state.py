@@ -256,6 +256,34 @@ def _events_missing_message(other: str) -> str:
     )
 
 
+def _compact_store_missing_message(missing: list[str]) -> str:
+    return (
+        f"The {' and '.join(missing)} tab is missing but the Sheet is in compact storage mode. Refusing to create it empty: the posting IDs and counts that only "
+        "Identity and Tally hold (every baseline and every folded row) would be gone, every old posting would look new and be evaluated again, and the "
+        "integrity check could not see it. Restore the tab (the sheet's version history has it); Events_Legacy holds the ledger as it was at the cutover, "
+        "so the tab can be rebuilt from it plus the Events rows written since (DECISIONS D-57)."
+    )
+
+
+def _compact_mode_stored(raw: str | None) -> bool:
+    """Does the Discovery key `storage` say `compact` (the old ledger tab is present when this is asked)? A compact system must never get a new, empty
+    Identity or Tally tab: they are not rebuildable from Events any more (WR-02)."""
+    return compact.effective_mode(raw, legacy_present=True) == compact.MODE_COMPACT
+
+
+def _identity_rows(rows: list[list[str]]) -> tuple[list[compact.IdentityRow], int]:
+    """The parsed Identity rows (data rows only, row numbers as in the sheet) and how many rows held something but did not parse (a blank stem or
+    a Chunk that is not an integer: a hand edit or a stray sort). Those IDs are not seen by `seen()`, so the integrity check counts them (WR-02)."""
+    parsed: list[compact.IdentityRow] = []
+    unreadable = 0
+    for n, row in enumerate(rows, start=2):
+        if r := compact.IdentityRow.from_row(row, n):
+            parsed.append(r)
+        elif any(str(cell).strip() for cell in row):
+            unreadable += 1
+    return parsed, unreadable
+
+
 def _warning_protection(sheet_id: int, description: str) -> dict[str, Any]:
     """Whole-sheet, warning-only protection: a hand edit asks for confirmation, the service account still writes."""
     return {"addProtectedRange": {"protectedRange": {"range": {"sheetId": sheet_id}, "warningOnly": True, "description": description}}}
@@ -313,6 +341,10 @@ class SheetState:
         for other in (EVENTS_LEGACY_TAB, EVENTS_NEW_TAB):
             if EVENTS_TAB not in tabs and other in tabs:
                 raise RuntimeError(_events_missing_message(other))
+        if (gone := [t for t in (IDENTITY_TAB, TALLY_TAB) if t not in tabs]) and EVENTS_LEGACY_TAB in tabs and DISCOVERY_TAB in tabs:
+            storage = {r[0]: r[1] for r in tabs[DISCOVERY_TAB].get_all_values()[1:] if len(r) >= 2 and r[0]}.get(compact.STORAGE_KEY)
+            if _compact_mode_stored(storage):
+                raise RuntimeError(_compact_store_missing_message(gone))
         for title, columns, rows in (
             (BOARDS_TAB, BOARD_COLUMNS, 1000), (EVENTS_TAB, EVENT_COLUMNS, 5000), (RUNS_TAB, RUN_COLUMNS, 1000),
             (INVENTORY_TAB, INVENTORY_COLUMNS, 50), (DISCOVERY_TAB, DISCOVERY_COLUMNS, 20), (LOCK_TAB, LOCK_COLUMNS, 5),
@@ -582,10 +614,10 @@ class SheetState:
             if ev := Event.from_row(row):
                 events.append(ev)
                 event_rows.append(n)
-        identity_rows = [r for n, row in enumerate(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:], start=2) if (r := compact.IdentityRow.from_row(row, n))]
+        identity_rows, unreadable = _identity_rows(self.sh.worksheet(IDENTITY_TAB).get_all_values()[1:])
         self._identity = compact.IdentitySet.from_rows(identity_rows)
         tally = [t for row in self.sh.worksheet(TALLY_TAB).get_all_values()[1:] if (t := compact.TallyRow.from_row(row))]
-        return compact.Ledger(events, event_rows, self._identity.copy(), tally)  # a snapshot: later writes change the cache, never this
+        return compact.Ledger(events, event_rows, self._identity.copy(), tally, unreadable)  # a snapshot: later writes change the cache, never this
 
     def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         """Add the entries (already encoded, grouped by stem) to Identity; returns the number of rows written.
@@ -710,6 +742,14 @@ class CsvState:
         for other in (EVENTS_LEGACY_TAB, EVENTS_NEW_TAB):
             if not self._path(EVENTS_TAB).exists() and self._path(other).exists():
                 raise RuntimeError(_events_missing_message(other))
+
+        def absent(title: str) -> bool:
+            p = self._path(title)
+            return not p.exists() or p.stat().st_size == 0
+
+        if (gone := [t for t in (IDENTITY_TAB, TALLY_TAB) if absent(t)]) and self._path(EVENTS_LEGACY_TAB).exists() and not absent(DISCOVERY_TAB):
+            if _compact_mode_stored(self.load_discovery_state().get(compact.STORAGE_KEY)):
+                raise RuntimeError(_compact_store_missing_message(gone))
         for title, columns in (
             (BOARDS_TAB, BOARD_COLUMNS), (EVENTS_TAB, EVENT_COLUMNS), (RUNS_TAB, RUN_COLUMNS), (INVENTORY_TAB, INVENTORY_COLUMNS),
             (DISCOVERY_TAB, DISCOVERY_COLUMNS), (IDENTITY_TAB, IDENTITY_COLUMNS), (TALLY_TAB, TALLY_COLUMNS),
@@ -842,10 +882,10 @@ class CsvState:
             if ev := Event.from_row(row):
                 events.append(ev)
                 event_rows.append(n)
-        identity_rows = [r for n, row in enumerate(self._rows(IDENTITY_TAB), start=2) if (r := compact.IdentityRow.from_row(row, n))]
+        identity_rows, unreadable = _identity_rows(self._rows(IDENTITY_TAB))
         self._identity = compact.IdentitySet.from_rows(identity_rows)
         tally = [t for row in self._rows(TALLY_TAB) if (t := compact.TallyRow.from_row(row))]
-        return compact.Ledger(events, event_rows, self._identity.copy(), tally)  # a snapshot: later writes change the cache, never this
+        return compact.Ledger(events, event_rows, self._identity.copy(), tally, unreadable)  # a snapshot: later writes change the cache, never this
 
     def write_identity(self, additions: dict[str, list[str]], stamp: str) -> int:
         """Add the entries (grouped by stem) to Identity; returns the number of rows written. The file is replaced atomically."""

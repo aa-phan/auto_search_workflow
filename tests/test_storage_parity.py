@@ -13,6 +13,7 @@ import io
 import json
 import re
 import sys
+import tempfile
 import unittest
 from collections import defaultdict
 from dataclasses import replace
@@ -764,6 +765,22 @@ class IntegrityCheckTests(unittest.TestCase):
             with self.subTest(kind):
                 self.assertIn(kind, self.kinds(self.check(rows=rows)))
 
+    def test_an_identity_with_fewer_entries_than_the_previous_check_saw_is_counted_identity_shrunk(self) -> None:
+        """WR-02: Identity is append-only, so a count below the recorded one is a loss even when no kept Events row can see which ID went."""
+        def shrunk(before: int | None) -> list[parity.Diff]:
+            return [d for d in parity.check_compact(self.ledger(), now=NOW, identity_entries_before=before).diffs if d.kind == "identity_shrunk"]
+
+        found = shrunk(27)
+        self.assertEqual([(d.ref, d.detail, d.declared) for d in found], [("Identity", "24 vs 27", False)])  # numbers only
+        self.assertEqual((shrunk(24), shrunk(20), shrunk(None)), ([], [], []))
+
+    def test_identity_rows_that_did_not_parse_are_counted_identity_unreadable(self) -> None:
+        ledger = self.ledger()
+        ledger.identity_unreadable = 2
+        report = parity.check_compact(ledger, now=NOW)
+        self.assertEqual(self.kinds(report), ["identity_unreadable"])
+        self.assertEqual([d.detail for d in report.diffs if d.kind == "identity_unreadable"], ["2 rows"])
+
     def test_a_tally_group_below_its_retained_count_is_counted_tally_negative_with_numbers_only(self) -> None:
         lowered = [compact.TallyRow(t.run_id, t.run_at, 0, {}) if t.run_id == "steady-2" else t for t in self.w.tally]
         report = self.check(tally=lowered)
@@ -853,13 +870,69 @@ class IntegrityTests(FoldCase):
         run = self.next_run()
         self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
         self.assertIn("storage", pl.degraded_reason(run))
-        self.assertIn("storage parity: 1 differences (identity_missing 1); ", run.notes)
-        self.assertEqual(self.storage().last_diffs, ["identity_missing greenhouse|acme|33"])
-        self.assertEqual(self.storage().last_check["counted"], 1)
+        self.assertIn("storage parity: 2 differences (identity_missing 1, identity_shrunk 1); ", run.notes)  # a removed entry is also a shrunk Identity (WR-02)
+        self.assertEqual(self.storage().last_diffs, ["identity_missing greenhouse|acme|33", "identity_shrunk Identity (14 vs 15)"])
+        self.assertEqual(self.storage().last_check["counted"], 2)
         self.assertEqual(self.w.state.load_ledger().identity.kind("greenhouse|acme|33"), "f")  # the repair at run start put it back
         clean = self.next_run()
         self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
         self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+
+    def test_an_id_that_only_identity_holds_and_was_removed_is_counted_identity_shrunk_on_the_next_run(self) -> None:
+        """WR-02: a baseline has no Events row, so no kept row can name it; the shrunk entry count is what sees the loss. It is reported once."""
+        self.next_run()  # records the entry count of a clean Identity
+        recorded = self.storage().last_check["identity_entries"]
+        self.edit_identity("b1")  # job 1 is a baseline: its ID lives in Identity only
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage parity: 1 differences (identity_shrunk 1); ", run.notes)
+        self.assertEqual(self.storage().last_diffs, [f"identity_shrunk Identity ({recorded - 1} vs {recorded})"])
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded - 1)
+        self.assertEqual(self.parity_command()[0], 0)  # the command compares with the last recorded figure: nothing new has been lost since
+
+    def test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable(self) -> None:
+        self.next_run()
+        self.sh.sheets[stm.IDENTITY_TAB].values.append(["greenhouse|acme", "second", "", "1", "b77"])  # a stray hand edit: the chunk is not a number
+        self.sh.sheets[stm.IDENTITY_TAB].values.append(["", "9", "", "1", "b78"])
+        self.sh.sheets[stm.IDENTITY_TAB].values.append(["", "", "", "", ""])  # a blank row is not a loss
+        run = self.next_run()
+        self.assertIn("storage parity: 1 differences (identity_unreadable 1); ", run.notes)
+        self.assertEqual(self.storage().last_diffs, ["identity_unreadable Identity (2 rows)"])
+
+    def test_a_deleted_identity_or_tally_tab_is_refused_not_recreated_empty(self) -> None:
+        for tab in (stm.IDENTITY_TAB, stm.TALLY_TAB):
+            with self.subTest(tab):
+                held = self.sh.sheets.pop(tab)
+                self.w.state._titles = None
+                with self.assertRaises(RuntimeError) as caught:
+                    self.w.state.ensure()
+                self.assertIn(tab, str(caught.exception))
+                self.assertIn(stm.EVENTS_LEGACY_TAB, str(caught.exception))
+                self.assertNotIn(tab, self.sh.sheets)  # nothing was created
+                with self.assertRaises(RuntimeError):
+                    self.next_run()  # a poller run stops at the same guard
+                self.assertNotIn(tab, self.sh.sheets)
+                self.sh.sheets[tab] = held
+        self.w.state.ensure()  # with both tabs back it is quiet again
+
+    def test_in_restored_mode_a_missing_identity_tab_is_still_recreated_because_events_can_rebuild_it(self) -> None:
+        self.set_storage(lambda s: setattr(s, "mode", compact.MODE_RESTORED))
+        del self.sh.sheets[stm.IDENTITY_TAB]
+        self.w.state.ensure()
+        self.assertIn(stm.IDENTITY_TAB, self.sh.sheets)
+
+    def test_the_local_file_store_refuses_a_missing_identity_file_in_compact_mode_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = stm.CsvState(Path(tmp))
+            state.ensure()
+            storage = compact.StorageState(mode=compact.MODE_COMPACT, cutover={"at": "2026-10-18T09:00:00Z"})
+            state.save_discovery_state({compact.STORAGE_KEY: storage.to_json()}, "2026-10-18T09:00:00Z")
+            Path(tmp, "events_legacy.csv").write_text("")
+            Path(tmp, "identity.csv").unlink()
+            with self.assertRaises(RuntimeError) as caught:
+                state.ensure()
+            self.assertIn("Identity", str(caught.exception))
+            self.assertFalse(Path(tmp, "identity.csv").exists())
 
     def test_a_tally_group_lowered_below_its_retained_count_is_counted_tally_negative_until_someone_repairs_it(self) -> None:
         def lower(row: list[str]) -> None:
@@ -921,7 +994,7 @@ class IntegrityTests(FoldCase):
         text = "\n".join([run.notes, self.w.state.load_discovery_state()[compact.STORAGE_KEY], *logs.output])
         for forbidden in ("Marketing", "http", "Remote"):
             self.assertNotIn(forbidden, text)
-        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=compact, 1 counted") for line in logs.output), logs.output)
+        self.assertTrue(any(line.startswith("INFO:hunter:Storage: mode=compact, 2 counted") for line in logs.output), logs.output)
 
 
 if __name__ == "__main__":
