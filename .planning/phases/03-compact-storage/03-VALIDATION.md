@@ -23,7 +23,7 @@ created: "2026-10-29"
 | **Config file** | none (`python -m unittest discover -s tests`) |
 | **Quick run command** | `.venv/bin/python -m unittest tests.test_compact tests.test_storage_parity -q` |
 | **Full suite command** | `.venv/bin/python -m unittest discover -s tests` |
-| **Estimated runtime** | ~3 seconds |
+| **Estimated runtime** | ~1 second (quick), ~16 seconds (full suite) |
 
 ---
 
@@ -96,10 +96,10 @@ created: "2026-10-29"
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
-- [x] Feedback latency < 3s
+- [x] Feedback latency < 3s (quick run command)
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** validated 2026-11-06 (every automated command above re-run green, full suite `Ran 910 tests ... OK`; live and owner-check items labelled in Manual-Only)
+**Approval:** re-validated 2026-11-14 after the review fixes WR-01..WR-05 (every automated command above re-run green, full suite `Ran 931 tests ... OK`; the fixes' tests sit in the mapped files test_compact, test_storage_parity and test_storage_cutover; live and owner-check items labelled in Manual-Only). First validated 2026-11-06 (910 tests).
 
 ## Validation Audit 2026-11-06
 
