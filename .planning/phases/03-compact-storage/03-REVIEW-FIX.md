@@ -3,8 +3,8 @@ phase: 03-compact-storage
 fixed_at: 2026-11-14T00:00:00Z
 review_path: .planning/phases/03-compact-storage/03-REVIEW.md
 iteration: 1
-findings_in_scope: 5
-fixed: 5
+findings_in_scope: 1
+fixed: 1
 skipped: 0
 status: all_fixed
 ---
@@ -13,7 +13,47 @@ status: all_fixed
 
 **Fixed at:** 2026-11-14
 **Source review:** .planning/phases/03-compact-storage/03-REVIEW.md
-**Iteration:** 1
+**Iteration:** 1 (this `--fix` run: WR-06 only; WR-01..WR-05 were fixed by the earlier run, kept below)
+
+**Summary:**
+- Findings in scope: 1 (WR-06; WR-01..WR-05 were already resolved and were not touched, the eight INFO findings IN-01..IN-08 were out of scope and stay open)
+- Fixed: 1
+- Skipped: 0
+
+**Deployment.** Commit e83d563 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
+
+**Verification.**
+- All checks are MOCKED (AGENTS rule 5): the Sheets fake in `tests/fake_sheets.py`, the CSV store and hand-built storage state. Nothing touched the real Sheet, Groq or Telegram.
+- The three new or changed tests fail on the pre-fix `compact.py` (stashed, run, restored) and pass after it.
+- `.venv/bin/python -m unittest discover -s tests` printed `Ran 934 tests ... OK` (931 before WR-06).
+- Where it ran: in the isolated worktree `.claude/worktrees/rf-03-*` with the main checkout's `.venv` interpreter, then the branch was fast-forwarded into the main checkout. Reproducible from the main checkout.
+
+## Fixed Issues
+
+### WR-06: `identity_shrunk` is reported once, then the lowered count becomes the new reference
+
+**Files modified:** `compact.py`, `tests/test_storage_parity.py`, `SPEC.md`, `DECISIONS.md`, `STATUS.md`
+**Commit:** e83d563
+**Status:** fixed: requires human verification (a logic change to what the check records; tests cover the paths, but nobody has run it against a real Sheet)
+**Applied fix:**
+- Owner decision (via the orchestrator): high-water mark only, no new owner input. `StorageState.record_compact_check` now stores `max(previous or 0, identity_entries)` when this check counted Identity, and keeps the previous figure when it did not (a failed check). A lower count never replaces the mark.
+- Effect: an Identity loss nobody repairs is counted `identity_shrunk` on every compact check, keeps the run degraded and, through the existing WR-05 gate, holds the fold back until the missing IDs are restored to Identity (for example from `Events_Legacy`). This is the same reported-every-run behaviour `tally_negative` has. A count that grows back to or above the mark counts 0 and raises the mark. The first check after a deploy (no recorded count) records the current count, unchanged.
+- No `--storage-ack-identity` flag, workflow input or other acknowledgement mechanism was added (AGENTS rule 7). The reviewer's suggested acknowledgement step was deliberately not taken.
+- Docs changed in the same commit (AGENTS rule 1, because this deliberately changes documented behaviour): SPEC.md compact-mode integrity check paragraph, DECISIONS.md D-57 (the WR-02 sentence about the lower count becoming the reference, with the WR-06 reasoning), STATUS.md (a WR-06 row labelled **mocked**, not deployed, and the cost).
+- The cost, as written in STATUS.md: a loss nobody repairs keeps runs degraded, the fold stopped and `Events` growing. The repair is restoring the missing IDs to Identity. There is no automated way to accept a loss, so a deliberate Identity rebuild needs a code or state change first.
+- Tests (`tests/test_storage_parity.py`):
+  - `test_an_id_that_only_identity_holds_and_was_removed_is_counted_identity_shrunk_on_the_next_run` now asserts the mark stays at `recorded` (it asserted `recorded - 1`), and that `--storage-parity` still exits 1.
+  - New `test_a_loss_nobody_repairs_is_counted_on_every_later_check_and_a_grown_count_clears_it_and_raises_the_mark`: three later runs each count `identity_shrunk` and stay degraded; after the ID is restored the run is OK, counts 0 and the mark holds at the restored count; `--storage-parity` exits 0.
+  - New `test_the_recorded_identity_count_is_a_high_water_mark` (unit): first check records the current count, a fall does not lower it (twice), a failed or uncounted check keeps it, equal keeps it, a higher count raises it.
+  - New `test_a_first_check_with_no_identity_count_to_record_records_none`.
+- Not covered: the fold actually being held back for several days by a persistent `identity_shrunk` is covered by the existing WR-05 gate tests plus this change (the check counts it every run); I did not add a multi-day end-to-end test.
+
+## Previous fix run (WR-01..WR-05)
+
+The report of the earlier `--fix` run, kept unchanged except where marked. Its WR-02 note about the lower count becoming the reference is superseded by WR-06 above.
+
+**Fixed at:** 2026-11-14 (earlier run)
+**Iteration:** 1 (earlier run)
 
 **Summary:**
 - Findings in scope: 5 (WR-01..WR-05; the six INFO findings were out of scope and stay open)
@@ -29,7 +69,7 @@ status: all_fixed
 - The runs happened in the isolated worktree `.claude/worktrees/rf-03-*`, using the main checkout's `.venv` interpreter. The worktree has no `.venv` of its own. The numbers can be reproduced from the main checkout once the branch is fast-forwarded.
 - SPEC.md and DECISIONS.md D-57 were updated in the same commit as each behavior change (AGENTS rule 1). None of the five fixes contradicts SPEC or DECISIONS. Each refines a documented behavior. STATUS.md has a dated note that the fixes are mocked and not deployed.
 
-## Fixed Issues
+**Earlier run, fixed issues:**
 
 ### WR-01: A fold that deleted rows but did not record `first_day` leaves the restore guard open
 
@@ -63,7 +103,7 @@ status: all_fixed
 - Tests: the pure `identity_shrunk` and `identity_unreadable` checks; end-to-end, a removed baseline-only ID (which no kept Events row could name) and an unreadable row, each counted on the next compact run; a missing Identity or Tally tab refused in Sheet and CSV with nothing created; restored mode still recreates.
 - Two existing assertions changed legitimately. Hand-removing a kept key's Identity entry is now also a shrunk Identity, so that scenario counts 2 differences (`identity_missing` and `identity_shrunk`), not 1.
 - Behavior to know:
-  - `identity_shrunk` is reported for the run that sees it, and the lower count then becomes the reference (I followed the reviewer's "compare against the previous value"). It does not stay flagged. A high-water mark would flag forever with no way to reset it.
+  - **Superseded by WR-06 (see above):** `identity_shrunk` was reported for the run that sees it, and the lower count then became the reference (I followed the reviewer's "compare against the previous value"). It does not stay flagged. A high-water mark would flag forever with no way to reset it.
   - The first compact check after deploy has no recorded count, so shrink detection starts from the second check.
   - With a missing tab in compact mode, every run now stops at `ensure()` until the tab is restored.
 
