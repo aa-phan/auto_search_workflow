@@ -99,6 +99,7 @@ The register was authored at plan time in the nine `<threat_model>` blocks (03-0
 | Audit Date | Threats Total | Closed | Open | Run By |
 |------------|---------------|--------|------|--------|
 | 2026-11-06 | 46 | 46 | 0 | gsd-security-auditor (L1; 487 offline tests re-run, mocked) |
+| 2026-11-14 | 46 | 46 | 0 | secure-phase short-circuit (L1, threats_open 0, register at plan time) after review fixes WR-01..WR-05; no new surface; full suite 931 offline tests OK (mocked) |
 
 ---
 
@@ -109,9 +110,17 @@ The register was authored at plan time in the nine `<threat_model>` blocks (03-0
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-11-06
+**Approval:** verified 2026-11-06; re-checked 2026-11-14 after WR-01..WR-05
 
 ## Security Audit 2026-11-06
+
+| Metric | Count |
+|---|---|
+| Threats found | 46 |
+| Closed | 46 |
+| Open | 0 |
+
+## Security Audit 2026-11-14
 
 | Metric | Count |
 |---|---|
