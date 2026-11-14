@@ -3,7 +3,7 @@ status: testing
 phase: 03-compact-storage
 source: [03-VERIFICATION.md]
 started: 2026-11-06T22:24:12Z
-updated: 2026-11-06T22:24:12Z
+updated: 2026-11-14T23:00:00Z
 ---
 
 ## Current Test
@@ -46,12 +46,17 @@ Fold batch size (research A5). Decide whether to accept A5 as mocked, or to conf
 expected: Either an explicit owner acceptance that A5 stays mocked, or a log of a fold with at least 500 ranges that did not raise. The four live folds used 94, 131, 88 and 106 ranges, all under 500, so a full-size batch has never been sent live.
 result: [pending]
 
+### 7. Deploy decision for the review fixes WR-01..WR-05
+Deploy decision for the review fixes WR-01..WR-05 (added by the 2026-11-14 re-verification). The commits are on branch gsd/phase-03-compact-storage only; production runs 68a7253 without them. Owner decides whether and when to push. After a deploy, read the first two compact poller runs and one --storage-parity run. Consider fixing WR-06 (Identity shrink reference ratchets down) before deploying the WR-02 change.
+expected: No 'storage write failed', 'storage parity:' or 'storage fold skipped' note; the first compact check records Identity entry counts (shrink detection starts from the second check); the next fold still runs. Until then every WR-01..WR-05 behaviour is mocked only.
+result: [pending]
+
 ## Summary
 
-total: 6
+total: 7
 passed: 0
 issues: 0
-pending: 6
+pending: 7
 skipped: 0
 blocked: 0
 
