@@ -210,8 +210,9 @@ def storage_check(
     ledger: compact.Ledger, now: datetime, storage: compact.StorageState, run: RunRecord, repaired: str = "", *,
     runs: list[RunRecord] | None = None, boards: dict[str, BoardRecord] | None = None, discovery: dict[str, str] | None = None,
     tracker_rows: Callable[[], list[dict[str, str]]] | None = None, tz: tzinfo = timezone.utc, mode: str = compact.MODE_DUAL,
-) -> None:  # fmt: skip
-    """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes.
+) -> int:  # fmt: skip
+    """Check the start-of-run snapshot (the previous runs' writes) and record the result in `storage` and in the run's notes. Returns the number
+    of counted differences (a check that raised counts 1): the fold of the same run reads it (WR-05).
 
     In dual mode Events stays authoritative and the check compares it with the compact stores (`parity.check_dual`); in compact mode Events
     holds only what a fold keeps, so the check is the integrity check `parity.check_compact` (Identity and Tally against the kept rows) and
@@ -252,7 +253,7 @@ def storage_check(
             "Storage: mode=compact, %d counted and %d declared differences, %d kept job keys and %d Tally runs compared, check took %.1f s%s",
             report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), report.seconds, repaired,
         )  # fmt: skip
-        return
+        return report.counted
     storage.record_check(
         now, counted=report.counted, declared=report.declared, admissions=run.boards_activated, failed=failed,
         diffs=report.named(compact.MAX_LISTED_DIFFS), compared=report.compared.get("seen_keys", 0), seconds=report.seconds,
@@ -265,6 +266,7 @@ def storage_check(
         storage.mode, report.counted, report.declared, report.compared.get("seen_keys", 0), report.compared.get("tally_groups", 0), today.get("runs", 0),
         bar.days_counted, compact.PARITY_DAYS, "yes" if bar.admission_seen else "no", report.seconds, repaired,
     )  # fmt: skip
+    return report.counted
 
 
 def storage_fold(
@@ -964,11 +966,12 @@ def run_cycle(d: Deps) -> RunRecord:
         write()
         # ---------------------------------------------------------------- 5. storage check (dual: parity with Events; compact: integrity of Identity and Tally)
         # After the alert stage, on the start-of-run snapshot: it checks the previous runs' writes and can never delay a poll or an alert.
+        check_counted: int | None = None  # the differences the check of THIS run counted; None when it did not run (the fold needs a clean check, WR-05)
         if not d.dry_run and mode in (compact.MODE_DUAL, compact.MODE_COMPACT) and seeded_before and not decision.note:
             if d.clock() >= t0 + STORAGE_CHECK_CUTOFF_S:
                 log.info("Storage: parity check skipped, the run clock passed %d min (not recorded)%s", STORAGE_CHECK_CUTOFF_S // 60, repair_text)
             else:
-                storage_check(ledger, now, storage, run, repair_text, runs=runs, boards=boards, discovery=discovery_state, tracker_rows=d.tracker_rows, tz=d.display_tz, mode=str(mode))
+                check_counted = storage_check(ledger, now, storage, run, repair_text, runs=runs, boards=boards, discovery=discovery_state, tracker_rows=d.tracker_rows, tz=d.display_tz, mode=str(mode))
                 discovery_state[compact.STORAGE_KEY] = storage.to_json()
                 try:
                     d.state.save_discovery_state(discovery_state, lg.stamp(now))
@@ -980,6 +983,12 @@ def run_cycle(d: Deps) -> RunRecord:
         if not d.dry_run and mode == compact.MODE_COMPACT and not decision.note and storage.fold_due(now):
             if d.clock() >= t0 + FOLD_CUTOFF_S:
                 log.info("Storage: fold skipped, the run clock passed %d min (it is tried again next run)", FOLD_CUTOFF_S // 60)
+            elif check_counted != 0:
+                # The fold deletes rows for good and trusts Identity and Tally; the check of this same snapshot just said they are inconsistent, or did
+                # not run. Nothing is recorded (`fold.last_day` stays unset), so the next run that finds the stores clean folds (WR-05).
+                if check_counted:
+                    run.notes += f"storage fold skipped: integrity check counted {check_counted} differences; "
+                log.warning("Storage: fold skipped, the integrity check %s (it is tried again next run)", f"counted {check_counted} differences" if check_counted else "did not run")
             elif storage_fold(ledger, now, storage, run, d.state, save_storage):
                 try:
                     save_storage()

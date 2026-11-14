@@ -975,36 +975,59 @@ class FoldTests(FoldCase):
         self.assertEqual(self.storage().fold["rows_total"], 4 - len(gone))
         self.assertEqual(parity.compare_figures(whole, figures()), [])
 
-    # -- durability: a row is deleted only when its ID is in Identity and its count is in Tally, both as read at run start
-    def test_a_row_whose_id_was_removed_from_identity_is_kept_and_counted_then_folded_the_next_day(self) -> None:
+    # -- durability: a row is deleted only when its ID is in Identity and its count is in Tally, both as read at run start (`FoldPlanTests` pins the
+    # per-key rule). Since WR-05 the integrity check of the same run comes first: it sees every one of these damages on the same snapshot, so the
+    # whole fold waits for a clean run instead of deleting around a damaged store.
+    def test_a_row_whose_id_was_removed_from_identity_stops_the_whole_fold_that_day_and_the_next_clean_run_folds_everything(self) -> None:
         self.edit_identity("f30")
         run = self.run_at(FOLD_DAY)
-        self.assertIn("greenhouse|acme|30", self.seen_keys())  # kept: the start-of-run Identity did not hold it
-        self.assertEqual(FOLDED - {"greenhouse|acme|30"}, FOLDED - self.seen_keys() - {"greenhouse|acme|30"})
-        self.assertIn("storage fold: 3 rows (1 kept: not durable yet); ", run.notes)
-        self.assertEqual((self.storage().fold["last_rows"], self.storage().fold["last_skipped"]), (3, 1))
-        self.assertEqual(self.w.state.load_ledger().identity.kind("greenhouse|acme|30"), "f")  # the run's repair put it back, so tomorrow it is durable
-        self.run_at(FOLD_DAY + timedelta(days=1))
-        self.assertNotIn("greenhouse|acme|30", self.seen_keys())
-        self.assertEqual(self.storage().fold["rows_total"], 3 + 4)  # day 1: three rows; day 2: job 30 and (the cut moved) jobs 11, 12 and 33
+        self.assertIn("storage fold skipped: integrity check counted 1 differences; ", run.notes)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(FOLDED & self.seen_keys(), FOLDED)  # nothing was deleted, not even the three rows that were durable
+        self.assertEqual(self.storage().fold, {})  # last_day unset: the next run tries again
+        self.assertEqual(self.w.state.load_ledger().identity.kind("greenhouse|acme|30"), "f")  # the repair at run start put the ID back
+        run = self.run_at(FOLD_DAY + timedelta(days=1))
+        self.assertNotIn("skipped", run.notes)
+        self.assertEqual(FOLDED & self.seen_keys(), set())
+        self.assertEqual(self.storage().fold["rows_total"], 4 + 3)  # job 30 and its three neighbours, plus jobs 11, 12 and 33 (the cut moved)
 
-    def test_a_row_whose_tally_group_was_removed_is_kept_and_counted_then_folded_the_next_day(self) -> None:
+    def test_a_row_whose_tally_group_was_removed_stops_the_fold_that_day_and_is_folded_the_next_clean_day(self) -> None:
         self.sh.sheets[stm.TALLY_TAB].values[:] = [r for r in self.sh.sheets[stm.TALLY_TAB].values if r[0] != "run-f2"]
         run = self.run_at(FOLD_DAY)
+        self.assertIn("storage fold skipped: integrity check counted 1 differences; ", run.notes)
+        self.assertEqual(self.deletes(), [])
         self.assertIn("greenhouse|acme|31", self.seen_keys())
-        self.assertIn("storage fold: 3 rows (1 kept: not durable yet); ", run.notes)
         self.run_at(FOLD_DAY + timedelta(days=1))  # the repair re-added the group at the start of the first run
         self.assertNotIn("greenhouse|acme|31", self.seen_keys())
 
-    def test_a_row_whose_tally_count_is_below_what_events_retains_is_kept_every_day(self) -> None:
+    def test_a_tally_count_below_what_events_retains_stops_the_fold_every_day_until_someone_repairs_it(self) -> None:
         def lower(row: list[str]) -> None:
             row[2], row[3] = "0", "{}"
 
         self.edit_tally("run-f1", lower)
         for day in range(2):
             run = self.run_at(FOLD_DAY + timedelta(days=day))
-            self.assertIn("greenhouse|acme|30", self.seen_keys())
-        self.assertEqual(self.storage().fold["last_skipped"], 1)
+            self.assertIn("storage fold skipped: integrity check counted 1 differences; ", run.notes)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(FOLDED & self.seen_keys(), FOLDED)
+        self.assertEqual(self.storage().fold, {})  # nothing irreversible happened, and nothing was recorded as folded
+
+    def test_a_check_that_raised_stops_the_fold_too(self) -> None:
+        with mock.patch.object(parity, "check_compact", side_effect=RuntimeError("boom")):
+            run = self.run_at(FOLD_DAY)
+        self.assertIn("storage fold skipped: integrity check counted 1 differences; ", run.notes)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.storage().fold, {})
+        run = self.run_at(FOLD_DAY)  # the same day, the check works again: the fold runs
+        self.assertEqual(run.outcome, stm.OUTCOME_OK, run.notes)
+        self.assertEqual(self.storage().fold["rows_total"], 4)
+
+    def test_declared_differences_do_not_stop_the_fold(self) -> None:
+        declared = parity.ParityReport([parity.Diff(1, "unkeyable", "greenhouse|acme|x", declared=True)], {}, 0.0)
+        with mock.patch.object(parity, "check_compact", return_value=declared):
+            run = self.run_at(FOLD_DAY)
+        self.assertNotIn("skipped", run.notes)
+        self.assertEqual(self.storage().fold["rows_total"], 4)
 
     # -- failures and deadlines
     def test_a_failed_fold_adds_the_note_degrades_the_run_leaves_last_day_unset_and_is_retried(self) -> None:
