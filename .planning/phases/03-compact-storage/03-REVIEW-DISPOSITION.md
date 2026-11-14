@@ -9,19 +9,19 @@ findings:
     title: "A fold that deleted rows but did not record `first_day` leaves the restore guard open (and under-counts `rows_total`)"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The compact integrity check cannot detect Identity loss, and `ensure()` quietly recreates a deleted Identity tab"
   - id: WR-03
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A Tally write failure in compact mode becomes a permanent undercount (AGENTS rule 4)"
   - id: WR-04
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "`write_identity` rewrites rows from its in-memory cache without checking the sheet"
   - id: WR-05
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
   - id: IN-01
     severity: info
@@ -47,9 +47,9 @@ findings:
     severity: info
     disposition: open
     title: "Read-only commands read three tabs sequentially without the lease"
-open: 11
+open: 7
 total: 11
-recorded: 2026-11-06T22:18:51.756Z
+recorded: 2026-11-14T20:19:49.259Z
 ---
 
 # Phase 03: Code Review Disposition
@@ -57,10 +57,10 @@ recorded: 2026-11-06T22:18:51.756Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| WR-04 | warning | open | - |
-| WR-05 | warning | open | - |
+| WR-02 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-03 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-04 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-05 | warning | fixed | 03-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
