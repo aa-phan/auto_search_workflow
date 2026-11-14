@@ -774,6 +774,31 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertEqual([(d.ref, d.detail, d.declared) for d in found], [("Identity", "24 vs 27", False)])  # numbers only
         self.assertEqual((shrunk(24), shrunk(20), shrunk(None)), ([], [], []))
 
+    def test_the_recorded_identity_count_is_a_high_water_mark(self) -> None:
+        """WR-06: `record_compact_check` never lowers `last_check.identity_entries`; a first check records the current count; a check that failed or
+        did not count Identity keeps the mark; a count at or above the mark raises it."""
+        storage = compact.StorageState(mode=compact.MODE_COMPACT)
+        self.assertIsNone(storage.last_identity_entries())
+        figures = {"counted": 0, "declared": 0}
+        storage.record_compact_check(NOW, identity_entries=100, **figures)  # no recorded count yet (first check after a deploy): the current count
+        self.assertEqual(storage.last_identity_entries(), 100)
+        storage.record_compact_check(NOW, identity_entries=80, **figures)  # a fall is not taken as the new reference
+        self.assertEqual(storage.last_identity_entries(), 100)
+        storage.record_compact_check(NOW, identity_entries=80, **figures)  # nor on the check after
+        self.assertEqual(storage.last_identity_entries(), 100)
+        storage.record_compact_check(NOW, identity_entries=None, **figures)  # failed or not counted: the mark stays
+        self.assertEqual(storage.last_identity_entries(), 100)
+        storage.record_compact_check(NOW, identity_entries=100, **figures)  # back to the mark
+        self.assertEqual(storage.last_identity_entries(), 100)
+        storage.record_compact_check(NOW, identity_entries=130, **figures)  # above it: the mark rises
+        self.assertEqual(storage.last_identity_entries(), 130)
+        self.assertEqual(storage.last_check["identity_entries"], 130)
+
+    def test_a_first_check_with_no_identity_count_to_record_records_none(self) -> None:
+        storage = compact.StorageState(mode=compact.MODE_COMPACT)
+        storage.record_compact_check(NOW, counted=0, declared=0, identity_entries=None)
+        self.assertNotIn("identity_entries", storage.last_check)
+
     def test_identity_rows_that_did_not_parse_are_counted_identity_unreadable(self) -> None:
         ledger = self.ledger()
         ledger.identity_unreadable = 2
@@ -879,7 +904,8 @@ class IntegrityTests(FoldCase):
         self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
 
     def test_an_id_that_only_identity_holds_and_was_removed_is_counted_identity_shrunk_on_the_next_run(self) -> None:
-        """WR-02: a baseline has no Events row, so no kept row can name it; the shrunk entry count is what sees the loss. It is reported once."""
+        """WR-02: a baseline has no Events row, so no kept row can name it; the shrunk entry count is what sees the loss. WR-06: the recorded count
+        is a high-water mark, so the lower count is never taken as the new reference."""
         self.next_run()  # records the entry count of a clean Identity
         recorded = self.storage().last_check["identity_entries"]
         self.edit_identity("b1")  # job 1 is a baseline: its ID lives in Identity only
@@ -887,8 +913,28 @@ class IntegrityTests(FoldCase):
         self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
         self.assertIn("storage parity: 1 differences (identity_shrunk 1); ", run.notes)
         self.assertEqual(self.storage().last_diffs, [f"identity_shrunk Identity ({recorded - 1} vs {recorded})"])
-        self.assertEqual(self.storage().last_check["identity_entries"], recorded - 1)
-        self.assertEqual(self.parity_command()[0], 0)  # the command compares with the last recorded figure: nothing new has been lost since
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)  # the mark is kept, not lowered to recorded - 1
+        self.assertEqual(self.parity_command()[0], 1)  # the command compares with the same mark: the loss is still there
+
+    def test_a_loss_nobody_repairs_is_counted_on_every_later_check_and_a_grown_count_clears_it_and_raises_the_mark(self) -> None:
+        """WR-06: Identity is append-only and nothing re-adds a baseline-only ID, so an unrepaired loss must not go quiet after one run."""
+        self.next_run()
+        recorded = self.storage().last_check["identity_entries"]
+        self.edit_identity("b1")
+        for _ in range(3):  # every later run counts it again, degrades and shows the same difference
+            run = self.next_run()
+            self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+            self.assertIn("storage parity: 1 differences (identity_shrunk 1); ", run.notes)
+            self.assertEqual(self.storage().last_diffs, [f"identity_shrunk Identity ({recorded - 1} vs {recorded})"])
+            self.assertEqual((self.storage().last_check["counted"], self.storage().last_check["identity_entries"]), (1, recorded))
+        row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")  # the repair: restore the ID in Identity
+        row[3], row[4] = str(int(row[3]) + 1), row[4] + ",b1"
+        clean = self.next_run()
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)
+        self.assertEqual(self.parity_command()[0], 0)
+
 
     def test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable(self) -> None:
         self.next_run()
