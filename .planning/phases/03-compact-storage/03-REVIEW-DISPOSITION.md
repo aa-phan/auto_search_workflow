@@ -89,8 +89,7 @@ findings:
     title: "The fold does not consult the integrity check the same run just ran"
 open: 12
 total: 21
-unparsed: 1
-recorded: 2026-11-15T20:14:00.692Z
+recorded: 2026-11-15T20:14:32.219Z
 ---
 
 # Phase 03: Code Review Disposition
