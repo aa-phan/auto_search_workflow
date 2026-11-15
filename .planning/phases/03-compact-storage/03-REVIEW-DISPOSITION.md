@@ -3,10 +3,10 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
-  - id: WR-07
+  - id: WR-08
     severity: warning
-    disposition: fixed
-    title: "The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`"
+    disposition: open
+    title: "A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)"
   - id: IN-01
     severity: info
     disposition: open
@@ -47,6 +47,18 @@ findings:
     severity: info
     disposition: open
     title: "The documented repair path has no tooling and the mark can be stuck high by a transient over-read"
+  - id: IN-11
+    severity: info
+    disposition: open
+    title: "The figure keeps the name \"entries\" but now counts distinct IDs, and is computed in two places"
+  - id: IN-12
+    severity: info
+    disposition: open
+    title: "The new unit test claims coverage it does not have and builds its fixture twice"
+  - id: WR-07
+    severity: warning
+    disposition: fixed
+    title: "The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`"
   - id: WR-06
     severity: warning
     disposition: fixed
@@ -71,16 +83,16 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 10
-total: 17
-recorded: 2026-11-15T06:11:54.152Z
+open: 13
+total: 20
+recorded: 2026-11-15T06:17:39.999Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-07 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-08 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -91,6 +103,9 @@ recorded: 2026-11-15T06:11:54.152Z
 | IN-08 | info | open | - |
 | IN-09 | info | open | - |
 | IN-10 | info | open | - |
+| IN-11 | info | open | - |
+| IN-12 | info | open | - |
+| WR-07 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-06 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-01 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-02 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
