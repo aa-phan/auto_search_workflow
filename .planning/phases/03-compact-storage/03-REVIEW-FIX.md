@@ -1,6 +1,6 @@
 ---
 phase: 03-compact-storage
-fixed_at: 2026-11-14T00:00:00Z
+fixed_at: 2026-11-15T00:00:00Z
 review_path: .planning/phases/03-compact-storage/03-REVIEW.md
 iteration: 1
 findings_in_scope: 1
@@ -11,24 +11,58 @@ status: all_fixed
 
 # Phase 3: Code Review Fix Report
 
-**Fixed at:** 2026-11-14
+**Fixed at:** 2026-11-15
 **Source review:** .planning/phases/03-compact-storage/03-REVIEW.md
-**Iteration:** 1 (this `--fix` run: WR-06 only; WR-01..WR-05 were fixed by the earlier run, kept below)
+**Iteration:** 1 (this `--fix` run: WR-07 only; WR-06 and WR-01..WR-05 were fixed by earlier runs and are kept below)
 
 **Summary:**
-- Findings in scope: 1 (WR-06; WR-01..WR-05 were already resolved and were not touched, the eight INFO findings IN-01..IN-08 were out of scope and stay open)
+- Findings in scope: 1 (WR-07; WR-01..WR-06 were already resolved and were not touched, the ten INFO findings IN-01..IN-10 were out of scope and stay open)
 - Fixed: 1
 - Skipped: 0
 
-**Deployment.** Commit e83d563 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
+**Deployment.** Commit 9fd3383 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
 
 **Verification.**
-- All checks are MOCKED (AGENTS rule 5): the Sheets fake in `tests/fake_sheets.py`, the CSV store and hand-built storage state. Nothing touched the real Sheet, Groq or Telegram.
-- The three new or changed tests fail on the pre-fix `compact.py` (stashed, run, restored) and pass after it.
-- `.venv/bin/python -m unittest discover -s tests` printed `Ran 934 tests ... OK` (931 before WR-06).
-- Where it ran: in the isolated worktree `.claude/worktrees/rf-03-*` with the main checkout's `.venv` interpreter, then the branch was fast-forwarded into the main checkout. Reproducible from the main checkout.
+- All checks are MOCKED (AGENTS rule 5): the Sheets fake in `tests/fake_sheets.py`, the CSV store and hand-built ledgers. Nothing touched the real Sheet, Groq or Telegram.
+- The two new tests fail on the pre-fix `compact.py` and `parity.py` (stashed, run, restored) and pass after them.
+- `.venv/bin/python -m unittest discover -s tests` printed `Ran 937 tests ... OK` (934 before WR-07).
+- Where it ran: in the main checkout (`/Users/aphan/auto_search_workflow`) on the branch, with the project `.venv` interpreter, so it is reproducible from the tree you are looking at. No worktree was created.
 
 ## Fixed Issues
+
+### WR-07: The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`
+
+**Files modified:** `compact.py`, `parity.py`, `tests/test_storage_parity.py`, `SPEC.md`, `DECISIONS.md`, `STATUS.md`
+**Commit:** 9fd3383
+**Status:** fixed: requires human verification (a logic change to what the check counts and records; tests cover the paths, but nobody has run it against a real Sheet)
+**Applied fix:**
+- Approach chosen by the orchestrator, the first of the reviewer's two options: the Identity count behind the WR-02/WR-06 mark and behind the `identity_shrunk` comparison is the number of distinct (stem, posting ID) pairs, the identity the dedupe uses (AGENTS rule 3), not the raw entry sum. The reviewer's alternative (skip the raise when the check was dirty) was not taken.
+- New `IdentitySet.distinct_count()` in `compact.py` counts the pairs from the set's own per-stem ID index (`_kinds`, built with `decode_entry`, so duplicates collapse). An entry with no posting ID after its kind letter counts for nothing. Rows that did not parse are not in the set (they are counted separately as `identity_unreadable`), and `decode_entry` never raises, so nothing can crash the count.
+- `parity._identity_invariants` now returns the distinct count (it feeds `compared["identity_entries"]`, and through it `record_compact_check`), and `parity._identity_loss` compares the distinct count with the recorded mark. The codec `Count` invariant (`identity_count`) is unchanged and still compares `Count` with the entries of its own row. The WR-06 high-water-mark code in `record_compact_check` is unchanged (never lowered automatically, no acknowledgement input, AGENTS rule 7).
+- Effect: a duplicate is counted `identity_duplicate` and does not raise the mark. Removing it, the correct repair, leaves the distinct count at the mark, so the next check counts 0.
+- Docs changed in the same commit (AGENTS rule 1): SPEC.md compact-mode integrity check paragraph, DECISIONS.md D-57 (the WR-02/WR-06 sentence), STATUS.md (a WR-07 row labelled **mocked**, not deployed; test count 937).
+- Deploy continuity: production (68a7253) has never written `last_check.identity_entries` (the key was added on this branch by WR-02), so no raw count is stored anywhere and the first compact check after a deploy records the distinct count. Because of that no migration code was added. If a raw figure higher than the distinct count had ever been recorded the mark would be stuck high, but that cannot happen in production. The parity report's `compared: identity_entries` figure now means distinct IDs; it equals the raw sum when there is no duplicate.
+- Tests (`tests/test_storage_parity.py`; no WR-06 test relied on raw counts, so none was adjusted):
+  - `IntegrityCheckTests.test_the_identity_count_is_distinct_posting_ids_so_a_duplicate_neither_raises_the_mark_nor_makes_its_removal_a_shrink`: a duplicate leaves `compared["identity_entries"]` at 24 while the raw sum is 25 and `identity_duplicate` is counted; the same ID in another stem counts separately; a bare kind letter counts nothing.
+  - `IntegrityCheckTests.test_removing_a_duplicate_is_not_counted_identity_shrunk_but_removing_a_distinct_id_is`.
+  - `IntegrityTests.test_a_duplicate_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk` (end to end, Sheets fake): record N, inject one duplicate (counted `identity_duplicate`, run degraded, mark stays N), remove it, the next run is OK with 0 counted and the mark still N, and `--storage-parity` exits 0.
+- Not covered: a multi-day run, and the pre-fix behaviour on a real Sheet.
+
+## Previous fix run (WR-06)
+
+The report of the earlier `--fix` run that fixed WR-06, kept unchanged. Its high-water-mark semantics stand; WR-07 above changes only which count the mark holds.
+
+**Fixed at:** 2026-11-14 (earlier run)
+**Iteration:** 1 (earlier run)
+
+**Summary:**
+- Findings in scope: 1 (WR-06)
+- Fixed: 1
+- Skipped: 0
+
+**Deployment.** Commit e83d563 is on the branch only; not pushed, no workflow dispatched.
+
+**Verification.** All checks MOCKED. `Ran 934 tests ... OK` (931 before WR-06). The three new or changed tests failed on the pre-fix `compact.py` and pass after it.
 
 ### WR-06: `identity_shrunk` is reported once, then the lowered count becomes the new reference
 
