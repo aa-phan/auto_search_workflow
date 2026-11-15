@@ -110,8 +110,8 @@ def _seen_set(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str
 
 def _identity_invariants(ident: compact.IdentitySet) -> tuple[list[Diff], int]:
     """The codec invariants of the Identity tab alone (no Events row involved): `Count` equals the entries, the cell fits, every stem has its
-    completion marker, no posting ID twice in a stem. Returns the differences and the number of DISTINCT (stem, posting ID) pairs (WR-07: the
-    figure behind `identity_shrunk`, so a duplicate neither raises the mark nor makes its own removal a shrink)."""
+    completion marker, no posting ID twice in a stem. Returns the differences and the number of DISTINCT (stem, posting ID) pairs of well-formed
+    entries (WR-07, WR-08: the figure behind `identity_shrunk`, so a duplicate or a malformed entry neither raises the mark nor makes its repair a shrink)."""
     out: list[Diff] = []
     for row in ident.all_rows():
         found = row.entries()
@@ -322,8 +322,7 @@ def _kept_in_identity(ledger: compact.Ledger, compared: dict[str, int]) -> list[
     out += found
     for row in ident.all_rows():  # an entry is a kind letter b, f or s plus an escaped ID that survives a decode and an encode
         for entry in row.entries():
-            kind, pid = compact.decode_entry(entry)
-            if kind not in compact.DISPOSITION_OF or not pid or compact.encode_entry(kind, pid) != entry:
+            if not compact.entry_well_formed(entry):
                 out.append(Diff(1, "identity_entry", f"{row.stem}#{row.chunk}"))
                 break
     compared["seen_keys"] = len(kept)
@@ -363,7 +362,7 @@ def _identity_loss(ledger: compact.Ledger, entries_before: int | None) -> list[D
     below the one the previous check recorded (`entries_before`, None when there is none); `identity_unreadable` is a number of rows that hold
     something but did not parse, whose IDs `seen()` therefore never sees. Numbers only."""
     out: list[Diff] = []
-    entries = ledger.identity.distinct_count()  # distinct (stem, posting ID) pairs, as `_identity_invariants` and the recorded mark count them (WR-07)
+    entries = ledger.identity.distinct_count()  # distinct well-formed (stem, posting ID) pairs, as `_identity_invariants` and the recorded mark count them (WR-07)
     if entries_before is not None and entries < entries_before:
         out.append(Diff(1, "identity_shrunk", "Identity", f"{entries} vs {entries_before}"))
     if ledger.identity_unreadable:

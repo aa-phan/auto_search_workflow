@@ -781,10 +781,23 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertIn("identity_duplicate", self.kinds(duplicated))
         self.assertEqual((clean.compared["identity_entries"], duplicated.compared["identity_entries"]), (24, 24))  # the duplicate adds nothing
         self.assertEqual(sum(len(r.entries()) for r in self.ledger(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1))).identity.all_rows()), 25)
-        # the same ID in another stem is another identity; a bare kind letter (no posting ID) and an unparsed entry count for nothing
+        # the same ID in another stem is another identity; a bare kind letter (no posting ID) counts for nothing
         other = compact.IdentitySet.from_rows([compact.IdentityRow("s1", 1, "t", 3, "bX,bX,b"), compact.IdentityRow("s2", 1, "t", 1, "bX")])
         self.assertEqual(other.distinct_count(), 2)
         self.assertEqual(compact.IdentitySet().distinct_count(), 0)
+
+    def test_a_malformed_entry_counts_for_nothing_and_the_count_and_the_identity_entry_check_use_one_test(self) -> None:
+        """WR-08: an entry with an unknown kind letter, or an escape that does not round-trip, is flagged `identity_entry` and is not a usable key, so it
+        is not counted. The figure and the check share `compact.entry_well_formed`."""
+        mixed = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 3, "bA,xB,b%2c")])  # one valid entry, an unknown kind letter, a non-canonical escape
+        self.assertEqual(mixed.distinct_count(), 1)
+        self.assertEqual([compact.entry_well_formed(e) for e in ("bA", "xB", "b%2c", "b%2C", "b", "", "fA%25")], [True, False, False, True, False, False, True])
+        repaired = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 4, "bA,xB,b%2c,b%2C")])  # the same ID written well formed as well: it is usable
+        self.assertEqual(repaired.distinct_count(), 2)
+        self.assertEqual(mixed.copy().distinct_count(), 1)
+        dirty = self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",xB,b%2c", count=r.count + 2)))
+        self.assertEqual(dirty.compared["identity_entries"], self.check().compared["identity_entries"])
+        self.assertEqual([d.kind for d in dirty.diffs if d.kind == "identity_entry"], ["identity_entry"])
 
     def test_removing_a_duplicate_is_not_counted_identity_shrunk_but_removing_a_distinct_id_is(self) -> None:
         def shrunk(rows: list[compact.IdentityRow], before: int) -> list[str]:
@@ -956,7 +969,6 @@ class IntegrityTests(FoldCase):
         self.assertEqual(self.storage().last_check["identity_entries"], recorded)
         self.assertEqual(self.parity_command()[0], 0)
 
-
     def test_a_duplicate_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk(self) -> None:
         """WR-07: record N distinct, inject one duplicate (counted `identity_duplicate`, the mark stays N), remove it: the next check counts 0."""
         self.next_run()
@@ -969,6 +981,26 @@ class IntegrityTests(FoldCase):
         self.assertIn("storage parity: 1 differences (identity_duplicate 1); ", run.notes)
         self.assertEqual(self.storage().last_check["identity_entries"], recorded)  # the duplicate did not raise the mark
         row[3], row[4] = original  # the repair of the flagged difference
+        clean = self.next_run()
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)
+        self.assertEqual(self.parity_command()[0], 0)
+
+    def test_a_malformed_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk(self) -> None:
+        """WR-08: record N, add malformed entries (an unknown kind letter `xB` and a non-round-tripping escape): counted `identity_entry`, the mark stays N;
+        remove them (the repair of the flagged difference): the next check counts 0 and `--storage-parity` exits 0."""
+        self.next_run()
+        recorded = self.storage().last_check["identity_entries"]
+        row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
+        original = (row[3], row[4])
+        row[3], row[4] = str(int(row[3]) + 2), row[4] + ",xB,b%2c"
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage parity: 1 differences (identity_entry 1); ", run.notes)
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)  # the malformed entries did not raise the mark
+        self.assertEqual(self.parity_command()[0], 1)
+        row[3], row[4] = original  # the repair
         clean = self.next_run()
         self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
         self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
