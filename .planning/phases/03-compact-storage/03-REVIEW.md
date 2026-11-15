@@ -13,8 +13,8 @@ files_reviewed_list:
 findings:
   critical: 0
   warning: 1
-  info: 12
-  total: 13
+  info: 11
+  total: 12
 status: issues_found
 ---
 
