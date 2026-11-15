@@ -13,21 +13,52 @@ status: all_fixed
 
 **Fixed at:** 2026-11-15
 **Source review:** .planning/phases/03-compact-storage/03-REVIEW.md
-**Iteration:** 1 (this `--fix` run: WR-08 only; WR-07, WR-06 and WR-01..WR-05 were fixed by earlier runs and are kept below)
+**Iteration:** 1 (this `--fix` run: WR-09 only; WR-08, WR-07, WR-06 and WR-01..WR-05 were fixed by earlier runs and are kept below)
 
 **Summary:**
-- Findings in scope: 1 (WR-08; WR-01..WR-07 were already resolved and were not touched, the twelve INFO findings IN-01..IN-12 were out of scope and stay open, except as noted under WR-08)
+- Findings in scope: 1 (WR-09; WR-01..WR-08 were already resolved and were not touched, the eleven INFO findings IN-01..IN-11 were out of scope and stay open, except IN-11 as noted under WR-09)
 - Fixed: 1
 - Skipped: 0
 
-**Deployment.** Commit c845065 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
+**Deployment.** The WR-09 commit (e86993e) is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
 
 **Verification.**
 - All checks are MOCKED (AGENTS rule 5): the Sheets fake in `tests/fake_sheets.py`, the CSV store and hand-built ledgers. Nothing touched the real Sheet, Groq or Telegram.
-- `.venv/bin/python -m unittest discover -s tests` printed `Ran 939 tests ... OK` (937 before WR-08).
+- `.venv/bin/python -m unittest discover -s tests` printed `Ran 942 tests ... OK` (939 before WR-09).
+- The new and changed WR-09 tests were run against the pre-fix `compact.py` and `parity.py` (stashed) and 6 of them failed, then all pass after the fix.
 - Where it ran: in the main checkout (`/Users/aphan/auto_search_workflow`) on the branch, with the project `.venv` interpreter, so it is reproducible from the tree you are looking at. No worktree was created (orchestrator instruction).
 
 ## Fixed Issues
+
+### WR-09: The count excludes malformed entries that the dedupe still uses, so deleting one loses a held posting ID with no `identity_shrunk`
+
+**Files modified:** `compact.py`, `parity.py`, `tests/test_storage_parity.py`, `SPEC.md`, `DECISIONS.md`, `STATUS.md`
+**Commit:** e86993e
+**Status:** fixed: requires human verification (a logic change to what the check counts and records; tests cover the paths, but nobody has run it against a real Sheet)
+**Applied fix:**
+- Approach chosen by the orchestrator, a variant of the reviewer's second option: the figure behind the WR-06 mark (`compared["identity_entries"]`, `record_compact_check`) and the `identity_shrunk` comparison is exactly the set the dedupe holds, `len(IdentitySet.keys())` (the keys the seen set, `retained_events`, `repair_plan` and `plan_additions` use; AGENTS rule 3). `IdentitySet.distinct_count()` is the one place it is computed (`__len__` delegates to it). The claim "the count is the identity the dedupe uses" is now true by construction.
+- WR-08's per-stem `_valid` record is removed from `_reindex` and `copy()`. `compact.entry_well_formed` stays, and `identity_entry` flagging in `parity._kept_in_identity` is unchanged.
+- IN-11, single-source part: `parity._identity_loss` now takes the figure that `_identity_invariants` already returned (via `compared["identity_entries"]`) instead of calling `distinct_count()` again. The persisted key name `identity_entries` is left alone (a Discovery-state contract); the "entries" naming part of IN-11 stays open.
+- Consequences, documented in SPEC, D-57, STATUS and the docstrings: a duplicate never inflates the figure (a set); rewriting an entry's kind letter or escape without changing the held key is not a shrink (`identity_entry` is counted instead); deleting any entry whose key the dedupe holds IS counted `identity_shrunk`, a malformed entry included, so the documented repair for a flagged malformed entry is to REWRITE it to canonical form, not to delete it. A malformed entry with a new ID now raises the mark by one, like any held ID. A bare kind letter with no posting ID holds the empty key `stem|` in the dedupe and therefore counts (it counted nothing under WR-07 and WR-08).
+- Unchanged by decision: the high-water mark, the codec `Count` check and no acknowledgement input (AGENTS rule 7). No migration: production has never stored the figure.
+- Docs changed in the same commit (AGENTS rule 1): SPEC.md integrity-check paragraph, DECISIONS.md D-57 (WR-08 text marked superseded, WR-09 text added, the bare-kind-letter sentence corrected), STATUS.md (a WR-09 row labelled **mocked**, not deployed; WR-08 row marked superseded; test count 942; the repair is "rewrite, do not delete").
+- Tests (`tests/test_storage_parity.py`):
+  - New unit test `test_the_identity_count_is_exactly_the_set_of_keys_the_dedupe_holds_malformed_entries_included`: a set holding only `xB` has figure 1; `bA,xB,b%2c` has figure 3 equal to `len(keys())`; `copy()` keeps it; injecting `xB` and `b%2c` into the fixture raises the figure by 2 and is counted `identity_entry`.
+  - New unit test `test_deleting_a_malformed_entry_whose_id_the_dedupe_holds_is_counted_identity_shrunk` (WR-09 repro (a), previously silent).
+  - New unit test `test_rewriting_an_entry_without_changing_its_key_is_not_a_shrink` (case (b): `b3` damaged to `x3` counts `identity_entry` and no `identity_shrunk`; a non-canonical escape rewritten canonical is a 0-difference change).
+  - Case (c), duplicate added then removed is 0 shrink, is covered by the unchanged WR-07 tests.
+  - New end-to-end test `test_deleting_a_malformed_identity_entry_is_a_counted_identity_shrunk_not_a_repair` (Sheets fake): record N, add `xB` (mark N+1), delete it, the run counts `identity_shrunk (N vs N+1)` and `--storage-parity` exits 1.
+  - Adjusted WR-07 and WR-08 tests. The WR-08 unit test is replaced by the first new test above. The WR-08 end-to-end test (`test_a_malformed_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk`) asserted that adding malformed entries leaves the mark at N and that deleting them is clean. That path is now a counted shrink by design, so the test is renamed `test_a_malformed_identity_entry_is_counted_and_its_rewrite_to_canonical_form_clears_it`: the mark rises by 2, and the repair is a rewrite of the same two IDs to canonical form (case (d)), after which the next run counts 0 and `--storage-parity` exits 0. The WR-07 unit test's bare-kind-letter assertion changed from 2 to 3 (the `s1|` empty key now counts).
+- Not covered: a real Sheet, a multi-day run, and a repair tool (IN-10 stays open: rewriting a codec cell by hand is still error-prone).
+
+## Previous fix run (WR-08)
+
+The report of the earlier `--fix` run that fixed WR-08, kept for the record. WR-09 above supersedes its choice to count only well-formed entries (`_valid` is removed; `entry_well_formed` and the `identity_entry` flag stand). Its commit and test count (c845065, 939 tests) were true for that run.
+
+**Fixed at:** 2026-11-15 (earlier run)
+**Iteration:** 1 (earlier run)
+
+**Summary:** 1 in scope (WR-08), 1 fixed, 0 skipped. Commit c845065 on the branch only; all checks MOCKED; `Ran 939 tests ... OK` (937 before WR-08).
 
 ### WR-08: A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)
 
