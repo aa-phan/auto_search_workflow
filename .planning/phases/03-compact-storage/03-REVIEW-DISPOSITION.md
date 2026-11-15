@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-08
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)"
   - id: IN-01
     severity: info
@@ -83,16 +83,16 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 13
+open: 12
 total: 20
-recorded: 2026-11-15T06:17:39.999Z
+recorded: 2026-11-15T07:10:17.741Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-08 | warning | open | - |
+| WR-08 | warning | fixed | 03-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
