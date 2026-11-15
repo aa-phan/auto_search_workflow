@@ -53,7 +53,7 @@ findings:
     title: "The figure keeps the name \"entries\" but now counts distinct IDs, and is computed in two places"
   - id: IN-12
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The new unit test claims coverage it does not have and builds its fixture twice"
   - id: WR-07
     severity: warning
@@ -83,7 +83,7 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 12
+open: 11
 total: 20
 recorded: 2026-11-15T07:10:17.741Z
 ---
@@ -104,7 +104,7 @@ recorded: 2026-11-15T07:10:17.741Z
 | IN-09 | info | open | - |
 | IN-10 | info | open | - |
 | IN-11 | info | open | - |
-| IN-12 | info | open | - |
+| IN-12 | info | fixed | c845065 (WR-08 fix: test comment corrected, stray blank line removed) |
 | WR-07 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-06 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-01 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
