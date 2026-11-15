@@ -3,7 +3,7 @@ status: testing
 phase: 03-compact-storage
 source: [03-VERIFICATION.md]
 started: 2026-11-06T22:24:12Z
-updated: 2026-11-14T23:00:00Z
+updated: 2026-11-15T07:00:00Z
 ---
 
 ## Current Test
@@ -46,9 +46,9 @@ Fold batch size (research A5). Decide whether to accept A5 as mocked, or to conf
 expected: Either an explicit owner acceptance that A5 stays mocked, or a log of a fold with at least 500 ranges that did not raise. The four live folds used 94, 131, 88 and 106 ranges, all under 500, so a full-size batch has never been sent live.
 result: [pending]
 
-### 7. Deploy decision for the review fixes WR-01..WR-06
-Deploy decision for the review fixes WR-01..WR-06 (added by the 2026-11-14 re-verification). The commits are on branch gsd/phase-03-compact-storage only; production runs 68a7253 without them. Owner decides whether and when to push. After a deploy, read the first two compact poller runs and one --storage-parity run. WR-06 (Identity count high-water mark) is fixed on the branch; consider fixing WR-07 (removing a duplicate Identity entry after the mark was raised leaves a permanent identity_shrunk) before deploying the WR-02/WR-06 change.
-expected: No 'storage write failed', 'storage parity:' or 'storage fold skipped' note; the first compact check records Identity entry counts (shrink detection starts from the second check); the next fold still runs. Until then every WR-01..WR-06 behaviour is mocked only.
+### 7. Deploy decision for the review fixes WR-01..WR-07
+Deploy decision for the review fixes WR-01..WR-07 (added by the 2026-11-14 re-verification). The commits are on branch gsd/phase-03-compact-storage only; production runs 68a7253 without them. Owner decides whether and when to push. After a deploy, read the first two compact poller runs and one --storage-parity run. WR-06 (Identity count high-water mark) and WR-07 (distinct IDs for the mark) are fixed on the branch; consider fixing WR-08 (a malformed Identity entry still raises the mark, so removing it leaves a permanent identity_shrunk) before deploying the WR-02/WR-06/WR-07 change.
+expected: No 'storage write failed', 'storage parity:' or 'storage fold skipped' note; the first compact check records Identity entry counts (shrink detection starts from the second check); the next fold still runs. Until then every WR-01..WR-07 behaviour is mocked only.
 result: [pending]
 
 ## Summary
