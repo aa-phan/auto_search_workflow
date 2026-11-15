@@ -13,22 +13,46 @@ status: all_fixed
 
 **Fixed at:** 2026-11-15
 **Source review:** .planning/phases/03-compact-storage/03-REVIEW.md
-**Iteration:** 1 (this `--fix` run: WR-07 only; WR-06 and WR-01..WR-05 were fixed by earlier runs and are kept below)
+**Iteration:** 1 (this `--fix` run: WR-08 only; WR-07, WR-06 and WR-01..WR-05 were fixed by earlier runs and are kept below)
 
 **Summary:**
-- Findings in scope: 1 (WR-07; WR-01..WR-06 were already resolved and were not touched, the ten INFO findings IN-01..IN-10 were out of scope and stay open)
+- Findings in scope: 1 (WR-08; WR-01..WR-07 were already resolved and were not touched, the twelve INFO findings IN-01..IN-12 were out of scope and stay open, except as noted under WR-08)
 - Fixed: 1
 - Skipped: 0
 
-**Deployment.** Commit 9fd3383 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
+**Deployment.** Commit c845065 is on the branch `gsd/phase-03-compact-storage` only. Nothing was pushed and no GitHub workflow was dispatched. Production does not have it until the owner consents to a deploy.
 
 **Verification.**
 - All checks are MOCKED (AGENTS rule 5): the Sheets fake in `tests/fake_sheets.py`, the CSV store and hand-built ledgers. Nothing touched the real Sheet, Groq or Telegram.
-- The two new tests fail on the pre-fix `compact.py` and `parity.py` (stashed, run, restored) and pass after them.
-- `.venv/bin/python -m unittest discover -s tests` printed `Ran 937 tests ... OK` (934 before WR-07).
-- Where it ran: in the main checkout (`/Users/aphan/auto_search_workflow`) on the branch, with the project `.venv` interpreter, so it is reproducible from the tree you are looking at. No worktree was created.
+- `.venv/bin/python -m unittest discover -s tests` printed `Ran 939 tests ... OK` (937 before WR-08).
+- Where it ran: in the main checkout (`/Users/aphan/auto_search_workflow`) on the branch, with the project `.venv` interpreter, so it is reproducible from the tree you are looking at. No worktree was created (orchestrator instruction).
 
 ## Fixed Issues
+
+### WR-08: A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)
+
+**Files modified:** `compact.py`, `parity.py`, `tests/test_storage_parity.py`, `SPEC.md`, `DECISIONS.md`, `STATUS.md`
+**Commit:** c845065
+**Status:** fixed: requires human verification (a logic change to what the check counts and records; tests cover the paths, but nobody has run it against a real Sheet)
+**Applied fix:**
+- The predicate `check_compact` used for `identity_entry` (known kind letter, non-empty posting ID, `encode_entry(decode_entry(e)) == e`) is factored into `compact.entry_well_formed(entry)`. `parity._kept_in_identity` now calls it, so the flagged difference is unchanged, and `IdentitySet` uses the same function, so the count and the check cannot disagree.
+- `IdentitySet._reindex` additionally builds `_valid` (stem -> posting IDs with at least one well-formed entry); `copy()` carries it. `distinct_count()` returns the size of those sets. `_kinds`, `keys()`, `kind()`, `__len__` and `plan_additions` are untouched, so dedupe and planning behave as before. A posting ID counts once if any one of its entries is well-formed (for example `b%2c` plus a later canonical `b%2C`).
+- Unchanged by decision: the WR-06 high-water mark in `record_compact_check`, the codec `Count` invariant, no acknowledgement input (AGENTS rule 7). No migration: production has never stored `last_check.identity_entries`.
+- Docs changed in the same commit (AGENTS rule 1): SPEC.md integrity-check paragraph, DECISIONS.md D-57, STATUS.md (a WR-08 row labelled **mocked**, not deployed; test count 939).
+- Tests (`tests/test_storage_parity.py`):
+  - New unit test: `bA,xB,b%2c` counts 1; `entry_well_formed` on valid and malformed examples; a canonical twin of a malformed escape makes the ID count; `copy()` keeps the count; a ledger with `xB` and `b%2c` injected leaves `compared["identity_entries"]` unchanged and is counted `identity_entry`.
+  - New end-to-end test (Sheets fake): record N, inject `xB` and `b%2c` (counted `identity_entry`, run degraded, mark stays N, `--storage-parity` exits 1), remove them (next run OK, 0 counted, mark N, `--storage-parity` exits 0).
+  - The WR-07 unit test comment that claimed an "unparsed entry" case it did not have is corrected (IN-12 resolved); the stray double blank line in `IntegrityTests` is removed. IN-11 is only partly addressed (the `last_identity_entries` docstring and `_identity_invariants` / `_identity_loss` wording now say well-formed distinct IDs); `_identity_loss` still calls `distinct_count()` itself, so IN-11's single-source point stays open.
+- Not covered: a real Sheet, and a multi-day run.
+
+## Previous fix run (WR-07)
+
+The report of the earlier `--fix` run that fixed WR-07, kept unchanged. WR-08 above narrows which entries `distinct_count()` counts; its distinct-pair key and the high-water mark stand.
+
+**Fixed at:** 2026-11-15 (earlier run)
+**Iteration:** 1 (earlier run)
+
+**Summary:** 1 in scope (WR-07), 1 fixed, 0 skipped. Commit 9fd3383 on the branch only; all checks MOCKED; `Ran 937 tests ... OK` (934 before WR-07).
 
 ### WR-07: The high-water mark counts duplicate Identity entries, so repairing `identity_duplicate` becomes a permanent `identity_shrunk`
 
