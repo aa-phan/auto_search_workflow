@@ -214,6 +214,12 @@ class IdentitySet:
     def __len__(self) -> int:
         return sum(len(k) for k in self._kinds.values())
 
+    def distinct_count(self) -> int:
+        """The number of distinct (stem, posting ID) pairs: the identity the dedupe uses (AGENTS rule 3). A posting ID written twice in a stem counts
+        once, and an entry with no posting ID after its kind letter counts not at all. This, not the raw entry sum, is the figure behind
+        `identity_shrunk` (WR-07): a duplicate never raises the mark, and removing one is never a shrink."""
+        return sum(1 for kinds in self._kinds.values() for pid in kinds if pid)
+
     def plan_additions(self, additions: dict[str, list[str]], stamp: str) -> list[IdentityRow]:
         """The chunk rows that change when these entries (already encoded) are added. IDs already present for the stem are
         skipped, so planning the same additions twice adds nothing. The stem's highest chunk is extended while its cell stays
@@ -745,8 +751,9 @@ class StorageState:
         identity_entries: int | None = None,
     ) -> None:  # fmt: skip
         """Record a compact-mode integrity check: `last_check` and `last_diffs` only. The parity bar and its clock belong to dual writing; after the
-        cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was. `identity_entries` (WR-02) is the number of Identity
-        entries this check saw; Identity is append-only, so the next check counts a smaller number as `identity_shrunk`. The recorded figure is a
+        cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was. `identity_entries` (WR-02) is the number of distinct
+        (stem, posting ID) pairs this check saw (`IdentitySet.distinct_count`, WR-07, not the raw entry sum, so a duplicate never raises it); Identity
+        is append-only, so the next check counts a smaller number as `identity_shrunk`. The recorded figure is a
         high-water mark (WR-06): a lower count never replaces it, so a loss nobody repairs is counted on every check, not once, and a count that
         grows back to or above the mark raises it. A check that failed or did not count Identity keeps the previous figure."""
         previous = self.last_identity_entries()

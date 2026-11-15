@@ -774,6 +774,27 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertEqual([(d.ref, d.detail, d.declared) for d in found], [("Identity", "24 vs 27", False)])  # numbers only
         self.assertEqual((shrunk(24), shrunk(20), shrunk(None)), ([], [], []))
 
+    def test_the_identity_count_is_distinct_posting_ids_so_a_duplicate_neither_raises_the_mark_nor_makes_its_removal_a_shrink(self) -> None:
+        """WR-07: the figure behind `identity_shrunk` counts distinct (stem, posting ID) pairs, as the dedupe does, not raw entries."""
+        clean = self.check()
+        duplicated = self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1)))
+        self.assertIn("identity_duplicate", self.kinds(duplicated))
+        self.assertEqual((clean.compared["identity_entries"], duplicated.compared["identity_entries"]), (24, 24))  # the duplicate adds nothing
+        self.assertEqual(sum(len(r.entries()) for r in self.ledger(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1))).identity.all_rows()), 25)
+        # the same ID in another stem is another identity; a bare kind letter (no posting ID) and an unparsed entry count for nothing
+        other = compact.IdentitySet.from_rows([compact.IdentityRow("s1", 1, "t", 3, "bX,bX,b"), compact.IdentityRow("s2", 1, "t", 1, "bX")])
+        self.assertEqual(other.distinct_count(), 2)
+        self.assertEqual(compact.IdentitySet().distinct_count(), 0)
+
+    def test_removing_a_duplicate_is_not_counted_identity_shrunk_but_removing_a_distinct_id_is(self) -> None:
+        def shrunk(rows: list[compact.IdentityRow], before: int) -> list[str]:
+            return [d.text() for d in parity.check_compact(self.ledger(rows=rows), now=NOW, identity_entries_before=before).diffs if d.kind == "identity_shrunk"]
+
+        mark = self.check().compared["identity_entries"]
+        self.assertEqual(shrunk(self.w.rows, mark), [])  # the duplicate removed: back to the distinct count the mark holds
+        gone = self.entry_row("b3", lambda r: replace(r, ids=",".join(e for e in r.entries() if e != "b3"), count=len(r.entries()) - 1))
+        self.assertEqual(len(shrunk(gone, mark)), 1)
+
     def test_the_recorded_identity_count_is_a_high_water_mark(self) -> None:
         """WR-06: `record_compact_check` never lowers `last_check.identity_entries`; a first check records the current count; a check that failed or
         did not count Identity keeps the mark; a count at or above the mark raises it."""
@@ -935,6 +956,24 @@ class IntegrityTests(FoldCase):
         self.assertEqual(self.storage().last_check["identity_entries"], recorded)
         self.assertEqual(self.parity_command()[0], 0)
 
+
+    def test_a_duplicate_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk(self) -> None:
+        """WR-07: record N distinct, inject one duplicate (counted `identity_duplicate`, the mark stays N), remove it: the next check counts 0."""
+        self.next_run()
+        recorded = self.storage().last_check["identity_entries"]
+        row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
+        original = (row[3], row[4])
+        row[3], row[4] = str(int(row[3]) + 1), row[4] + ",f33"  # a posting ID written twice in one stem: 101 entries for 100 IDs, in the issue's terms
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage parity: 1 differences (identity_duplicate 1); ", run.notes)
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)  # the duplicate did not raise the mark
+        row[3], row[4] = original  # the repair of the flagged difference
+        clean = self.next_run()
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded)
+        self.assertEqual(self.parity_command()[0], 0)
 
     def test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable(self) -> None:
         self.next_run()

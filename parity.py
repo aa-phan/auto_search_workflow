@@ -110,12 +110,11 @@ def _seen_set(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str
 
 def _identity_invariants(ident: compact.IdentitySet) -> tuple[list[Diff], int]:
     """The codec invariants of the Identity tab alone (no Events row involved): `Count` equals the entries, the cell fits, every stem has its
-    completion marker, no posting ID twice in a stem. Returns the differences and the number of entries."""
+    completion marker, no posting ID twice in a stem. Returns the differences and the number of DISTINCT (stem, posting ID) pairs (WR-07: the
+    figure behind `identity_shrunk`, so a duplicate neither raises the mark nor makes its own removal a shrink)."""
     out: list[Diff] = []
-    entries = 0
     for row in ident.all_rows():
         found = row.entries()
-        entries += len(found)
         if row.count != len(found):
             out.append(Diff(1, "identity_count", f"{row.stem}#{row.chunk}", f"{row.count} vs {len(found)}"))
         if len(row.ids) > compact.IDENTITY_CELL_CHARS:
@@ -125,7 +124,7 @@ def _identity_invariants(ident: compact.IdentitySet) -> tuple[list[Diff], int]:
             out.append(Diff(1, "identity_marker", stem))
         ids = Counter(compact.decode_entry(e)[1] for row in ident.rows(stem) for e in row.entries())
         out += [Diff(1, "identity_duplicate", f"{stem}|{pid}", f"{n} entries") for pid, n in sorted(ids.items()) if n > 1]
-    return out, entries
+    return out, ident.distinct_count()
 
 
 def _tally(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str, int]) -> list[Diff]:
@@ -360,11 +359,11 @@ def _summary_checks(ledger: compact.Ledger, now: datetime, tz: tzinfo, runs: lis
 
 
 def _identity_loss(ledger: compact.Ledger, entries_before: int | None) -> list[Diff]:
-    """Compact layer 1, the part Events cannot see (WR-02): Identity is append-only, so its entry count never falls. `identity_shrunk` is a count
+    """Compact layer 1, the part Events cannot see (WR-02): Identity is append-only, so its count of distinct posting IDs never falls. `identity_shrunk` is a count
     below the one the previous check recorded (`entries_before`, None when there is none); `identity_unreadable` is a number of rows that hold
     something but did not parse, whose IDs `seen()` therefore never sees. Numbers only."""
     out: list[Diff] = []
-    entries = sum(len(r.entries()) for r in ledger.identity.all_rows())
+    entries = ledger.identity.distinct_count()  # distinct (stem, posting ID) pairs, as `_identity_invariants` and the recorded mark count them (WR-07)
     if entries_before is not None and entries < entries_before:
         out.append(Diff(1, "identity_shrunk", "Identity", f"{entries} vs {entries_before}"))
     if ledger.identity_unreadable:
