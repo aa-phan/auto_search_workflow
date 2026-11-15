@@ -68,8 +68,9 @@ def decode_entry(entry: str) -> tuple[str, str]:
 
 
 def entry_well_formed(entry: str) -> bool:
-    """Is this stored Identity entry usable as a key (WR-08)? A known kind letter, a non-empty posting ID, and an escape that survives a decode and an
-    encode. The one test behind both the `identity_entry` difference of `parity.check_compact` and `IdentitySet.distinct_count`, so the two never disagree."""
+    """Is this stored Identity entry in canonical form (WR-08)? A known kind letter, a non-empty posting ID, and an escape that survives a decode and an
+    encode. The test behind the `identity_entry` difference of `parity.check_compact`; it flags an entry, it does not decide what the dedupe holds
+    (`IdentitySet.keys` holds the posting ID of every entry, malformed or not, WR-09)."""
     kind, pid = decode_entry(entry)
     return kind in DISPOSITION_OF and bool(pid) and encode_entry(kind, pid) == entry
 
@@ -170,7 +171,6 @@ class IdentitySet:
     def __init__(self) -> None:
         self._rows: dict[str, list[IdentityRow]] = {}
         self._kinds: dict[str, dict[str, str]] = {}
-        self._valid: dict[str, set[str]] = {}  # stem -> posting IDs with at least one well-formed entry (WR-08)
 
     @classmethod
     def from_rows(cls, rows: Iterable[IdentityRow]) -> "IdentitySet":
@@ -185,22 +185,17 @@ class IdentitySet:
         rows = sorted(self._rows[stem], key=lambda r: (r.chunk, r.row_no))
         self._rows[stem] = rows
         kinds: dict[str, str] = {}
-        valid: set[str] = set()
         for r in rows:
             for entry in r.entries():
                 kind, pid = decode_entry(entry)
                 kinds.setdefault(pid, kind)
-                if entry_well_formed(entry):
-                    valid.add(pid)
         self._kinds[stem] = kinds
-        self._valid[stem] = valid
 
     def copy(self) -> "IdentitySet":
         """An independent snapshot (rows are immutable, so lists and dicts are copied, not the rows)."""
         out = IdentitySet()
         out._rows = {stem: list(rows) for stem, rows in self._rows.items()}
         out._kinds = {stem: dict(kinds) for stem, kinds in self._kinds.items()}
-        out._valid = {stem: set(valid) for stem, valid in self._valid.items()}
         return out
 
     def stems(self) -> list[str]:
@@ -225,14 +220,16 @@ class IdentitySet:
         return self._kinds.get(split[0], {}).get(split[1]) if split else None
 
     def __len__(self) -> int:
-        return sum(len(k) for k in self._kinds.values())
+        return self.distinct_count()
 
     def distinct_count(self) -> int:
-        """The number of distinct (stem, posting ID) pairs held by at least one WELL-FORMED entry (`entry_well_formed`): the identity the dedupe can
-        use (AGENTS rule 3). A posting ID written twice in a stem counts once; an entry `check_compact` flags as `identity_entry` (unknown kind letter,
-        no posting ID, an escape that does not round-trip) counts for nothing. This, not the raw entry sum, is the figure behind `identity_shrunk`
-        (WR-07, WR-08): a duplicate or a malformed entry never raises the mark, and repairing either is never a shrink."""
-        return sum(len(valid) for valid in self._valid.values())
+        """The number of distinct (stem, posting ID) keys the dedupe holds: exactly `len(self.keys())` (WR-09), the identity of AGENTS rule 3. THE one
+        place the figure is computed: the high-water mark (`StorageState.record_compact_check`), the `identity_shrunk` comparison and the `compared`
+        figure all read it, so the check and the dedupe agree by construction. Consequences: a posting ID written twice in a stem counts once
+        (WR-07); rewriting an entry's kind letter or escape without changing its posting ID changes nothing; deleting any entry whose posting ID no
+        other entry of the stem holds lowers it, malformed or not, so the repair of an `identity_entry` is to rewrite the entry to its canonical form,
+        never to delete it."""
+        return sum(len(kinds) for kinds in self._kinds.values())
 
     def plan_additions(self, additions: dict[str, list[str]], stamp: str) -> list[IdentityRow]:
         """The chunk rows that change when these entries (already encoded) are added. IDs already present for the stem are
@@ -757,7 +754,7 @@ class StorageState:
             self.bar_met_at = lg.stamp(now.astimezone(timezone.utc))
 
     def last_identity_entries(self) -> int | None:
-        """The distinct well-formed Identity ID count the last compact check recorded (None before the first one: nothing to compare with)."""
+        """The highest distinct Identity key count (`IdentitySet.distinct_count`) any compact check recorded (None before the first one: nothing to compare with)."""
         return _int(self.last_check.get("identity_entries"))
 
     def record_compact_check(
@@ -766,8 +763,8 @@ class StorageState:
     ) -> None:  # fmt: skip
         """Record a compact-mode integrity check: `last_check` and `last_diffs` only. The parity bar and its clock belong to dual writing; after the
         cutover nothing reads them, so no day entry is written and `bar_met_at` stays as it was. `identity_entries` (WR-02) is the number of distinct
-        (stem, posting ID) pairs of well-formed entries this check saw (`IdentitySet.distinct_count`, WR-07/WR-08, not the raw entry sum, so a duplicate or a
-        malformed entry never raises it); Identity
+        (stem, posting ID) keys the dedupe holds in this check's Identity (`IdentitySet.distinct_count`, WR-07/WR-09, not the raw entry sum, so a duplicate
+        never raises it); Identity
         is append-only, so the next check counts a smaller number as `identity_shrunk`. The recorded figure is a
         high-water mark (WR-06): a lower count never replaces it, so a loss nobody repairs is counted on every check, not once, and a count that
         grows back to or above the mark raises it. A check that failed or did not count Identity keeps the previous figure."""

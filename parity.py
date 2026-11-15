@@ -110,8 +110,8 @@ def _seen_set(events: list[lg.Event], ledger: compact.Ledger, compared: dict[str
 
 def _identity_invariants(ident: compact.IdentitySet) -> tuple[list[Diff], int]:
     """The codec invariants of the Identity tab alone (no Events row involved): `Count` equals the entries, the cell fits, every stem has its
-    completion marker, no posting ID twice in a stem. Returns the differences and the number of DISTINCT (stem, posting ID) pairs of well-formed
-    entries (WR-07, WR-08: the figure behind `identity_shrunk`, so a duplicate or a malformed entry neither raises the mark nor makes its repair a shrink)."""
+    completion marker, no posting ID twice in a stem. Returns the differences and `IdentitySet.distinct_count()`, the number of distinct (stem, posting
+    ID) keys the dedupe holds (WR-07, WR-09: the one figure behind the high-water mark and `identity_shrunk`, so a duplicate never raises the mark)."""
     out: list[Diff] = []
     for row in ident.all_rows():
         found = row.entries()
@@ -357,12 +357,12 @@ def _summary_checks(ledger: compact.Ledger, now: datetime, tz: tzinfo, runs: lis
     return [Diff(4, "figure_checks", f"checks.{_segment(p.split(':', 1)[0])}", f"{i + 1} of {len(problems)}") for i, p in enumerate(problems)]
 
 
-def _identity_loss(ledger: compact.Ledger, entries_before: int | None) -> list[Diff]:
+def _identity_loss(ledger: compact.Ledger, entries: int, entries_before: int | None) -> list[Diff]:
     """Compact layer 1, the part Events cannot see (WR-02): Identity is append-only, so its count of distinct posting IDs never falls. `identity_shrunk` is a count
-    below the one the previous check recorded (`entries_before`, None when there is none); `identity_unreadable` is a number of rows that hold
+    below the one the previous check recorded (`entries_before`, None when there is none). `entries` is the figure `_identity_invariants` already returned (one source, WR-09);
+    deleting a malformed entry whose ID no other entry holds is counted here too, because the dedupe holds that ID; `identity_unreadable` is a number of rows that hold
     something but did not parse, whose IDs `seen()` therefore never sees. Numbers only."""
     out: list[Diff] = []
-    entries = ledger.identity.distinct_count()  # distinct well-formed (stem, posting ID) pairs, as `_identity_invariants` and the recorded mark count them (WR-07)
     if entries_before is not None and entries < entries_before:
         out.append(Diff(1, "identity_shrunk", "Identity", f"{entries} vs {entries_before}"))
     if ledger.identity_unreadable:
@@ -383,7 +383,8 @@ def check_compact(
     merged view as loaded: Events rows, Identity, Tally. Pure and read-only; a difference never changes detection, evaluation or alerts."""
     t0 = time.monotonic()
     compared: dict[str, int] = {}
-    diffs = _kept_in_identity(ledger, compared) + _identity_loss(ledger, identity_entries_before) + _tally_integrity(ledger, compared)
+    diffs = _kept_in_identity(ledger, compared)
+    diffs += _identity_loss(ledger, compared["identity_entries"], identity_entries_before) + _tally_integrity(ledger, compared)
     diffs += _summary_checks(ledger, now, tz, list(runs), boards or {}, discovery or {}, list(tracker), compared)
     return ParityReport(diffs, compared, round(time.monotonic() - t0, 2))
 

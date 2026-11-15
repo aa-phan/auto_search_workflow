@@ -781,23 +781,52 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertIn("identity_duplicate", self.kinds(duplicated))
         self.assertEqual((clean.compared["identity_entries"], duplicated.compared["identity_entries"]), (24, 24))  # the duplicate adds nothing
         self.assertEqual(sum(len(r.entries()) for r in self.ledger(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1))).identity.all_rows()), 25)
-        # the same ID in another stem is another identity; a bare kind letter (no posting ID) counts for nothing
+        # the same ID in another stem is another identity; a bare kind letter holds the empty key `s1|` that the dedupe holds too (WR-09: the figure is `len(keys())`)
         other = compact.IdentitySet.from_rows([compact.IdentityRow("s1", 1, "t", 3, "bX,bX,b"), compact.IdentityRow("s2", 1, "t", 1, "bX")])
-        self.assertEqual(other.distinct_count(), 2)
+        self.assertEqual((other.distinct_count(), len(other.keys())), (3, 3))
         self.assertEqual(compact.IdentitySet().distinct_count(), 0)
 
-    def test_a_malformed_entry_counts_for_nothing_and_the_count_and_the_identity_entry_check_use_one_test(self) -> None:
-        """WR-08: an entry with an unknown kind letter, or an escape that does not round-trip, is flagged `identity_entry` and is not a usable key, so it
-        is not counted. The figure and the check share `compact.entry_well_formed`."""
-        mixed = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 3, "bA,xB,b%2c")])  # one valid entry, an unknown kind letter, a non-canonical escape
-        self.assertEqual(mixed.distinct_count(), 1)
+    def test_the_identity_count_is_exactly_the_set_of_keys_the_dedupe_holds_malformed_entries_included(self) -> None:
+        """WR-09: the figure behind the mark and `identity_shrunk` is `len(IdentitySet.keys())`, so the check and the dedupe agree by construction. An entry
+        `check_compact` flags as `identity_entry` (an unknown kind letter, a non-round-tripping escape) still holds its posting ID in the dedupe, so it counts."""
+        only_x = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 1, "xB")])
+        self.assertEqual((only_x.distinct_count(), len(only_x.keys()), len(only_x)), (1, 1, 1))  # an entry holding only `xB`: the dedupe holds `g|a|B`
+        mixed = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 3, "bA,xB,b%2c")])  # one canonical entry, an unknown kind letter, a non-canonical escape
+        self.assertEqual((mixed.distinct_count(), len(mixed.keys())), (3, 3))
+        self.assertEqual(mixed.keys(), {"g|a|A", "g|a|B", "g|a|%2c"})
         self.assertEqual([compact.entry_well_formed(e) for e in ("bA", "xB", "b%2c", "b%2C", "b", "", "fA%25")], [True, False, False, True, False, False, True])
-        repaired = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 4, "bA,xB,b%2c,b%2C")])  # the same ID written well formed as well: it is usable
-        self.assertEqual(repaired.distinct_count(), 2)
-        self.assertEqual(mixed.copy().distinct_count(), 1)
+        both = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 4, "bA,xB,b%2c,b%2C")])  # `%2C` decodes to the ID `,`: a fourth key
+        self.assertEqual((both.distinct_count(), len(both.keys())), (4, 4))
+        self.assertEqual(mixed.copy().distinct_count(), 3)
         dirty = self.check(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",xB,b%2c", count=r.count + 2)))
-        self.assertEqual(dirty.compared["identity_entries"], self.check().compared["identity_entries"])
+        self.assertEqual(dirty.compared["identity_entries"], self.check().compared["identity_entries"] + 2)
         self.assertEqual([d.kind for d in dirty.diffs if d.kind == "identity_entry"], ["identity_entry"])
+        self.assertEqual(self.ledger().identity.distinct_count(), len(self.ledger().identity.keys()))
+
+    def test_deleting_a_malformed_entry_whose_id_the_dedupe_holds_is_counted_identity_shrunk(self) -> None:
+        """WR-09 (a): record the figure with a lone `xB` entry in the set, delete it: `identity_shrunk`, which was silent before (the figure counted 0 both times)."""
+        def shrunk(rows: list[compact.IdentityRow], before: int) -> list[str]:
+            return [d.text() for d in parity.check_compact(self.ledger(rows=rows), now=NOW, identity_entries_before=before).diffs if d.kind == "identity_shrunk"]
+
+        added = self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",xB", count=r.count + 1))
+        mark = self.check(rows=added).compared["identity_entries"]
+        self.assertEqual(mark, self.check().compared["identity_entries"] + 1)  # the entry the dedupe holds raises the figure
+        self.assertEqual(shrunk(added, mark), [])
+        self.assertEqual(len(shrunk(self.w.rows, mark)), 1)  # deleted: a counted loss
+
+    def test_rewriting_an_entry_without_changing_its_key_is_not_a_shrink(self) -> None:
+        """WR-09 (b): `b3` damaged to `x3` (the same key `...|3` is still held) lowers nothing; the damage is counted as `identity_entry` instead.
+        Rewriting a malformed entry to its canonical form is the repair, and it changes no count either."""
+        mark = self.check().compared["identity_entries"]
+        damaged = self.entry_row("b3", lambda r: replace(r, ids=r.ids.replace("b3", "x3", 1)))
+        report = parity.check_compact(self.ledger(rows=damaged), now=NOW, identity_entries_before=mark)
+        self.assertEqual(sorted(d.kind for d in report.diffs if d.kind in {"identity_shrunk", "identity_entry"}), ["identity_entry"])
+        self.assertEqual(report.compared["identity_entries"], mark)
+        escape = self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",b%2c", count=r.count + 1))  # a non-canonical escape of the ID `%2c`...
+        raised = self.check(rows=escape).compared["identity_entries"]
+        canonical = self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",b%252c", count=r.count + 1))  # ...rewritten canonical: the same key
+        fixed = parity.check_compact(self.ledger(rows=canonical), now=NOW, identity_entries_before=raised)
+        self.assertEqual((fixed.compared["identity_entries"], [d.kind for d in fixed.diffs if d.kind in {"identity_shrunk", "identity_entry"}]), (raised, []))
 
     def test_removing_a_duplicate_is_not_counted_identity_shrunk_but_removing_a_distinct_id_is(self) -> None:
         def shrunk(rows: list[compact.IdentityRow], before: int) -> list[str]:
@@ -987,9 +1016,10 @@ class IntegrityTests(FoldCase):
         self.assertEqual(self.storage().last_check["identity_entries"], recorded)
         self.assertEqual(self.parity_command()[0], 0)
 
-    def test_a_malformed_identity_entry_is_counted_and_its_removal_is_not_an_identity_shrunk(self) -> None:
-        """WR-08: record N, add malformed entries (an unknown kind letter `xB` and a non-round-tripping escape): counted `identity_entry`, the mark stays N;
-        remove them (the repair of the flagged difference): the next check counts 0 and `--storage-parity` exits 0."""
+    def test_a_malformed_identity_entry_is_counted_and_its_rewrite_to_canonical_form_clears_it(self) -> None:
+        """WR-08, changed by WR-09: record N, add malformed entries (an unknown kind letter `xB` and a non-round-tripping escape): counted `identity_entry`; the
+        dedupe holds their IDs, so the mark rises by 2. The repair is to REWRITE them to canonical form (same keys): the next check counts 0 and
+        `--storage-parity` exits 0. Deleting them is a counted `identity_shrunk` now, by design (the earlier version of this test deleted them)."""
         self.next_run()
         recorded = self.storage().last_check["identity_entries"]
         row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
@@ -998,14 +1028,30 @@ class IntegrityTests(FoldCase):
         run = self.next_run()
         self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
         self.assertIn("storage parity: 1 differences (identity_entry 1); ", run.notes)
-        self.assertEqual(self.storage().last_check["identity_entries"], recorded)  # the malformed entries did not raise the mark
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded + 2)  # the dedupe holds both IDs, so the figure and the mark count them
         self.assertEqual(self.parity_command()[0], 1)
-        row[3], row[4] = original  # the repair
+        row[3], row[4] = str(int(original[0]) + 2), original[1] + ",bB,b%252c"  # the repair: the same two IDs, written canonically
         clean = self.next_run()
         self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
         self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
-        self.assertEqual(self.storage().last_check["identity_entries"], recorded)
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded + 2)
         self.assertEqual(self.parity_command()[0], 0)
+
+    def test_deleting_a_malformed_identity_entry_is_a_counted_identity_shrunk_not_a_repair(self) -> None:
+        """WR-09: the dedupe holds the posting ID of a malformed entry, so deleting it loses a held ID. It is named, on every later check (WR-06)."""
+        self.next_run()
+        recorded = self.storage().last_check["identity_entries"]
+        row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
+        original = (row[3], row[4])
+        row[3], row[4] = str(int(row[3]) + 1), row[4] + ",xB"
+        self.next_run()
+        self.assertEqual(self.storage().last_check["identity_entries"], recorded + 1)
+        row[3], row[4] = original  # deleted instead of rewritten
+        run = self.next_run()
+        self.assertEqual(run.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage parity: 1 differences (identity_shrunk 1); ", run.notes)
+        self.assertEqual(self.storage().last_diffs, [f"identity_shrunk Identity ({recorded} vs {recorded + 1})"])
+        self.assertEqual(self.parity_command()[0], 1)
 
     def test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable(self) -> None:
         self.next_run()
