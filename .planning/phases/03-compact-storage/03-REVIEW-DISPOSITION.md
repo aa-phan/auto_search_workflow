@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-09
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The count excludes malformed entries that the dedupe still uses, so deleting one loses a held posting ID with no `identity_shrunk`"
   - id: IN-01
     severity: info
@@ -87,16 +87,16 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 12
+open: 11
 total: 21
-recorded: 2026-11-15T20:14:32.219Z
+recorded: 2026-11-15T23:11:24.804Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-09 | warning | open | - |
+| WR-09 | warning | fixed | 03-REVIEW-FIX.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
