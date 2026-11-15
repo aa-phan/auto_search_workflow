@@ -3,10 +3,10 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
-  - id: WR-08
+  - id: WR-09
     severity: warning
-    disposition: fixed
-    title: "A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)"
+    disposition: open
+    title: "The count excludes malformed entries that the dedupe still uses, so deleting one loses a held posting ID with no `identity_shrunk`"
   - id: IN-01
     severity: info
     disposition: open
@@ -50,7 +50,11 @@ findings:
   - id: IN-11
     severity: info
     disposition: open
-    title: "The figure keeps the name \"entries\" but now counts distinct IDs, and is computed in two places"
+    title: "The figure keeps the name \"entries\" and is computed in two places"
+  - id: WR-08
+    severity: warning
+    disposition: fixed
+    title: "A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)"
   - id: IN-12
     severity: info
     disposition: fixed
@@ -83,16 +87,17 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 11
-total: 20
-recorded: 2026-11-15T07:10:17.741Z
+open: 12
+total: 21
+unparsed: 1
+recorded: 2026-11-15T20:14:00.692Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-08 | warning | fixed | 03-REVIEW-FIX.md |
+| WR-09 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -104,7 +109,8 @@ recorded: 2026-11-15T07:10:17.741Z
 | IN-09 | info | open | - |
 | IN-10 | info | open | - |
 | IN-11 | info | open | - |
-| IN-12 | info | fixed | c845065 (WR-08 fix: test comment corrected, stray blank line removed) |
+| WR-08 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
+| IN-12 | info | fixed | c845065 (WR-08 fix: test comment corrected, stray blank line removed) (not in the current review) |
 | WR-07 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-06 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-01 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
