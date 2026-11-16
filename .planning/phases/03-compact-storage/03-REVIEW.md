@@ -1,6 +1,6 @@
 ---
 phase: 03-compact-storage
-reviewed: 2026-11-15T00:00:00Z
+reviewed: 2026-11-16T00:00:00Z
 depth: standard
 files_reviewed: 6
 files_reviewed_list:
@@ -20,23 +20,16 @@ status: issues_found
 
 # Phase 3: Code Review Report
 
-**Reviewed:** 2026-11-15
-**Depth:** standard (incremental re-review: `git diff f4364d3 HEAD` for fix commit c845065 (WR-08) and its doc changes, each hunk read in its surrounding code: `compact.entry_well_formed`, `compact.IdentitySet` (`_reindex`, `copy`, `keys`, `kind`, `distinct_count`, `plan_additions`, `apply`), `StorageState.record_compact_check`, `parity._kept_in_identity` / `_identity_invariants` / `_identity_loss`, and the callers of `IdentitySet.keys()` (`retained_events`, `repair_plan`, `hunter` seen set, `storage_report`))
+**Reviewed:** 2026-11-16
+**Depth:** standard (incremental re-review: `git diff b79be48 HEAD` for fix commit e86993e (WR-09) and its doc changes, each hunk read in its surrounding code: `compact.IdentitySet` (`__init__`, `_reindex`, `copy`, `keys`, `kind`, `__len__`, `distinct_count`, `plan_additions`), `compact.entry_well_formed`, `StorageState.last_identity_entries` / `record_compact_check`, `parity._kept_in_identity` / `_identity_invariants` / `_identity_loss` / `check_compact`, and every caller (`pipeline.py:234,250`, `hunter.py:2025`, `storage_report`))
 **Files Reviewed:** 6
 **Status:** issues_found
 
 ## Summary
 
-WR-08 is fixed as far as it was stated, and the mechanics are sound:
+**WR-09 is resolved.** The count is now `len(IdentitySet.keys())`, computed in one place, and the check and the dedupe agree by construction. The malformed-entry hole is closed: a lone `xB` entry counts 1, deleting it is a counted `identity_shrunk` on every later check, and rewriting an entry without changing its key (`bB` to `xB`, `b%2c` to `b%252c`) changes no count. The per-stem `_valid` record and its upkeep are gone, `__len__` returns the same value as before, `_identity_loss` takes the figure `_identity_invariants` already computed (this also settles the "computed in two places" half of IN-11), and `compared["identity_entries"]` is always set before `_identity_loss` reads it. `.venv/bin/python -m unittest discover -s tests`: `Ran 942 tests ... OK`, matching STATUS. The tests pin the lone `xB`, the mixed entry, `copy()`, deletion versus rewrite, and an integration path through the poller and `--storage-parity`. Docs (SPEC, D-57, STATUS) match the code, label every check mocked and not deployed, and make no live Sheets, Groq or Telegram claim. No rule 1 conflict.
 
-- **The predicate is unchanged.** `entry_well_formed` is `kind in DISPOSITION_OF and bool(pid) and encode_entry(kind, pid) == entry`, the same three tests `check_compact` ran inline before. `identity_entry` behaves as before, and it now calls the one function.
-- **Mixed entries of one ID.** `_valid` is a per-stem set of posting IDs with at least one well-formed entry. I checked `bA,xB,b%2c` (count 1), `xB,bB` (count 1, the ID counts once although the malformed entry came first) and `bA,xB,b%2c,b%2C` (count 2: the `%2C` entry decodes to `,` and is well formed).
-- **Consistency of the new record.** `_reindex` rebuilds `_kinds` and `_valid` together, and `apply` goes through `_reindex`. `copy()` copies `_valid` as it does `_kinds`. `from_rows` goes through `_reindex`. `plan_additions` only plans and writes nothing to either map. `_valid` is not read anywhere except `distinct_count`.
-- **Performance.** 235,000 IDs in 100 stems took 0.08 s for `from_rows` plus `distinct_count`. The predicate decodes each entry a second time, which is immaterial at this size.
-- **Tests.** `.venv/bin/python -m unittest discover -s tests`: `Ran 939 tests ... OK`, which matches STATUS (937 after WR-07, 939 after WR-08). The unit test pins the mixed entry, the predicate truth table, `copy()` and the compared figure. The integration test records N, adds `xB,b%2c`, sees the mark stay N and `identity_entry 1`, repairs by restoring the original cell, and sees 0 differences and exit 0.
-- **Docs.** SPEC, D-57 and STATUS describe the change, label every check mocked and not deployed, and make no live Sheets, Groq or Telegram claim. No rule 1 conflict: the high-water mark and the absence of an acknowledgement input stand as decided.
-
-**One new WARNING (WR-09).** The fix makes the figure count "well-formed" IDs, but the dedupe (`IdentitySet.keys()`) still holds every ID that a malformed entry carries. The code comment and all three docs say the count is "the identity the dedupe uses", which is no longer true, and the one repair the check invites for a malformed entry, deleting it, now loses a held ID without any `identity_shrunk`. The WR-08 text of the previous review said an `xB` entry "was never a usable key for the dedupe". I checked that and it was wrong: `keys()` and `plan_additions` use `_kinds`, which includes it. **No new INFO items.** IN-12 is resolved. IN-01..IN-11 are carried forward under their ids; IN-09 and IN-11 have updated text.
+**One new WARNING (WR-10).** The new rule says the repair of an `identity_entry` is to rewrite the entry to canonical form, never delete it. For an entry with no posting ID (a bare kind letter such as `b` or `x`) there is no canonical form to rewrite to, and the empty key it contributes (`stem|`) can never match a posting, because `stem_and_id` returns None for an empty ID. The only possible repair, deletion, is a permanent `identity_shrunk`. No new INFO items. IN-01..IN-11 are carried forward; IN-10 and IN-11 have updated text.
 
 Resolved:
 
@@ -50,6 +43,7 @@ Resolved:
 | WR-06 `identity_shrunk` reported once, then the lower count became the reference | e83d563 | `record_compact_check` keeps `max(previous or 0, current)`. Traced for first check, failed check, growth, restore and dual modes, and every other writer. |
 | WR-07 the mark counted duplicate Identity entries | 9fd3383 | `IdentitySet.distinct_count()` counts distinct `(stem, posting ID)` pairs and feeds `compared["identity_entries"]`, the mark and `_identity_loss`. Key checked against AGENTS rule 3, duplicate, cross-stem and bare-kind cases traced. |
 | WR-08 the mark counted malformed Identity entries | c845065 | `compact.entry_well_formed` is the predicate `check_compact` used inline, unchanged, and `distinct_count` counts only IDs with a well-formed entry (`_valid`, kept by `_reindex`, `copy` and `apply`). Mixed entries of one ID traced, 235k IDs in 0.08 s, 939 offline tests pass, docs match. A residual remains for the other direction: see WR-09. |
+| WR-09 the count excluded malformed entries the dedupe still holds | e86993e | `distinct_count` is now `sum(len(kinds))`, exactly `len(keys())`; `_valid` and its upkeep in `_reindex` and `copy` are removed, `entry_well_formed` stays only as the `identity_entry` predicate. `__len__` returns the same figure (same value as before). `check_compact` computes the figure once in `_identity_invariants`, stores it in `compared`, and `_identity_loss` takes it as a parameter (`_kept_in_identity` always sets the key, so no KeyError). Traced: `xB` alone counts 1 and deleting it is a counted `identity_shrunk`; rewriting `bB` to `xB` or `b%2c` to `b%252c` keeps the key and counts nothing; WR-08's old deletion repair now correctly shrinks. 942 offline tests pass. A residual remains for an entry with no posting ID: see WR-10. |
 | IN-12 test comment claimed coverage it did not have | c845065 | The comment now says only what the fixture holds, and the WR-08 case (an unknown kind letter and a non-round-tripping escape) is in both new tests. The unit test still builds the duplicated ledger twice for a raw sum of 25 (a restated fixture, harmless). |
 
 ## Critical Issues
@@ -58,20 +52,15 @@ None.
 
 ## Warnings
 
-### WR-09: The count excludes malformed entries that the dedupe still uses, so deleting one loses a held posting ID with no `identity_shrunk`
+### WR-10: An entry with no posting ID counts as a held key, and the only repair for it, deletion, is a permanent `identity_shrunk`
 
-**File:** `compact.py:217-235` (`keys`, `distinct_count`, `_reindex`), `compact.py:243-251` (`plan_additions`), `compact.py:381`, `:441`, `:574`, `hunter.py:2145`, `storage_report.py:81` (callers of `keys()`), `SPEC.md` (the sentence "the identity the dedupe uses, counted over well-formed entries only"), `compact.py:231-234` (docstring)
-**Issue:** `distinct_count` now counts `_valid`, but everything that dedupes reads `_kinds`. I confirmed with `IdentitySet.from_rows([IdentityRow("g|a", 1, "t", 3, "bA,xB,b%2c")])`: `distinct_count()` is 1, while `keys()` is `{g|a|A, g|a|B, g|a|%2c}`, so the ledger treats `B` and `%2c` as held. `plan_additions` also skips them as known (`pid in known`). `xB` is therefore an effective dedupe key (the kind letter `x` is not consulted by `seen()`; only `identity_kind`, which needs an Events row, looks at it). Trace:
-
-1. An entry `xB` exists in `Identity` and is the only entry for posting `B`. Its figure counts 0, it is flagged `identity_entry`, the run is degraded and the fold is held back.
-2. The owner repairs the flagged difference by deleting the malformed entry, the repair the previous review and the fix commit both describe.
-3. `B` drops out of `keys()`. The count is unchanged (0 before, 0 after), so no `identity_shrunk`. A baseline that `B` stood for is no longer held, and the posting can come back as a new observation, which is the freshness failure AGENTS rule 2 and rule 3 exist to prevent. Nothing in the check names it, and the Events row is already folded, so `identity_missing` cannot see it either.
-
-The same hole is a quieter version of the original WR-02 loss: a held ID leaves Identity unnoticed. WR-08 fixed a false alarm by making the figure blind to a class of real keys. The docs now state something the code does not do: SPEC, D-57, STATUS and the `distinct_count` docstring call the figure the identity "the dedupe uses" or "can use", but `keys()` is the dedupe and holds the malformed IDs too. The corrupted-then-edited direction is also asymmetric: rewriting `bB` to `xB` (a damaged kind letter) lowers the figure by one and counts `identity_shrunk` although the ID is still held.
-**Fix:** Pick one rule and make the code and the docs say it.
-- Keep the mark on well-formed IDs and add a second high-water mark over `len(identity)` (all held IDs, the figure `keys()` yields), recorded next to `identity_entries` (for example `identity_held`) and compared in `_identity_loss` as its own difference. A malformed entry that is deleted still lowers the held figure and is named.
-- Or name the repair in the check output and the docs as "correct the entry to canonical form, do not delete it", and say in the docstring and SPEC that deleting a malformed entry whose ID has no well-formed twin drops a held ID undetected.
-- In either case, change the sentence "the identity the dedupe uses" to what the code does, and add a test: record N, add `xB` (mark stays N, `identity_entry 1`), delete it, and assert the chosen behaviour (a named difference, or a documented silent drop).
+**File:** `compact.py:225-235` (`distinct_count`, with `keys()` at `:217`), `compact.py:176-188` (`_reindex`), `parity.py:324-327` (`identity_entry`), `tests/test_storage_parity.py` (the comment "a bare kind letter holds the empty key `s1|`")
+**Issue:** `decode_entry("b")` returns `("b", "")`, and `_reindex` does `kinds.setdefault("", "b")`, so a bare kind letter adds the key `stem|` to `keys()` and to the figure. I confirmed: `IdentitySet.from_rows([IdentityRow("g|a", 1, "t", 2, "bA,b")])` gives `distinct_count() == 2` and `keys() == {"g|a|", "g|a|A"}`. That key is not something the dedupe can hold in any useful sense: `stem_and_id` (`compact.py:44-49`) returns None for an empty posting ID, so no job key ever equals `stem|`, and the writer never produces it (`plan_additions` skips `not entry[1:]`). The docstring and the three docs claim the figure is "exactly the set the dedupe holds" and tell the owner to repair a flagged `identity_entry` by rewriting it to canonical form. An entry with no posting ID has no canonical form. Trace:
+1. A stray `b` or `x` entry (a hand edit, a cell cut mid-entry) is in `Identity`. It is flagged `identity_entry` and counted in the figure, so the mark rises by 1.
+2. The owner removes it, the only possible repair.
+3. The figure falls by 1, `identity_shrunk` is counted, and by WR-06 and the no-acknowledgement decision the mark never comes down: every later run is degraded, NEEDS ATTENTION, and the WR-05 gate holds the fold back with `Events` growing, for an entry that held no identity at all. The same applies to a hand-written garbage entry that nobody can map back to a real ID. The only exit is editing `storage.last_check.identity_entries` in Discovery by hand, which STATUS does not document.
+The test comment and assertion (`(3, 3)`) pin the empty key as intended, so this is a decision the fix made implicitly, not an accident, and the user should confirm it. It is a false permanent alarm rather than a lost ID, so it is a WARNING and not a BLOCKER.
+**Fix:** Exclude the empty posting ID from the figure and from `keys()`, in the one place both are built, so the check and the dedupe still agree: in `_reindex`, `if pid: kinds.setdefault(pid, kind)` (nothing can match the empty key, so the dedupe is unchanged). Then a bare-kind entry is flagged `identity_entry`, counts for nothing, and deleting it is not a shrink. Change the test case to `(2, 2)` for the bare-kind letter, add one that deletes a bare entry after the mark was recorded and asserts no `identity_shrunk`, and drop "exactly" from the claim only if some other key class is found that cannot match a posting.
 
 ## Info
 
@@ -134,17 +123,17 @@ The same hole is a quieter version of the original WR-02 loss: a held ID leaves 
 ### IN-10: The documented repair path has no tooling and the mark can be stuck high by a transient over-read
 
 **File:** `STATUS.md` (WR-06 cost paragraph), `SPEC.md:111`, `compact.py:754`
-**Issue:** The docs give "restore the missing IDs to `Identity`, for example from `Events_Legacy`" as the only repair. No command does it. The poller's start-of-run repair rebuilds only Tally groups, not Identity, and `Identity` is a codec cell (chunked, escaped entries with a `Count` column), so a hand edit is error-prone, which the tests need several lines of cell surgery to do. Also, because the mark can only rise, a single over-read (a transient read that returns extra rows) leaves it stuck high for good. After WR-08 a malformed entry no longer raises the mark, which removes one cause. The user chose not to add an acknowledgement input, so this is only an operational cost, not a defect. It is better recorded than discovered during an incident.
+**Issue:** The docs give "restore the missing IDs to `Identity`, for example from `Events_Legacy`" as the only repair. No command does it. The poller's start-of-run repair rebuilds only Tally groups, not Identity, and `Identity` is a codec cell (chunked, escaped entries with a `Count` column), so a hand edit is error-prone, which the tests need several lines of cell surgery to do. Also, because the mark can only rise, a single over-read (a transient read that returns extra rows) leaves it stuck high for good. After WR-09 a malformed entry whose posting ID the dedupe holds raises the mark again (it is a held key), so a stray entry is another way to stick it high (see WR-10 for the entry with no posting ID). The user chose not to add an acknowledgement input, so this is only an operational cost, not a defect. It is better recorded than discovered during an incident.
 **Fix:** Add a short runbook note to DEPLOY.md or STATUS ("to clear a stuck `identity_shrunk`, set `last_check.identity_entries` in the Discovery `storage` key to the true count, after confirming nothing is lost"), and consider a read-only `--storage-parity` line that prints the mark and the current count, so the owner can see which side moved.
 
-### IN-11: The figure keeps the name "entries" and is computed in two places
+### IN-11: The figure keeps the name "entries" and the Discovery key cannot be renamed lightly
 
-**File:** `compact.py:745-747` (`last_identity_entries`), `compact.py:751` (`identity_entries` parameter), `parity.py:107`, `:329`, `:365` (`compared["identity_entries"]`, `entries`, `entries_before`), `parity.py:375`, `:380` (`identity_entries_before`)
-**Issue:** The docstrings were reworded by c845065 (`last_identity_entries`, `record_compact_check`, `_identity_invariants`), so the wording is now honest. What remains: the persisted key, the `compared` key, the parameter names and the `entries` variables all still say "entries" for what is a distinct well-formed ID count, and `_identity_loss` still recomputes the figure from `ledger.identity.distinct_count()` while `_identity_invariants` returns the same call. They agree today because both read the same set, but one change to either breaks the invariant that the mark and the comparison use the same figure, and no test compares them directly. The persisted key name is a Discovery-state contract, so a rename needs care.
-**Fix:** Have `_identity_loss` take the count that `check_compact` already got from `_identity_invariants`, or assert equality in a test, so there is one source. Leave the persisted key name alone.
+**File:** `compact.py:756-775` (`last_identity_entries`, `identity_entries` parameter), `parity.py:107`, `:329` (`compared["identity_entries"]`), `parity.py:360` (`entries`, `entries_before`)
+**Issue:** The "computed in two places" half is fixed by e86993e: `_identity_invariants` returns `distinct_count()` once and `check_compact` passes it to `_identity_loss`. What remains is naming: the persisted key, the `compared` key, the parameters and the variables all say "entries" for what is now a count of distinct held keys, and `check_compact` reads `compared["identity_entries"]` that `_kept_in_identity` writes, an implicit coupling through a dict (safe today because `_kept_in_identity` always sets it). The persisted key name is a Discovery-state contract.
+**Fix:** Leave the persisted key name alone. Optionally have `_kept_in_identity` return the count instead of reading it back out of `compared`.
 
 ---
 
-_Reviewed: 2026-11-15_
+_Reviewed: 2026-11-16_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
