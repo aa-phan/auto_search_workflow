@@ -99,7 +99,7 @@ created: "2026-10-29"
 - [x] Feedback latency < 3s (quick run command)
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** re-validated 2026-11-15 after the review fixes WR-01..WR-08 (every automated command above re-run green, full suite `Ran 939 tests ... OK`; the fixes' tests sit in the mapped files test_compact, test_storage_parity and test_storage_cutover, WR-06..WR-08 in test_storage_parity; live and owner-check items labelled in Manual-Only). First validated 2026-11-06 (910 tests).
+**Approval:** re-validated 2026-11-16 after the review fix WR-09 (mapped commands re-run green, 246 tests; full suite `Ran 942 tests ... OK`; WR-09's five tests sit in test_storage_parity). Earlier: re-validated 2026-11-15 after the review fixes WR-01..WR-08 (every automated command above re-run green, full suite `Ran 939 tests ... OK`; the fixes' tests sit in the mapped files test_compact, test_storage_parity and test_storage_cutover, WR-06..WR-08 in test_storage_parity; live and owner-check items labelled in Manual-Only). First validated 2026-11-06 (910 tests).
 
 ## Validation Audit 2026-11-06
 
