@@ -1,18 +1,14 @@
 ---
-status: testing
+status: complete
 phase: 03-compact-storage
 source: [03-VERIFICATION.md]
 started: 2026-11-06T22:24:12Z
-updated: 2026-11-17T06:00:00Z
+updated: 2026-11-17T09:07:24.251Z
 ---
 
 ## Current Test
 
-number: 8
-name: Deploy decision after the WR-10 fix (open warning WR-11)
-expected: |
-  Decide: (a) fix WR-11 first, (b) accept WR-11, add the IN-10 runbook line and deploy, or (c) defer the branch. After a deploy: no 'storage write failed', 'storage parity:' or 'storage fold skipped' note, and the next fold still runs.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -58,14 +54,15 @@ severity: major
 ### 8. Deploy decision after the WR-10 fix (open warning WR-11)
 Deploy decision for branch gsd/phase-03-compact-storage after gap-closure plan 03-10 fixed WR-10 (added by the 2026-11-17 re-verification). Production runs 68a7253 without WR-01..WR-10. Open: WR-11 (a hand-edited Identity stem that no job key can produce, such as no `|`, an extra `|` or upper case, still holds keys and counts toward the identity mark; deleting it raises a permanent identity_shrunk in compact mode). Decide: (a) fix WR-11 first (a `stem_holds_keys` predicate in `IdentitySet._reindex` plus an `identity_stem` counted difference), (b) accept WR-11, add the IN-10 runbook line and deploy, or (c) defer the branch.
 expected: After a deploy: no 'storage write failed', 'storage parity:' or 'storage fold skipped' note; the first compact check records the distinct held-key count; the next fold still runs. Until then every WR-01..WR-10 behaviour is mocked only.
-result: [pending]
+result: pass
+evidence: "Owner chose option b (2026-11-17): accept WR-11, add the IN-10 runbook note (5d1d421), deploy. main fast-forwarded 68a7253..bc3bea2 at 07:07 UTC. Live: poller run 44043039789 and 44051541803 compact, 0 counted and 0 declared differences, no storage write failed / storage parity: / storage fold skipped note; read-only storage_parity run 44044724225 0 differences (identity_entries 295385). Not yet observed: the first fold on bc3bea2 (first run after 00:00 UTC 2026-11-18)."
 
 ## Summary
 
 total: 8
-passed: 6
+passed: 7
 issues: 1
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
