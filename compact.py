@@ -70,7 +70,7 @@ def decode_entry(entry: str) -> tuple[str, str]:
 def entry_well_formed(entry: str) -> bool:
     """Is this stored Identity entry in canonical form (WR-08)? A known kind letter, a non-empty posting ID, and an escape that survives a decode and an
     encode. The test behind the `identity_entry` difference of `parity.check_compact`; it flags an entry, it does not decide what the dedupe holds
-    (`IdentitySet.keys` holds the posting ID of every entry, malformed or not, WR-09)."""
+    (`IdentitySet.keys` holds the posting ID of every entry with a non-empty ID, malformed or not, WR-09, and an entry with no ID holds nothing, WR-10)."""
     kind, pid = decode_entry(entry)
     return kind in DISPOSITION_OF and bool(pid) and encode_entry(kind, pid) == entry
 
@@ -188,7 +188,8 @@ class IdentitySet:
         for r in rows:
             for entry in r.entries():
                 kind, pid = decode_entry(entry)
-                kinds.setdefault(pid, kind)
+                if pid:  # no job key can match an empty posting ID (`stem_and_id` returns None), so a bare entry holds no key (WR-10)
+                    kinds.setdefault(pid, kind)
         self._kinds[stem] = kinds
 
     def copy(self) -> "IdentitySet":
@@ -227,8 +228,9 @@ class IdentitySet:
         place the figure is computed: the high-water mark (`StorageState.record_compact_check`), the `identity_shrunk` comparison and the `compared`
         figure all read it, so the check and the dedupe agree by construction. Consequences: a posting ID written twice in a stem counts once
         (WR-07); rewriting an entry's kind letter or escape without changing its posting ID changes nothing; deleting any entry whose posting ID no
-        other entry of the stem holds lowers it, malformed or not, so the repair of an `identity_entry` is to rewrite the entry to its canonical form,
-        never to delete it."""
+        other entry of the stem holds lowers it, malformed or not, so the repair of an `identity_entry` that has a posting ID is to rewrite the entry
+        to its canonical form, never to delete it. An entry with no posting ID (a bare kind letter) holds no key, adds nothing to the figure, and is
+        repaired by deletion, which is not a shrink (WR-10)."""
         return sum(len(kinds) for kinds in self._kinds.values())
 
     def plan_additions(self, additions: dict[str, list[str]], stamp: str) -> list[IdentityRow]:
