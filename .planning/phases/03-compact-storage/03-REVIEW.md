@@ -1,9 +1,10 @@
 ---
 phase: 03-compact-storage
-reviewed: 2026-11-16T00:00:00Z
+reviewed: 2026-11-17T00:00:00Z
 depth: standard
-files_reviewed: 8
+files_reviewed: 9
 files_reviewed_list:
+  - DEPLOY.md
   - DECISIONS.md
   - SPEC.md
   - STATUS.md
@@ -14,41 +15,35 @@ files_reviewed_list:
   - tests/test_storage_report.py
 findings:
   critical: 0
-  warning: 1
-  info: 12
-  total: 13
+  warning: 3
+  info: 14
+  total: 17
 status: issues_found
 ---
 
 # Phase 3: Code Review Report
 
-**Reviewed:** 2026-11-16
-**Depth:** standard (incremental re-review: `git diff 43bd2b3 HEAD` for gap-closure plan 03-10, WR-10, commits 559c479, 389789a, 0ac4de1, de57002, 7541c53; each hunk read in its surrounding code: `compact.IdentitySet` (`_reindex`, `copy`, `apply`, `keys`, `kind`, `distinct_count`, `plan_additions`), `compact.entry_well_formed`, `compact.stem_and_id`, `parity._seen_set` / `_kept_in_identity` / `_identity_invariants` / `_identity_loss`, `storage_report.logical_counts`, and the stem question the planner left out)
-**Files Reviewed:** 8
+**Reviewed:** 2026-11-17
+**Depth:** standard (incremental re-review of docs only: `git diff 98c19d8 HEAD -- DEPLOY.md STATUS.md`, commits 5d1d421 and 0c7a001. The runbook was checked against `compact.StorageState.record_compact_check` / `last_identity_entries`, `parity._kept_in_identity` / `_identity_loss` / `check_compact` / `format_report`, `hunter.run_storage_parity`, `pipeline.storage_check` and the `pipeline` Discovery load and save path, `compact.effective_mode`, `StorageState.load`. STATUS was checked against the public Actions logs of runs 44043039789, 44044724225, 44051541803 and 43990083983 (read with `gh run view --log`; counts and run ids only, no secret read), `gh api .../activity` for the push time, and `git diff --stat 68a7253 bc3bea2`. No source code changed since the last review, so nothing else was re-reviewed.)
+**Files Reviewed:** 9 (DEPLOY.md and STATUS.md are the scope of this pass; the other seven carry their earlier review)
 **Status:** issues_found
 
 ## Summary
 
-**WR-10 is resolved.** `_reindex` and `storage_report.logical_counts` both skip an empty posting ID, so a bare kind letter holds no key. I confirmed: `IdentitySet.from_rows([IdentityRow("g|a", 1, "t", 2, "bA,b")])` gives `keys() == {"g|a|A"}` and `distinct_count() == 1`. It holds through `copy()` (copies `_kinds`), `apply()` (calls `_reindex`) and `from_rows`. `plan_additions` already skipped `not entry[1:]` and looks up `self._kinds`, so the writer and the dedupe still agree. A bare entry is still flagged `identity_entry` (`entry_well_formed("b")` is False), it does not move the figure, and deleting it is not a counted `identity_shrunk` (the compact integration test runs the fold on the next UTC day after the deletion). The dedupe itself is unchanged, because no job key can equal `stem|`. `storage_report` and `IdentitySet` use the same first-wins, skip-empty rule. The docstrings, SPEC, D-57 and STATUS match the code, label the change mocked and not deployed, and make no live Sheets, Groq or Telegram claim. `.venv/bin/python -m unittest discover -s tests`: `Ran 945 tests ... OK`, matching STATUS. No rule 1 conflict.
+**The runbook names the right key and the right figure.** `last_check.identity_entries` is a field inside the JSON value of the Discovery row whose key is `storage` (`compact.py:758-777`; the poller loads and saves that row as one string, `pipeline.py:424`, `state.py:721-731`). The figure `storage_parity` prints in compact mode, `compared: identity_entries N`, is `entries` from `_identity_invariants`, i.e. `IdentitySet.distinct_count()`, the same number `record_compact_check` max-folds into the mark (`pipeline.py:250`). `format_report` prints `compared` sorted by name (`parity.py:404`), so the line exists in the output. Setting the mark to that figure makes the next check compare equal, so `identity_shrunk` stops. The pre-step is also right: `run_storage_parity` passes `identity_entries_before=storage.last_identity_entries()` (`hunter.py:2025`), so a `storage_parity` run does show `identity_shrunk` before the edit and shows it gone after. The WR-11 sentence matches the table in the earlier review (all three stem variants raise the figure, deleting the row gives `identity_shrunk`). IN-10 is addressed in substance.
 
-**One new WARNING (WR-11), the hole the planner left out.** It is real and it has the same effect as WR-10: a hand-edited Identity stem that no job key can produce (no `|`, more than one `|`, or upper case) holds keys that never match a posting. It is flagged by nothing in compact mode, it raises the mark, and deleting it is a permanent `identity_shrunk`. I reproduced all three variants (details in WR-11). It is less likely than WR-10 (it needs a hand edit of the `Board_Key` column of a warning-protected hidden tab, not a cut cell), so the planner's scoping was reasonable, but a fix that closes only the empty-ID half of "a key no job can match" leaves the same false permanent alarm open.
+**The procedure is not yet safe as written (WR-12).** It tells the owner to hand-edit a JSON string that the poller treats as the whole storage state, with no guard against a syntax slip (which silently turns a compact system into a dual-mode one and overwrites the cutover and fold records on the next run), no instruction to edit between runs (a run in progress writes the whole Discovery body back and discards the edit), and no check after the edit.
 
-**One new INFO (IN-12).** The WR-10 fix removes an incidental dual-mode detection of a bare entry.
+**STATUS keeps mocked and live apart for the deploy section and every cited run id checks out** (push 2026-11-17T07:07:33Z `68a7253 -> bc3bea2`, no `.github` file in the diff, the three runs are `success` on headSha bc3bea2 at 08:00:09, 08:12:13 and 09:00:08 UTC, the printed counts match: 22319 kept job keys / 939 Tally runs, `identity_entries 295385`, 22509 / 940). The WR-01..WR-10 table rows are correctly "mocked; deployed bc3bea2, not exercised live". Problems are in what the new paragraph says about the storage report (WR-13: a headline figure that omits its scope, and two older statements left standing that contradict it) and in two evidence labels (IN-14).
 
-Resolved:
+No rule 1 conflict: no behaviour changed. No secrets or personal data in either diff.
+
+Resolved or addressed:
 
 | Earlier finding | Fix commit | Verification |
 |---|---|---|
-| WR-01 restore guard open after a partial fold | a2247a9 | Earlier review, unchanged. |
-| WR-02 Identity loss undetected, `ensure()` recreates an empty tab | 58d9ec2 | Earlier review, unchanged. |
-| WR-03 Tally write failure became a permanent undercount | 024319f | Earlier review, unchanged. See IN-08. |
-| WR-04 stale Identity cache overwrote the sheet | 6648949 | Earlier review, unchanged. |
-| WR-05 the fold ignored the same run's integrity check | 8b02697 | Earlier review, unchanged. |
-| WR-06 `identity_shrunk` reported once, then the lower count became the reference | e83d563 | Earlier review, unchanged. |
-| WR-07 the mark counted duplicate Identity entries | 9fd3383 | Earlier review, unchanged. |
-| WR-08 the mark counted malformed Identity entries | c845065 | Superseded by WR-09. |
-| WR-09 the count excluded malformed entries the dedupe still holds | e86993e | The count is `sum(len(kinds))`, exactly `len(keys())`. |
-| WR-10 an entry with no posting ID counted as a held key, and its only repair, deletion, was a permanent `identity_shrunk` | 559c479, 389789a, 0ac4de1, de57002, 7541c53 | `if pid:` in `_reindex` and in `logical_counts`. Bare entry: not a key, not in the figure, still `identity_entry`, deleting it counts 0, the fold runs. Traced through `from_rows`, `copy`, `apply`, `keys`, `kind`, `distinct_count`, `plan_additions`, `_kept_in_identity`, `_identity_loss`, `logical_counts`. Three new tests (parity unit, compact integration, storage report), 945 tests pass. Residuals: WR-11 (a stem no job key can produce) and IN-12 (dual mode). |
+| WR-01 .. WR-10 | a2247a9, 58d9ec2, 024319f, 6648949, 8b02697, e83d563, 9fd3383, c845065 (superseded), e86993e, 559c479 .. 7541c53 | Earlier reviews, unchanged. Deployed in bc3bea2. |
+| IN-10 the repair path for a stuck mark is undocumented | 5d1d421 | The runbook paragraph exists and names the right key and figure. Two residuals: WR-12 (the edit is not safe as written) and IN-13 (the repair half and the worse WR-11 variant). |
 
 ## Critical Issues
 
@@ -58,106 +53,116 @@ None.
 
 ### WR-11: An Identity stem no job key can produce holds keys that match nothing, is not flagged, raises the mark, and deleting it is a permanent `identity_shrunk`
 
+**Status: accepted by the owner 2026-11-17 (UAT 8, option b); disposition skipped; not fixed. The runbook now documents the manual exit.**
 **File:** `compact.py:188-192` (`_reindex`, which filters only `pid`), `compact.py:217` (`keys()`), `compact.py:44-49` (`stem_and_id`), `parity.py:111-130` (`_identity_invariants`), `parity.py:300-330` (`_kept_in_identity`)
-**Issue:** WR-10's rule is "an entry holds a key only if a job key can equal it", and the fix applies it to the posting ID only. `stem_and_id("ats|board|id")` returns `("ats|board", "id")` and builds a stem from exactly two segments of `key.split("|", 2)`, and `boards.py:85` lowers the board. So a stem can match a posting only if it has exactly one `|` and is lower case. `IdentityRow.from_row` rejects only a blank stem or a bad chunk (`identity_unreadable`); every other stem is accepted, and `IdentitySet._reindex` holds all its IDs as keys. Reproduced with the compact check helper (`IntegrityCheckTests`) by adding `IdentityRow(stem, 1, "t", 2, "bA,bB")`, with the mark recorded from the check and then the row deleted:
+**Issue:** WR-10's rule is "an entry holds a key only if a job key can equal it", and the fix applies it to the posting ID only. A stem can match a posting only if it has exactly one `|` and is lower case (`boards.py:85`). `IdentityRow.from_row` rejects only a blank stem or a bad chunk, so every other stem is accepted and `_reindex` holds all its IDs as keys. Reproduced earlier with the compact check helper: stems `greenhouse`, `greenhouse|acme|x` and `Greenhouse|Acme` each raise `identity_entries` from 24 to 26 with no difference, and deleting the row gives `identity_shrunk 24 vs 26` from then on. Dual mode flags it (`identity_extra`), compact mode does not (`_kept_in_identity` compares only Events-held keys against Identity). There is a worse variant: a hand edit that changes a real board's stem into a non-matching form leaves the figure unchanged while the dedupe loses every ID of that board (see IN-13).
+**Fix:** Unchanged from the earlier review: apply the rule to the stem in `_reindex` (`stem.count("|") == 1 and stem == stem.lower()`), add a counted `identity_stem` difference, add a test per variant. If it stays out of scope, the DEPLOY.md paragraph is the documented exit (WR-12 says how to make it safe).
 
-| Stem | Diffs from the check | `identity_entries` | After deleting the row, with the recorded mark |
-|---|---|---|---|
-| `greenhouse` (no `|`) | none | 26 (was 24) | `identity_shrunk 24 vs 26` |
-| `greenhouse|acme|x` (extra `|`) | none | 26 | `identity_shrunk 24 vs 26` |
-| `Greenhouse|Acme` (upper case) | none | 26 | `identity_shrunk 24 vs 26` |
+### WR-12: The documented hand edit of the `storage` key has no safe-edit protocol: a syntax slip flips a compact system to dual and erases its records, a run in progress discards the edit, and nothing checks the result
 
-Why nothing flags it in compact mode: `_kept_in_identity` compares only Events-held keys against Identity, the other direction is a documented limit (D-57), and `identity_entry` looks at entries, not stems. Dual mode does flag it, through `identity_extra` (`stored - keyable.keys()`), so the hole exists only after the cutover, which is where production runs. Trace, the same as WR-10:
-1. A hand edit, a Sheets auto-format, a trailing space or a paste error puts a row such as `Greenhouse|Acme` or `greenhouse` into `Identity`. The stray IDs are counted, so the mark rises by their number.
-2. The owner removes the row, the only repair that makes sense (a row that nothing can match has no canonical form).
-3. The figure falls, `identity_shrunk` is counted on every later check by WR-06, every run is degraded, and the WR-05 gate holds the fold back with `Events` growing. The only exit is editing `storage.last_check.identity_entries` in Discovery by hand, which STATUS does not document. No ID that the dedupe could ever use was lost.
-There is a worse variant of the same cause: a hand edit that changes a real stem to a non-matching one (case, whitespace) moves real IDs into keys that match nothing. The check then counts the old stem as `identity_shrunk` only if the mark was recorded before, and counts the new keys as held, so the figure can stay equal while the dedupe has lost every ID of that board. The check and the dedupe agree on the figure but the figure no longer measures what AGENTS rule 3 protects. Nothing flags the stem either way.
-**Fix:** Apply the same rule to the stem, once per stem, in `_reindex`, so `keys()`, the figure, `copy()`, `apply()` and `logical_counts` (which should call a shared predicate) stay in agreement:
-```python
-def stem_holds_keys(stem: str) -> bool:
-    """Can a job key produce this stem? `ats|board`: exactly one `|`, lower case (`stem_and_id`, `boards.JobIdentity.key`)."""
-    return stem.count("|") == 1 and stem == stem.lower()
-```
-In `_reindex`, set `self._kinds[stem] = {}` when `not stem_holds_keys(stem)` and skip `logical_counts` for such a stem. Add a counted difference in `_identity_invariants` (`identity_stem`, ref the stem, layer 1) so a flagged stem is visible, and add a test per variant that adds the row, records the mark, deletes the row, and asserts no `identity_shrunk`. A smaller fix, if the owner prefers not to add a difference: flag only, with the key rule left as is, and document the manual mark edit in STATUS; but then WR-11 stays a permanent alarm. If the planner keeps this out of scope, record it in STATUS as an open known limit next to the "Identity-only ID" limit in SPEC, so it is found before an incident.
+**File:** `DEPLOY.md:121` (the "Clearing a stuck `identity_shrunk`" paragraph), against `compact.py:691-715` (`StorageState.load`), `compact.py:604-620` (`effective_mode`), `pipeline.py:476-478` and `:512-533` (load at run start and seed save), `pipeline.py:424` (`save_storage`), `state.py:725-731` (`save_discovery_state`)
+**Issue:** The paragraph says to set `last_check.identity_entries` in the Discovery `storage` key and "change nothing else in the key". The key is one cell holding compact, sorted JSON. Three gaps, each traced in the code:
+1. **A JSON slip is destructive, not just ineffective.** `StorageState.load` and `effective_mode` both swallow `ValueError` and treat the text as `{}`. In production (Events_Legacy present) that gives `ModeDecision(MODE_DUAL, NOTE_CUTOVER_INCOMPLETE)`; the poller writes as dual, notes `storage cutover incomplete`, and because the parsed state has `seeded_at is None` it re-runs the repair and then saves a fresh default `StorageState` (`pipeline.py:524-533`: `storage.seeded_at = ...; storage.to_json()`), which replaces the whole value. The `cutover` record, `fold.last_day` / `first_day`, `last_check` and every other field of a working compact system are gone. A missing comma or a stray quote, or Sheets turning a typed number into text inside a hand-retyped cell, is enough. Recovery is "run `storage_cutover` again" (the interrupted-cutover path), which the runbook does not mention, and the fold record is lost for good.
+2. **A run in progress overwrites the edit.** The poller reads the whole Discovery body at run start (`pipeline.py:473`) and every save writes the whole body back (`save_discovery_state` rewrites all keys, `state.py:725-731`). A run takes about 11 minutes of each hour (08:00:09 start, `Run:` line 08:11:02 in run 44043039789), the hourly dispatch is external, and the writer lease does not stop a hand edit. An edit made in that window is silently replaced by the run's in-memory copy (`record_compact_check` keeps `max(previous_in_memory, current)`), so the owner sees `identity_shrunk` come back and may repeat it.
+3. **No verification step.** After the edit the runbook does not say to re-run `storage_parity` and read `mode compact` and `0 counted differences`. Only that run proves both that the key still parses and that the mark equals the figure.
+**Fix:** Extend the paragraph, for example: "Edit the cell only between hourly runs (right after one finishes, not within about 15 minutes before an hourly dispatch or while a Job Hunter run is in progress). Copy the whole value into a JSON validator first, change only the number after `"identity_entries":`, and paste it back. If you cannot be sure it is valid JSON, do not edit it. Then run `storage_parity` again: it must print `mode compact` and no `identity_shrunk`. If it prints `mode dual` or the next hourly run notes `storage cutover incomplete`, the key was damaged: run `storage_cutover` once to finish the record (it does not copy) and tell the agent; `fold.first_day` will need to be rebuilt." An optional later fix is a one-shot `--storage-set-identity-mark` that writes the figure under the writer lease (AGENTS rule 7 applies: not a feature to add before an owner decision).
+
+### WR-13: STATUS states the storage-report result without its scope, and two older statements it contradicts were left standing
+
+**File:** `STATUS.md:3` (Last updated line) and `STATUS.md:7` (the "Deployed (live, 2026-11-17)" paragraph), against `STATUS.md:204` (SC3 row), `STATUS.md:207` ("Remaining not-verified items") and the log of run 43990083983
+**Issue:**
+1. **Headline without scope.** The new text says "storage report 447 cells/day against 35,511" / "79.4x smaller". The figures are the report's, and they are real (log lines: `median daily growth in allocated cells: 35,511 before (Events rows x 7) -> 447 after; 79.4x smaller; 7 complete UTC days ... (2026-11-10 .. 2026-11-16), Identity and Tally growth since the cutover included`). But the before figure is Events rows x 7 only and the after figure is Events plus Identity plus Tally only. The same log shows the total allocated cells across all tabs rose from 2,471,757 before the cutover to 3,008,249 now (30.1% of the 10,000,000-cell limit; 2,689,420 on 2026-11-06 in this file), almost all of it the `Boards` tab (715,520 cells on 2026-11-06, 1,049,696 now: 22,304 to 32,803 rows). So the sheet as a whole grew about 29,000 cells a day over the last 11 days while the ledger tabs shrank. The paragraph, which exists to say what is verified, names only the favourable figure. The earlier section (lines 187-190) was careful to say what the measure does and does not cover; this one dropped that care.
+2. **Two statements now contradict it.** The SC3 row still says "the order-of-magnitude drop is **not claimed** (transitional measurement)" and the "Remaining not-verified items" line still lists "a steady-state daily growth figure (re-read `--storage-report` after about 7 more complete UTC days)". The new paragraph supplies exactly that re-read (7 complete days after the first fold, 447) without saying that those two lines are now answered, or by how much. A reader of line 204 and line 7 gets opposite answers.
+**Fix:** In the line-7 paragraph add the scope and the total: "447 cells a day is the median over 2026-11-10..16 for Events, Identity and Tally; the total allocated cells across all tabs went 2,471,757 -> 3,008,249 (30.1% of the limit, the growth is the Boards tab, 1,049,696 cells; Events_Legacy, 1,650,502 cells, is kept)". Then update the SC3 row and the "Remaining not-verified items" line to point at run 43990083983: the ledger-tab growth measurement is made (7 days, 79.4x on the report's own basis) and what stays open is the whole-sheet growth, which the report does not measure on a daily basis.
 
 ## Info
 
 ### IN-01: `parity.py` docstring is wrong about its imports
 
 **File:** `parity.py:3-4` (imports at `:35-39`)
-**Issue:** The docstring says the module "imports `compact` and `ledger` only (never state, pipeline or hunter)". It also imports `reporting`, `storage_report` (which imports `state`) and `boards`. There is no cycle today, but the stated invariant is false. Still open.
+**Issue:** The docstring says the module "imports `compact` and `ledger` only (never state, pipeline or hunter)". It also imports `reporting`, `storage_report` (which imports `state`) and `boards`. No cycle today, but the stated invariant is false. Still open.
 **Fix:** State the real constraint (no import of `pipeline` or `hunter`), or move the shared figure code so the claim becomes true.
 
 ### IN-02: Removing `Events_Legacy` silently flips a compact system back to dual writing
 
 **File:** `compact.py:604-620` (`effective_mode`, `NOTE_COMPACT_WITHOUT_LEGACY` at `:589`)
-**Issue:** If the stored mode is compact and `Events_Legacy` is gone, the poller writes as dual. Baselines go back into Events, and the fold and the check stop. DECISIONS P3-08 describes removing `Events_Legacy` as a later owner decision "with an export plan". As written, that decision cannot be carried out without a code change. `_compact_mode_stored` calls `effective_mode(..., legacy_present=True)`, so the `ensure()` guard also assumes the legacy tab exists. Still open.
+**Issue:** If the stored mode is compact and `Events_Legacy` is gone, the poller writes as dual. Baselines go back into Events, and the fold and the check stop. DECISIONS P3-08 describes removing `Events_Legacy` as a later owner decision "with an export plan". As written, that decision cannot be carried out without a code change. `_compact_mode_stored` calls `effective_mode(..., legacy_present=True)`, so the `ensure()` guard also assumes the legacy tab exists. The storage report (run 43990083983) shows `Events_Legacy` at 1,650,502 cells, which is the main reason the owner may want to delete it, so this is more likely to be hit than before. Still open.
 **Fix:** Before the owner removes the tab, add a recorded state (for example `storage.legacy_retired_at` or a `--storage-retire-legacy` step) that `effective_mode` and `_compact_mode_stored` honour. Until then, note it in DEPLOY.md.
 
 ### IN-03: The workflow lets `storage_cutover` and `storage_restore` run in one job
 
 **File:** `.github/workflows/job_hunter.yml:40-44` and the step guards
-**Issue:** The CLI makes the two flags mutually exclusive, but each is a separate workflow step guarded only by its own input. Ticking both runs the cutover and then the restore in the same dispatch. Still open (workflow unchanged).
+**Issue:** The CLI makes the two flags mutually exclusive, but each is a separate workflow step guarded only by its own input. Ticking both runs the cutover and then the restore in the same dispatch. Still open (workflow unchanged; `git diff --stat 68a7253 bc3bea2` shows no `.github` file).
 **Fix:** Add a first step that fails when more than one of the owner-step or report inputs is true.
 
 ### IN-04: The cutover checksum covers only `key|time|event`
 
 **File:** `compact.py:391-396` (`rows_checksum`)
-**Issue:** The comment says the checksum compares "the rows it meant to copy" with the rows read back. It hashes three of the seven columns, so a changed `Freshness`, `Disposition`, `Published` or `Detail` passes. `Events_Legacy` stays whole, so this is not a data-loss path. Still open.
+**Issue:** The comment says the checksum compares "the rows it meant to copy" with the rows read back. It hashes three of the seven columns, so a changed `Freshness`, `Disposition`, `Published` or `Detail` passes. `Events_Legacy` stays whole, so this is not a data-loss path. The cutover is done, so this only matters for a future cutover. Still open.
 **Fix:** Hash `"\x1f".join(ev.to_row())` per row.
 
 ### IN-05: Dead variable and unused imports
 
 **File:** `reporting.py:492` (`first_event`), `storage_report.py:10,18` (`json`, `fr`)
-**Issue:** `first_event` is assigned and never read, and `json` and `fr` are imported and never used (I grepped `json.` and `fr.` in `storage_report.py`: no use). Still open. `storage_report.py` changed in this diff but not these lines.
+**Issue:** `first_event` is assigned and never read, and `json` and `fr` are imported and never used. Still open.
 **Fix:** Delete them.
 
 ### IN-06: Read-only commands read three tabs sequentially without the lease
 
 **File:** `state.py:608` and `state.py:893` (`load_ledger`), `hunter.py` (`run_storage_parity`, `run_storage_report`, `run_pilot_report`), `dashboard.py:594`
-**Issue:** `load_ledger` reads Events, then Identity, then Tally with separate calls. A manual `--storage-parity` or `--dashboard` that overlaps a poller run can see Events from before the run and Tally or Identity from after it, which gives counted differences that disappear on the next run. `--storage-parity` also compares the Identity count against `last_check.identity_entries`, which a racing poller run advances. After WR-06 the mark only grows, so a racing read can only produce a false `identity_shrunk` in the direction of an old snapshot against a newer mark. Mitigated by the one-run-at-a-time concurrency group. Still open.
+**Issue:** `load_ledger` reads Events, then Identity, then Tally with separate calls. A manual `--storage-parity` or `--dashboard` that overlaps a poller run can see Events from before the run and Tally or Identity from after it, which gives counted differences that disappear on the next run. `--storage-parity` also compares the Identity count against `last_check.identity_entries`, which a racing poller run advances. After WR-06 the mark only grows, so a racing read can only produce a false `identity_shrunk` in the direction of an old snapshot against a newer mark. Mitigated by the one-run-at-a-time concurrency group (which does not cover a read-only dispatch of the same workflow only if the group is shared; the runbook's own `storage_parity` pre-check in "Clearing a stuck `identity_shrunk`" is subject to it). Still open.
 **Fix:** Document that a parity difference should be re-run before it is trusted, or read all three tabs in one `values_batch_get`.
 
 ### IN-07: `first_day` is dated by the fold that ends, not by the one that started
 
 **File:** `compact.py:485` (`fold_record`)
-**Issue:** `first = previous.get("first_day") or (_utc_day(now) if rows > 0 or previous.get("started_day") else "")`. When a fold fails after its first delete on day D and finishes on day D+1, `first_day` becomes D+1 although rows went on D. The restore guard is unaffected, because it also honours the marker until the fold ends. `storage_report.py:317` and `:350` read `fold.first_day` as the start of the "after the cutover and first fold" window and `first_fold_day`. The window then starts later than the truth, which is the conservative direction, but the reported `first_fold_day` is wrong. Still open.
-**Fix:** Prefer the marker's day: `previous.get("first_day") or previous.get("started_day") or (_utc_day(now) if rows > 0 else "")`.
+**Issue:** `first = previous.get("first_day") or (_utc_day(now) if rows > 0 or previous.get("started_day") else "")`. When a fold fails after its first delete on day D and finishes on day D+1, `first_day` becomes D+1 although rows went on D. The restore guard is unaffected. `storage_report.py:317` and `:350` read `fold.first_day` as the start of the "after the cutover and first fold" window, so the reported `first_fold_day` is wrong in that case (conservative direction). Still open. (Live: the first fold, run 41549615660, ended cleanly on 2026-11-03, so production is not affected.)
+**Fix:** `previous.get("first_day") or previous.get("started_day") or (_utc_day(now) if rows > 0 else "")`.
 
 ### IN-08: The Tally carry holds zero-total rows and drops the newest row when full
 
 **File:** `compact.py:726-734` (`keep_tally`), `pipeline.py:371-383` (`carry_tally`)
-**Issue:** Two small quality points on the WR-03 carry.
-1. Every run appends a Tally row, including runs that observed nothing (`total` 0). A zero-count row has nothing to lose, because no baseline count is missing and `repair_plan` has nothing to rebuild. Carrying it spends one of the 20 slots for nothing and adds a Discovery write per failing run.
-2. When the carry is full, the newest row is the one left out (`keep_tally` returns False). The newest row is the one most likely to hold fresh baseline counts, so the permanent undercount WR-03 fixed comes back after 20 consecutive failures. Realistically a Tally outage that long also fails the Discovery save that persists the carry. The cap is deliberate, so this is a robustness note, not a defect.
-**Fix:** In `carry_tally`, return early when `row.total == 0`. When the carry is full, either drop the oldest zero-count row first or log and note `storage tally carry full` in `run.notes`.
+**Issue:** (1) A run that observed nothing (`total` 0) still takes one of the 20 carry slots and adds a Discovery write per failing run. (2) When the carry is full the newest row is the one left out, and the newest row is the one most likely to hold fresh baseline counts. The cap is deliberate, so this is a robustness note. Still open.
+**Fix:** In `carry_tally`, return early when `row.total == 0`; when full, drop the oldest zero-count row first or note `storage tally carry full` in `run.notes`.
 
 ### IN-09: The tests do not pin the claim that matters most for the fix, "the fold stays held back"
 
-**File:** `tests/test_storage_parity.py` (the WR-06 loss tests and the WR-08 integration test, around `:777-822` and `:927-958` before this diff)
-**Issue:** The WR-06 purpose, stated in SPEC, D-57 and STATUS, is that an unrepaired loss "holds the fold back" on every later run. The WR-06 tests assert the note, the degraded outcome, the counted figure and the mark across three runs. None asserts `storage fold skipped: integrity check counted 1 differences` or that no rows were deleted for `identity_shrunk` specifically. The code path is right (`storage_check` returns `report.counted`, `pipeline` gates on it, and `tests/test_storage_cutover.py` covers the gate with another difference), but a future change to how `identity_shrunk` counts would not fail any test that names the fold. The new WR-10 integration test does the opposite check well (it asserts `storage fold skipped` is absent and `fold.last_day` advances), which makes the missing positive case more visible. Still open.
-**Fix:** In `test_a_loss_nobody_repairs_is_counted_on_every_later_check...`, assert each degraded run's notes contain `storage fold skipped` when a fold is due, or add one test in the fold case class that removes a baseline-only ID and checks the Events row count is unchanged across two runs.
-
-### IN-10: The documented repair path has no tooling and the mark can be stuck high by a transient over-read
-
-**File:** `STATUS.md` (WR-06 cost paragraph), `SPEC.md:111`, `compact.py:758-775`
-**Issue:** The docs give "restore the missing IDs to `Identity`, for example from `Events_Legacy`" as the only repair. No command does it. The poller's start-of-run repair rebuilds only Tally groups, not Identity, and `Identity` is a codec cell (chunked, escaped entries with a `Count` column), so a hand edit is error-prone. Also, because the mark can only rise, a single over-read (a transient read that returns extra rows) leaves it stuck high for good. A malformed entry with a posting ID still raises the mark (it is a held key, WR-09), and so does a stem no job key can produce (WR-11). The user chose not to add an acknowledgement input, so this is only an operational cost, not a defect. It is better recorded than discovered during an incident.
-**Fix:** Add a short runbook note to DEPLOY.md or STATUS ("to clear a stuck `identity_shrunk`, set `last_check.identity_entries` in the Discovery `storage` key to the true count, after confirming nothing is lost"), and consider a read-only `--storage-parity` line that prints the mark and the current count, so the owner can see which side moved.
+**File:** `tests/test_storage_parity.py` (the WR-06 loss tests and the WR-08 integration test)
+**Issue:** The WR-06 purpose is that an unrepaired loss "holds the fold back" on every later run. None of those tests asserts `storage fold skipped: integrity check counted 1 differences` or that no rows were deleted for `identity_shrunk` specifically (the WR-10 integration test checks the opposite case well). Now that WR-06 is live and DEPLOY.md documents the stuck state as holding the fold back, the unpinned claim is an operator-facing one. Still open.
+**Fix:** Assert each degraded run's notes contain `storage fold skipped` when a fold is due, or add a fold test that removes a baseline-only ID and checks the Events row count is unchanged across two runs.
 
 ### IN-11: The figure keeps the name "entries" and the Discovery key cannot be renamed lightly
 
-**File:** `compact.py:758-775` (`last_identity_entries`, `identity_entries` parameter), `parity.py:107`, `:329` (`compared["identity_entries"]`), `parity.py:360` (`entries`, `entries_before`)
-**Issue:** The persisted key, the `compared` key, the parameters and the variables all say "entries" for what is a count of distinct held keys. `check_compact` also reads `compared["identity_entries"]` that `_kept_in_identity` writes, an implicit coupling through a dict (safe today because `_kept_in_identity` always sets it). The persisted key name is a Discovery-state contract.
+**File:** `compact.py:758-775` (`last_identity_entries`, `identity_entries` parameter), `parity.py:107`, `:329` (`compared["identity_entries"]`), `parity.py:360`
+**Issue:** The persisted key, the `compared` key, the parameters and the variables all say "entries" for what is a count of distinct held keys. The runbook now names `last_check.identity_entries` and `compared: identity_entries` as an operator contract, so a rename would break the procedure as well as the persisted state. `check_compact` also reads `compared["identity_entries"]` that `_kept_in_identity` writes, an implicit coupling through a dict. Still open.
 **Fix:** Leave the persisted key name alone. Optionally have `_kept_in_identity` return the count instead of reading it back out of `compared`.
 
 ### IN-12: The WR-10 fix removes an incidental dual-mode detection of a bare entry, and dual mode has no `identity_entry` check
 
-**File:** `parity.py:82-108` (`_seen_set`), `parity.py:324-327` (`identity_entry` exists only in `_kept_in_identity`), `compact.py:188-192`
-**Issue:** Before the fix, a bare `b` entry in the dual-mode check produced `identity_extra stem|` (the empty key was in `stored` and not in `keyable`). Now the entry holds no key, so `_seen_set` raises nothing. I reproduced it with the `Synthetic` harness (`MutationTests`): adding `,b` or `,x` to an Identity row gives no counted difference and `identity_entries` stays 24, while adding `,b999` still gives `identity_extra`. The first compact check after the cutover would flag it as `identity_entry`, so the entry is caught late, not never, and a bare entry cannot affect the dedupe. It is still a counted difference that became silent in the mode where the parity bar is earned, and the dual-mode tests (`test_one_identity_id_added`) do not cover a bare entry.
-**Fix:** Run the `identity_entry` loop from `_identity_invariants` so both modes flag a malformed entry (then drop the copy in `_kept_in_identity`), and add a dual-mode test with a bare `b`. The same change would also give WR-11's `identity_stem` a home that both modes share.
+**File:** `parity.py:82-108` (`_seen_set`), `parity.py:324-327`, `compact.py:188-192`
+**Issue:** Before WR-10 a bare `b` entry produced `identity_extra stem|` in the dual-mode check; now `_seen_set` raises nothing, and the `identity_entry` check exists only in `_kept_in_identity` (compact). Production is in compact mode now, so only a restore would put it back in dual mode; low priority. Still open.
+**Fix:** Run the `identity_entry` loop from `_identity_invariants` so both modes flag a malformed entry, and add a dual-mode test with a bare `b`.
+
+### IN-13: The runbook documents only half of the repair and only the mild WR-11 case
+
+**File:** `DEPLOY.md:121`, `STATUS.md:24`
+**Issue:** (1) The runbook says "restore the missing IDs to `Identity`, for example from `Events_Legacy`" but gives no way to do it: `Identity` is a codec sheet (kind letter plus `%`-escaped ID, chunked, with a `Count` column that the codec checks), no command writes it, and the poller's start-of-run repair rebuilds only Tally groups for an already seeded store (`repair_plan` skips IDs that have a key; it will re-add an Events-held ID but not a baseline-only one, and `Events_Legacy` is not read by it). IDs observed after the cutover exist only in `Identity` and the kept Events rows, so `Events_Legacy` cannot supply them. An owner following the text literally has no safe procedure for the first half; the second half (set the mark) is the only part that is actually executable. (2) The "Known case" sentence and STATUS line 24 describe only a stray or deleted row. The worse case in the review's WR-11 text (a real board's `Board_Key` hand-edited into a non-matching form) leaves `identity_entries` unchanged, so there is no stuck mark to clear; the board's old postings then no longer match the dedupe and can look new (flagged by `identity_missing` only if the board still has kept identity-class Events rows). The runbook's only advice for it is "Do not hand-edit `Board_Key`", with no recovery.
+**Fix:** Add: "If a real board's `Board_Key` was edited, set it back to the original lower-case `ats|board` (do not delete the row and do not set the mark); confirm with `storage_parity`." State that the repair of lost IDs is manual and unsupported by tooling today (or give the exact row format), so the owner decides before an incident whether to ask for a repair command.
+
+### IN-14: STATUS labels an inference as a log reading and relies on notes that the public log does not carry
+
+**File:** `STATUS.md:7`
+**Issue:** (1) "(the first compact check on the new code recorded the held-key count, so shrink detection starts from the next check)" sits inside the live-evidence parenthesis of the parity run, but no log prints the recorded mark: `Storage:` lines carry only `kept job keys` and `Tally runs`. It follows from the code (`record_compact_check`, mocked-tested) and is probably true; it should be labelled "(by the code, not printed)". (2) Run 44051541803 is said to have "no `storage write failed`, `storage parity:` or `storage fold skipped` note". Those are `Runs.Notes` texts; run notes are not written to the public log (grep of the log for `notes` finds nothing). What the logs do show is the `Storage:` line with 0 counted differences (which excludes `storage parity:`) and no ERROR or WARNING line other than the SmartRecruiters notice (every `storage write failed` path is paired with `log.error`, and the fold skip with `log.warning`, `pipeline.py:990-992`), so the claim is sound by that route. It should say so, or list the `Runs.Notes` check as an owner check as the earlier sections do for sheet-only facts.
+**Fix:** Reword both: "not printed; follows from `record_compact_check`" and "no ERROR or WARNING line (every storage-note path logs one); `Runs.Notes` itself is an owner check".
+
+### IN-15: DEPLOY.md still carries statements that are false after the deploy history (pre-existing, outside the diff)
+
+**File:** `DEPLOY.md:3`, `DEPLOY.md:103`, `DEPLOY.md:135`
+**Issue:** Line 3 says "Nothing here has been run on GitHub yet: this repository has no remote." The repository is public with an origin and has run for weeks (section 1 of the same file says it is history). Line 103 says the service account writing `Identity` is "not yet verified live ... assumption A2"; STATUS records A2 verified live for the service account's writes (seed run 40924656021; only the Sheet-side confirmation prompt remains an owner check). Line 135 ("Approval needed") is marked done in its own text. The `Compact storage` heading text also describes dual writing only, with the cutover and fold covered further down. None affects behaviour, but a runbook that starts with a false sentence is read less carefully, which matters for the new stuck-mark paragraph in the same file.
+**Fix:** Replace line 3 with the current state (repository public, runs hourly via the external dispatcher), update line 103 to "the service account writes it (verified live, STATUS); the confirmation prompt is an owner check", and drop or archive the "Approval needed" section.
 
 ---
 
-_Reviewed: 2026-11-16_
+_Reviewed: 2026-11-17_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
