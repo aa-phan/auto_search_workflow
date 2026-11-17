@@ -360,7 +360,8 @@ def _summary_checks(ledger: compact.Ledger, now: datetime, tz: tzinfo, runs: lis
 def _identity_loss(ledger: compact.Ledger, entries: int, entries_before: int | None) -> list[Diff]:
     """Compact layer 1, the part Events cannot see (WR-02): Identity is append-only, so its count of distinct posting IDs never falls. `identity_shrunk` is a count
     below the one the previous check recorded (`entries_before`, None when there is none). `entries` is the figure `_identity_invariants` already returned (one source, WR-09);
-    deleting a malformed entry whose ID no other entry holds is counted here too, because the dedupe holds that ID; `identity_unreadable` is a number of rows that hold
+    deleting a malformed entry whose posting ID no other entry holds is counted here too, because the dedupe holds that ID; an entry with no posting ID holds nothing, so deleting it
+    is not counted (WR-10); `identity_unreadable` is a number of rows that hold
     something but did not parse, whose IDs `seen()` therefore never sees. Numbers only."""
     out: list[Diff] = []
     if entries_before is not None and entries < entries_before:

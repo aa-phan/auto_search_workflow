@@ -100,7 +100,8 @@ def logical_counts(events: list[lg.Event], *, folded: Iterable[compact.FoldedCou
             for row in identity.rows(stem):
                 for entry in row.entries():
                     letter, pid = compact.decode_entry(entry)
-                    kinds.setdefault(pid, letter)  # the first entry for an ID wins, as in IdentitySet
+                    if pid:  # an entry with no posting ID (a bare kind letter) holds nothing (WR-10)
+                        kinds.setdefault(pid, letter)  # the first entry for an ID wins, as in IdentitySet
             if n := sum(1 for letter in kinds.values() if letter == compact.KIND_OF[lg.BASELINED]):
                 baseline_by_board[stem] += n
     pending = sum(1 for s in lg.replay(events).values() if lg.needs_evaluation(s) or lg.needs_alert(s, _NEVER))
