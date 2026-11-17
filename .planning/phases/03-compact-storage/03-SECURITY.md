@@ -70,6 +70,10 @@ The register was authored at plan time in the nine `<threat_model>` blocks (03-0
 | T-03-35 | Elevation of privilege | Cutover without owner decision or before the bar | high | mitigate | Bar read `3 of 3` (run 41364810371); owner chose agent-dispatches; command gate passed (run 41373351559) (03-09-SUMMARY; STATUS; PILOT_LOG) | closed |
 | T-03-36 | Repudiation | Live success claimed without evidence | medium | mitigate | Two-day minimum used, ratio labelled transitional, order-of-magnitude drop not claimed; Sheet facts owner checks (STATUS; 03-09-SUMMARY) | closed |
 | T-03-37 | Information disclosure | Job text or secrets copied from logs | medium | mitigate | All logs secret-scanned before quoting, 0 matches (STATUS) | closed |
+| T-03-38 | Denial of service | `IdentitySet._reindex` counting a bare entry's empty posting ID; its deletion a permanent `identity_shrunk` holding the fold back | medium | mitigate | `if pid:` guard (compact.py:191); IntegrityTests end-to-end test: deletion gives an `ok` run, `fold.last_day` advances, `--storage-parity` exits 0 (03-10, mocked) | closed |
+| T-03-39 | Tampering | A hand-edited bare entry going unnoticed once it no longer counts | low | mitigate | `entry_well_formed` unchanged; 03-10 tests assert the bare entry is still an `identity_entry` difference and degrades the run (mocked) | closed |
+| T-03-40 | Tampering | The WR-10 fix hiding a real Identity loss | high | mitigate | Only `pid == ""` skipped; WR-09 tests (deleting `xB` is a counted `identity_shrunk`) pass unchanged; high-water mark and `record_compact_check` untouched (03-10, mocked) | closed |
+| T-03-41 | Repudiation | Docs or SUMMARY claiming WR-10 live or deployed | medium | mitigate | STATUS, SPEC, D-57 and 03-10-SUMMARY label WR-10 mocked, not deployed; no push, deploy or dispatch (git log: branch only) | closed |
 | T-03-SC | Tampering | npm/pip/cargo installs (plans 03-01..03-09) | low | accept | AR-03-01 | closed |
 
 *Status: open · closed · open — below high threshold (non-blocking)*
@@ -129,4 +133,12 @@ The register was authored at plan time in the nine `<threat_model>` blocks (03-0
 |---|---|
 | Threats found | 46 |
 | Closed | 46 |
+| Open | 0 |
+
+## Security Audit 2026-11-17
+
+| Metric | Count |
+|---|---|
+| Threats found | 51 |
+| Closed | 51 |
 | Open | 0 |

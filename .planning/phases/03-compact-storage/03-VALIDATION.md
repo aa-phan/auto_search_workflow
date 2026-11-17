@@ -61,6 +61,7 @@ created: "2026-10-29"
 | 03-07-T3 | 07 | 7 | STOR-01 | T-03-31 | compact-mode integrity check (incl. WR-02 identity_shrunk with the WR-06 high-water mark over WR-07/WR-08 distinct well-formed IDs) | unit | `.venv/bin/python -m unittest tests.test_storage_parity -k Integrity -q` | ✅ | ✅ green |
 | 03-08-T1..T3 | 08 | 8 | STOR-01 | T-03-33, T-03-34 | consent; dual mode unchanged live | pre-deploy gate + live | 02-07 gate command (see plan) | ✅ | ✅ green |
 | 03-09-T1..T3 | 09 | 9 | STOR-01 (SC2, SC3 live) | T-03-35..37 | owner's one-way decision; live evidence by run id | manual + live | see plan (preconditions are calendar waits) | ✅ | ✅ green |
+| 03-10-T1..T3 | 10 | 10 | STOR-01 (gap G-3-7, WR-10) | T-03-38..41 | a bare kind letter holds no key, stays flagged identity_entry, deleting it is not an identity_shrunk; storage report skips it | tracer (shared fake) + unit | `.venv/bin/python -m unittest tests.test_storage_parity tests.test_storage_report -q` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -99,7 +100,7 @@ created: "2026-10-29"
 - [x] Feedback latency < 3s (quick run command)
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** re-validated 2026-11-16 after the review fix WR-09 (mapped commands re-run green, 246 tests; full suite `Ran 942 tests ... OK`; WR-09's five tests sit in test_storage_parity). Earlier: re-validated 2026-11-15 after the review fixes WR-01..WR-08 (every automated command above re-run green, full suite `Ran 939 tests ... OK`; the fixes' tests sit in the mapped files test_compact, test_storage_parity and test_storage_cutover, WR-06..WR-08 in test_storage_parity; live and owner-check items labelled in Manual-Only). First validated 2026-11-06 (910 tests).
+**Approval:** re-validated 2026-11-17 after gap-closure plan 03-10 (WR-10; mapped commands green, full suite `Ran 945 tests ... OK`). Earlier: re-validated 2026-11-16 after the review fix WR-09 (mapped commands re-run green, 246 tests; full suite `Ran 942 tests ... OK`; WR-09's five tests sit in test_storage_parity). Earlier: re-validated 2026-11-15 after the review fixes WR-01..WR-08 (every automated command above re-run green, full suite `Ran 939 tests ... OK`; the fixes' tests sit in the mapped files test_compact, test_storage_parity and test_storage_cutover, WR-06..WR-08 in test_storage_parity; live and owner-check items labelled in Manual-Only). First validated 2026-11-06 (910 tests).
 
 ## Validation Audit 2026-11-06
 
