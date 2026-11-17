@@ -3,10 +3,10 @@ phase: 03
 review: 03-REVIEW.md
 titles: json
 findings:
-  - id: WR-10
+  - id: WR-11
     severity: warning
     disposition: open
-    title: "An entry with no posting ID counts as a held key, and the only repair for it, deletion, is a permanent `identity_shrunk`"
+    title: "An Identity stem no job key can produce holds keys that match nothing, is not flagged, raises the mark, and deleting it is a permanent `identity_shrunk`"
   - id: IN-01
     severity: info
     disposition: open
@@ -42,7 +42,7 @@ findings:
   - id: IN-09
     severity: info
     disposition: open
-    title: "The new tests do not pin the claim that matters most for the fix, \"the fold stays held back\""
+    title: "The tests do not pin the claim that matters most for the fix, \"the fold stays held back\""
   - id: IN-10
     severity: info
     disposition: open
@@ -51,6 +51,14 @@ findings:
     severity: info
     disposition: open
     title: "The figure keeps the name \"entries\" and the Discovery key cannot be renamed lightly"
+  - id: IN-12
+    severity: info
+    disposition: open
+    title: "The WR-10 fix removes an incidental dual-mode detection of a bare entry, and dual mode has no `identity_entry` check"
+  - id: WR-10
+    severity: warning
+    disposition: open
+    title: "An entry with no posting ID counts as a held key, and the only repair for it, deletion, is a permanent `identity_shrunk`"
   - id: WR-09
     severity: warning
     disposition: fixed
@@ -59,10 +67,6 @@ findings:
     severity: warning
     disposition: fixed
     title: "A malformed Identity entry still raises the mark, so removing it is a permanent `identity_shrunk` (WR-07 only fixed duplicates)"
-  - id: IN-12
-    severity: info
-    disposition: fixed
-    title: "The new unit test claims coverage it does not have and builds its fixture twice"
   - id: WR-07
     severity: warning
     disposition: fixed
@@ -91,16 +95,16 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 12
-total: 22
-recorded: 2026-11-16T07:18:27.497Z
+open: 14
+total: 23
+recorded: 2026-11-17T05:13:28.818Z
 ---
 
 # Phase 03: Code Review Disposition
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-10 | warning | open | - |
+| WR-11 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -112,9 +116,10 @@ recorded: 2026-11-16T07:18:27.497Z
 | IN-09 | info | open | - |
 | IN-10 | info | open | - |
 | IN-11 | info | open | - |
+| IN-12 | info | open | - |
+| WR-10 | warning | open | - (not in the current review) |
 | WR-09 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-08 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
-| IN-12 | info | fixed | c845065 (WR-08 fix: test comment corrected, stray blank line removed) (not in the current review) |
 | WR-07 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-06 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-01 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
