@@ -9,11 +9,11 @@ findings:
     title: "An Identity stem no job key can produce holds keys that match nothing, is not flagged, raises the mark, and deleting it is a permanent `identity_shrunk`"
   - id: WR-12
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The documented hand edit of the `storage` key has no safe-edit protocol: a syntax slip flips a compact system to dual and erases its records, a run in progress discards the edit, and nothing checks the result"
   - id: WR-13
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "STATUS states the storage-report result without its scope, and two older statements it contradicts were left standing"
   - id: IN-01
     severity: info
@@ -61,11 +61,11 @@ findings:
     title: "The WR-10 fix removes an incidental dual-mode detection of a bare entry, and dual mode has no `identity_entry` check"
   - id: IN-13
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The runbook documents only half of the repair and only the mild WR-11 case"
   - id: IN-14
     severity: info
-    disposition: open
+    disposition: fixed
     title: "STATUS labels an inference as a log reading and relies on notes that the public log does not carry"
   - id: IN-15
     severity: info
@@ -125,8 +125,8 @@ recorded: 2026-11-17T09:12:46.256Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-11 | warning | skipped | accepted by the owner 2026-11-17 (UAT 8, option b); known limit in STATUS.md, clearing steps in DEPLOY.md |
-| WR-12 | warning | open | - |
-| WR-13 | warning | open | - |
+| WR-12 | warning | fixed | docs fix 0a8a972 (DEPLOY.md runbook / STATUS.md wording), 2026-11-17 |
+| WR-13 | warning | fixed | docs fix 0a8a972 (DEPLOY.md runbook / STATUS.md wording), 2026-11-17 |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -138,8 +138,8 @@ recorded: 2026-11-17T09:12:46.256Z
 | IN-09 | info | open | - |
 | IN-11 | info | open | - |
 | IN-12 | info | open | - |
-| IN-13 | info | open | - |
-| IN-14 | info | open | - |
+| IN-13 | info | fixed | docs fix 0a8a972 (DEPLOY.md runbook / STATUS.md wording), 2026-11-17 |
+| IN-14 | info | fixed | docs fix 0a8a972 (DEPLOY.md runbook / STATUS.md wording), 2026-11-17 |
 | IN-15 | info | open | - |
 | IN-10 | info | fixed | runbook note "Clearing a stuck `identity_shrunk`" added to DEPLOY.md 2026-11-17 (no tooling added) (not in the current review) |
 | WR-10 | warning | fixed | plan 03-10 (389789a, de57002); resolved per 03-REVIEW.md re-review 98c19d8 (not in the current review) |
