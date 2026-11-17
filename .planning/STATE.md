@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Search-substitute volume
-current_phase: 03
+current_phase: 3
 current_phase_name: Compact storage
 status: executing
-stopped_at: Completed 03-08-PLAN.md
-last_updated: "2026-10-30T01:06:03.848Z"
-last_activity: 2026-10-29
-last_activity_desc: Phase 03 execution started
-state_head: cb8278356bb43b3b6a12d0c1d4cd32969d8a42ce
+stopped_at: Completed 03-10-PLAN.md
+last_updated: "2026-11-17T05:08:56.132Z"
+last_activity: 2026-11-16
+last_activity_desc: Phase 3 execution started
+state_head: 29f1a7f46e3b071089b64238aefb8944435d80a8
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 18
-  completed_plans: 17
+  total_plans: 19
+  completed_plans: 19
   percent: 33
 ---
 
@@ -25,14 +25,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-10-28)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Phase 03 — Compact storage
+**Current focus:** Phase 3 — Compact storage
 
 ## Current Position
 
-Phase: 03 (Compact storage) — EXECUTING
-Plan: 9 of 9
-Status: Ready to execute
-Last activity: 2026-10-29 — Phase 03 execution started
+Phase: 3 (Compact storage) — EXECUTING
+Plan: 10 of 10
+Status: All plans executed; 03-10 (gap closure G-3-7) done, phase re-verification pending
+Last activity: 2026-11-16 — Phase 3 execution started
 
 Progress: [███░░░░░░░] 33%
 
@@ -70,6 +70,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 03 P06 | 18 min | 3 tasks | 12 files |
 | Phase 03 P07 | 66min | 3 tasks | 14 files |
 | Phase 03 P08 | 10min | 3 tasks | 2 files |
+| Phase 3 P10 | 20 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -114,6 +115,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 03]: 03-07: fold_events refuses the whole fold when a planned row no longer holds its key in a seen row (checked on a fresh read before the first deleteDimension) — T-03-29: row numbers come from the start-of-run load; a hand edit must never make a delete hit another row
 - [Phase 03]: 03-07: compact-mode integrity check (parity.check_compact) runs in every poller run and in --storage-parity; limits stated: IDs only Identity holds and lost baseline-only counts cannot be detected — Resolves the open 03-01 item on Ledger.negative(); the check can only compare what Events still keeps
 - [Phase 03]: 03-08: cutover tooling deployed on the owner's choice deploy (restore input kept); dual mode confirmed unchanged by run 40983170540
+- [Phase 3]: 03-10 WR-10: IdentitySet._reindex skips an empty posting ID so a bare kind letter holds no key; still flagged identity_entry, deleting it is not a counted identity_shrunk (mocked, not deployed)
 
 ### Pending Todos
 
@@ -151,6 +153,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-10-30T01:06:03.785Z
-Stopped at: Completed 03-08-PLAN.md
+Last session: 2026-11-17T05:08:55.993Z
+Stopped at: Completed 03-10-PLAN.md
 Resume file: None
