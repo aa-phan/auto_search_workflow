@@ -57,7 +57,7 @@ findings:
     title: "The WR-10 fix removes an incidental dual-mode detection of a bare entry, and dual mode has no `identity_entry` check"
   - id: WR-10
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "An entry with no posting ID counts as a held key, and the only repair for it, deletion, is a permanent `identity_shrunk`"
   - id: WR-09
     severity: warning
@@ -117,7 +117,7 @@ recorded: 2026-11-17T05:13:28.818Z
 | IN-10 | info | open | - |
 | IN-11 | info | open | - |
 | IN-12 | info | open | - |
-| WR-10 | warning | open | - (not in the current review) |
+| WR-10 | warning | fixed | plan 03-10 (389789a, de57002); resolved per 03-REVIEW.md re-review 98c19d8 (not in the current review) |
 | WR-09 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-08 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-07 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
