@@ -1,14 +1,16 @@
 ---
-status: complete
+status: testing
 phase: 03-compact-storage
 source: [03-VERIFICATION.md]
 started: 2026-11-06T22:24:12Z
-updated: 2026-11-17T00:45:42.531Z
+updated: 2026-11-17T06:00:00Z
 ---
 
 ## Current Test
 
-[testing complete]
+number: 8
+name: Deploy decision after the WR-10 fix (open warning WR-11)
+awaiting: user response
 
 ## Tests
 
@@ -51,12 +53,17 @@ result: issue
 reported: "fix wr-10 first"
 severity: major
 
+### 8. Deploy decision after the WR-10 fix (open warning WR-11)
+Deploy decision for branch gsd/phase-03-compact-storage after gap-closure plan 03-10 fixed WR-10 (added by the 2026-11-17 re-verification). Production runs 68a7253 without WR-01..WR-10. Open: WR-11 (a hand-edited Identity stem that no job key can produce, such as no `|`, an extra `|` or upper case, still holds keys and counts toward the identity mark; deleting it raises a permanent identity_shrunk in compact mode). Decide: (a) fix WR-11 first (a `stem_holds_keys` predicate in `IdentitySet._reindex` plus an `identity_stem` counted difference), (b) accept WR-11, add the IN-10 runbook line and deploy, or (c) defer the branch.
+expected: After a deploy: no 'storage write failed', 'storage parity:' or 'storage fold skipped' note; the first compact check records the distinct held-key count; the next fold still runs. Until then every WR-01..WR-10 behaviour is mocked only.
+result: [pending]
+
 ## Summary
 
-total: 7
+total: 8
 passed: 6
 issues: 1
-pending: 0
+pending: 1
 skipped: 0
 blocked: 0
 
