@@ -803,6 +803,27 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertEqual([d.kind for d in dirty.diffs if d.kind == "identity_entry"], ["identity_entry"])
         self.assertEqual(self.ledger().identity.distinct_count(), len(self.ledger().identity.keys()))
 
+    def test_a_bare_kind_letter_holds_no_key_so_it_never_raises_the_mark_and_deleting_it_is_not_a_shrink(self) -> None:
+        """WR-10 (MOCKED: pure and offline): an entry with no posting ID holds no key, through from_rows, copy and apply. `check_compact` still flags it as
+        `identity_entry` without raising the figure, and deleting it afterwards is not an `identity_shrunk`."""
+        bare = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 2, "bA,b")])
+        self.assertEqual((bare.distinct_count(), len(bare.keys()), len(bare)), (1, 1, 1))
+        self.assertEqual(bare.keys(), {"g|a|A"})
+        self.assertEqual(bare.copy().distinct_count(), 1)
+        self.assertFalse(compact.entry_well_formed("b"))  # still flagged
+        applied = compact.IdentitySet()
+        applied.apply([compact.IdentityRow("g|a", 1, "t", 2, "bA,x")])  # a bare unknown letter holds nothing either
+        self.assertEqual(applied.keys(), {"g|a|A"})
+        clean = self.check()
+        added = self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",b", count=r.count + 1))
+        flagged = self.check(rows=added)
+        self.assertEqual(self.kinds(flagged), ["identity_entry"])
+        self.assertEqual(flagged.compared["identity_entries"], clean.compared["identity_entries"])  # the figure did not move
+        mark = flagged.compared["identity_entries"]
+        deleted = parity.check_compact(self.ledger(), now=NOW, identity_entries_before=mark)
+        self.assertNotIn("identity_shrunk", [d.kind for d in deleted.diffs])
+        self.assertEqual(deleted.counted, 0)
+
     def test_deleting_a_malformed_entry_whose_id_the_dedupe_holds_is_counted_identity_shrunk(self) -> None:
         """WR-09 (a): record the figure with a lone `xB` entry in the set, delete it: `identity_shrunk`, which was silent before (the figure counted 0 both times)."""
         def shrunk(rows: list[compact.IdentityRow], before: int) -> list[str]:

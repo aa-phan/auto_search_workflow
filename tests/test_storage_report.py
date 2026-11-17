@@ -416,6 +416,13 @@ class LogicalCountsTests(unittest.TestCase):
                     old, new = self.pair(tz, now, half)
                     self.assertEqual(old, new)
 
+    def test_a_bare_kind_letter_is_not_a_baseline_job_of_its_board(self) -> None:
+        """WR-10 (MOCKED: pure and offline): an Identity entry with no posting ID holds no key, so it is no baseline job of its board, as in IdentitySet."""
+        bare = compact.IdentitySet.from_rows([compact.IdentityRow("g|a", 1, "t", 2, "bA,b")])
+        counts = sr.logical_counts([], identity=bare)
+        self.assertEqual(counts["baseline_jobs_per_board"], {"g|a": 1})
+        self.assertEqual(counts["boards_with_baselines"], 1)
+
     def test_counts_by_purpose_disposition_day_and_board(self) -> None:
         old, _ = self.pair(UTC, ZONES[0][1])
         self.assertEqual(old["jobs_by_purpose"]["baseline"], 25 + 6 + 80 + 12 + 10)  # legacy, the early lever wave, the main wave, the re-entry pass, the rehearsal run
