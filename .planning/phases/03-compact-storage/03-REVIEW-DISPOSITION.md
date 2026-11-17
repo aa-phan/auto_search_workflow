@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: WR-11
     severity: warning
-    disposition: open
+    disposition: skipped
     title: "An Identity stem no job key can produce holds keys that match nothing, is not flagged, raises the mark, and deleting it is a permanent `identity_shrunk`"
   - id: IN-01
     severity: info
@@ -45,7 +45,7 @@ findings:
     title: "The tests do not pin the claim that matters most for the fix, \"the fold stays held back\""
   - id: IN-10
     severity: info
-    disposition: open
+    disposition: fixed
     title: "The documented repair path has no tooling and the mark can be stuck high by a transient over-read"
   - id: IN-11
     severity: info
@@ -104,7 +104,7 @@ recorded: 2026-11-17T05:13:28.818Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-11 | warning | open | - |
+| WR-11 | warning | skipped | accepted by the owner 2026-11-17 (UAT 8, option b); known limit in STATUS.md, clearing steps in DEPLOY.md |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -114,7 +114,7 @@ recorded: 2026-11-17T05:13:28.818Z
 | IN-07 | info | open | - |
 | IN-08 | info | open | - |
 | IN-09 | info | open | - |
-| IN-10 | info | open | - |
+| IN-10 | info | fixed | runbook note "Clearing a stuck `identity_shrunk`" added to DEPLOY.md 2026-11-17 (no tooling added) |
 | IN-11 | info | open | - |
 | IN-12 | info | open | - |
 | WR-10 | warning | fixed | plan 03-10 (389789a, de57002); resolved per 03-REVIEW.md re-review 98c19d8 (not in the current review) |
