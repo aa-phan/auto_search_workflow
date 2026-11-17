@@ -781,9 +781,9 @@ class IntegrityCheckTests(unittest.TestCase):
         self.assertIn("identity_duplicate", self.kinds(duplicated))
         self.assertEqual((clean.compared["identity_entries"], duplicated.compared["identity_entries"]), (24, 24))  # the duplicate adds nothing
         self.assertEqual(sum(len(r.entries()) for r in self.ledger(rows=self.entry_row("ff2", lambda r: replace(r, ids=r.ids + ",ff2", count=r.count + 1))).identity.all_rows()), 25)
-        # the same ID in another stem is another identity; a bare kind letter holds the empty key `s1|` that the dedupe holds too (WR-09: the figure is `len(keys())`)
+        # the same ID in another stem is another identity; a bare kind letter has no posting ID and holds no key (WR-10), so it adds nothing
         other = compact.IdentitySet.from_rows([compact.IdentityRow("s1", 1, "t", 3, "bX,bX,b"), compact.IdentityRow("s2", 1, "t", 1, "bX")])
-        self.assertEqual((other.distinct_count(), len(other.keys())), (3, 3))
+        self.assertEqual((other.distinct_count(), len(other.keys())), (2, 2))
         self.assertEqual(compact.IdentitySet().distinct_count(), 0)
 
     def test_the_identity_count_is_exactly_the_set_of_keys_the_dedupe_holds_malformed_entries_included(self) -> None:
@@ -1052,6 +1052,30 @@ class IntegrityTests(FoldCase):
         self.assertIn("storage parity: 1 differences (identity_shrunk 1); ", run.notes)
         self.assertEqual(self.storage().last_diffs, [f"identity_shrunk Identity ({recorded} vs {recorded + 1})"])
         self.assertEqual(self.parity_command()[0], 1)
+
+    def test_a_bare_kind_letter_is_flagged_raises_no_mark_and_deleting_it_is_no_shrink_so_the_fold_still_runs(self) -> None:
+        """WR-10 (MOCKED: the Sheets fake, not deployed): an entry with no posting ID (a bare `b`) holds no key and is flagged `identity_entry`. It does
+        not raise the high-water mark, so deleting it, its only repair, is not a counted `identity_shrunk` and does not hold the fold back."""
+        self.next_run()
+        mark = self.storage().last_check["identity_entries"]
+        row = next(r for r in self.sh.sheets[stm.IDENTITY_TAB].values[1:] if r[0] == "greenhouse|acme")
+        original = (row[3], row[4])
+        row[3], row[4] = str(int(row[3]) + 1), row[4] + ",b"
+        flagged = self.next_run()
+        self.assertEqual(flagged.outcome, stm.OUTCOME_DEGRADED)
+        self.assertIn("storage parity: 1 differences (identity_entry 1); ", flagged.notes)
+        self.assertEqual(self.storage().last_check["identity_entries"], mark)  # the bare entry holds no key, so the mark did not move
+        self.assertEqual(self.parity_command()[0], 1)
+        row[3], row[4] = original  # deleted: its only repair
+        day_after = FOLD_DAY + timedelta(days=1)
+        clean = self.run_at(day_after)
+        self.assertEqual(clean.outcome, stm.OUTCOME_OK, clean.notes)
+        self.assertNotIn("identity_shrunk", clean.notes)
+        self.assertNotIn("storage fold skipped", clean.notes)
+        self.assertEqual((self.storage().last_check["counted"], self.storage().last_diffs), (0, []))
+        self.assertEqual(self.storage().last_check["identity_entries"], mark)
+        self.assertEqual(self.storage().fold["last_day"], "2026-10-20")  # the fold on the next UTC day still ran
+        self.assertEqual(self.parity_command(day_after + timedelta(hours=3))[0], 0)
 
     def test_an_identity_row_with_no_stem_or_a_bad_chunk_is_counted_identity_unreadable(self) -> None:
         self.next_run()
