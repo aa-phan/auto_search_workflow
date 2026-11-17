@@ -35,7 +35,7 @@ Requirements validated: POLL-01..03, FRESH-01..02, STATE-01..02, DLVR-01..02, FI
 **Phase Numbering:** v1.0 ended at Phase 1, so v2.0 starts at Phase 2. Integer phases are planned milestone work; decimal phases (2.1, 2.2) are urgent insertions.
 
 - [x] **Phase 2: Measurement, governors and owner decisions** - See what reaches the tracker and what Groq can really evaluate, keep runs inside the Groq budget and the timeout, fix the two alert-recording bugs, record the owner decisions (completed 2026-10-28)
-- [ ] **Phase 3: Compact storage** - Move baseline and identity-only rows to compact Identity and Tally tabs with proven parity, before any board growth
+- [x] **Phase 3: Compact storage** - Move baseline and identity-only rows to compact Identity and Tally tabs with proven parity, before any board growth (completed 2026-11-17)
 - [ ] **Phase 4: 72-hour window and recent backfill** - Recent jobs (up to 72 h) reach the tracker with their real age, including a newly admitted board's recent postings
 - [ ] **Phase 5: Evidence-led board growth** - Read the first rebalance and the feedback evidence, then cycle boards by recent activity and feedback and grow the monitored set past 700 in measured steps
 - [ ] **Phase 6: Adapter registry and first-wave adapters** - A registry with golden tests, then Breezy, Gem and Oracle Recruiting Cloud, with date-only admission rules in place
@@ -100,7 +100,7 @@ Plans:
   3. Only after parity: baseline and identity-only rows are retired by swapping the old tab to `Events_Legacy` (kept and restorable), Events is back well below the D-03 review point, and the storage report shows rows, allocated cells and load time before and after with the daily growth in cells falling by an order of magnitude (D-43 estimate: about 26,200 to about 1,300 cells a day).
   4. A run interrupted in the middle of a board's baseline never makes that board's old postings look new on the next run (a board counts as baselined only after its last chunk is written).
 
-**Plans**: 10 plans, 10 executed (waves 1-10, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner; 03-10 is the gap-closure plan for UAT gap G-3-7 / review WR-10, offline only)
+**Plans**: 10/10 plans complete, 10 executed (waves 1-10, sequential: shared storage modules and contract documents; 03-05, 03-08 and 03-09 are live and need the owner; 03-10 is the gap-closure plan for UAT gap G-3-7 / review WR-10, offline only)
 
 Plans:
 **Wave 1**
@@ -241,7 +241,7 @@ Phases execute in numeric order: 2 → 3 → 4 → 5 → 6 → 7 (decimal insert
 |-------|-----------|----------------|--------|-----------|
 | 1. Board slot allocation | v1.0 | 1/1 | Complete | 2026-10-14 |
 | 2. Measurement, governors and owner decisions | v2.0 | 9/9 | Complete    | 2026-10-28 |
-| 3. Compact storage | v2.0 | 10/10 | In Progress | - |
+| 3. Compact storage | v2.0 | 10/10 | Complete    | 2026-11-17 |
 | 4. 72-hour window and recent backfill | v2.0 | 0/TBD | Not started | - |
 | 5. Evidence-led board growth | v2.0 | 0/TBD | Not started | - |
 | 6. Adapter registry and first-wave adapters | v2.0 | 0/TBD | Not started | - |

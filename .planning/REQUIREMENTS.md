@@ -77,7 +77,7 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 
 ### Storage
 
-- [ ] **STOR-01**: Baseline and identity-only rows are stored compactly (Identity and Tally tabs, D-43 amended), parity is proven before old rows retire, and Events stays below the D-03 review point
+- [x] **STOR-01**: Baseline and identity-only rows are stored compactly (Identity and Tally tabs, D-43 amended), parity is proven before old rows retire, and Events stays below the D-03 review point
 
 ### Scale
 
@@ -142,7 +142,7 @@ Goal: 20-30 relevant jobs posted within the last 72 hours reach the Job Tracker 
 | MEAS-04 | Phase 2 | Complete |
 | MEAS-05 | Phase 2 | Complete |
 | GOV-01 | Phase 2 | Complete |
-| STOR-01 | Phase 3 | Pending |
+| STOR-01 | Phase 3 | Complete |
 | WIN-01 | Phase 4 | Pending |
 | WIN-02 | Phase 4 | Pending |
 | WIN-03 | Phase 4 | Pending |

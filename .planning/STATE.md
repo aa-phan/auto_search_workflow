@@ -2,44 +2,44 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: Search-substitute volume
-current_phase: 3
-current_phase_name: Compact storage
-status: executing
-stopped_at: Completed 03-10-PLAN.md
-last_updated: "2026-11-17T05:08:56.132Z"
-last_activity: 2026-11-16
-last_activity_desc: Phase 3 execution started
-state_head: 29f1a7f46e3b071089b64238aefb8944435d80a8
+current_phase: 4
+current_phase_name: 72-hour window and recent backfill
+status: planning
+stopped_at: Phase 3 complete, ready to plan Phase 4
+last_updated: "2026-11-17T09:16:38.764Z"
+last_activity: 2026-11-17
+last_activity_desc: Phase 3 complete, transitioned to Phase 4
+state_head: dafcff251e7d76632ffc12f5a69ce2d9ec928ce1
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 19
   completed_plans: 19
-  percent: 33
+  percent: 43
 ---
 
 # Project State
 
 ## Project Reference
 
-See: `.planning/PROJECT.md` (updated 2026-10-28)
+See: `.planning/PROJECT.md` (updated 2026-11-17)
 
 **Core value:** A relevant job reaches the user within 12 hours of its source publication, and nothing of unverified age is ever presented as fresh.
-**Current focus:** Phase 3 — Compact storage
+**Current focus:** Phase 4 — 72-hour window and recent backfill
 
 ## Current Position
 
-Phase: 3 (Compact storage) — EXECUTING
-Plan: 10 of 10
-Status: All plans executed; 03-10 (gap closure G-3-7) done, phase re-verification pending
-Last activity: 2026-11-16 — Phase 3 execution started
+Phase: 4 — 72-hour window and recent backfill
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-17 — Phase 3 complete, transitioned to Phase 4
 
-Progress: [███░░░░░░░] 33%
+Progress: [████████████████████] 19/19 plans (100%)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9 (v2.0)
+- Total plans completed: 19 (v2.0)
 - Average duration: -
 - Total execution time: -
 
@@ -48,6 +48,7 @@ Progress: [███░░░░░░░] 33%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 02 | 9 | - | - |
+| 3 | 10 | - | - |
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -96,6 +97,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 02]: Owner-read Groq console figures (read 2026-10-26, recorded in D-53): free plan; openai/gpt-oss-120b and openai/gpt-oss-20b each 30 RPM, 1K RPD, 8K TPM, 200K TPD; zero data retention not enabled (neither global nor inference API). Plan choice and resume-to-Groq answer given 2026-10-28 (D-53).
 - [Phase 02]: D-53: Groq plan free-revisit (stay free, revisit before Phase 4); resume to Groq ok; Groq_Daily_Token_Budget default 100000 per model (half the owner-read 200,000, rolling window); 20-30 a day target conditional (about 75 evaluations / 12 rows a day)
 - [Phase 02]: D-54 (2026-10-28): owner keeps SmartRecruiters polled; P2-14 parking withdrawn; plan 02-09 superseded, nothing deployed.
+- [Phase 03]: Phase 3 complete 2026-11-17: cutover 2026-11-02, folds live; review fixes WR-01..WR-10 deployed bc3bea2 on the owner's choice (UAT 8 option b), WR-11 accepted; ledger growth 447 cells/day against 35,511 (storage report 43990083983).
 - [Phase 03]: Identity is keyed by the job-key stem ats|board_lowercased, never BoardRecord.key or a URL
 - [Phase 03]: Compact mode needs the Discovery key storage=compact AND Events_Legacy; a Tally failure is contained in both modes; a compact-mode Identity failure stops the run before save_boards
 - [Phase 03]: 03-02: parity bar = 3 complete UTC days after the seed day, 12 checked runs each, no difference, one admission; a run belongs to the UTC day it started in — P3-05; constants in compact.py, recorded in D-57
@@ -130,7 +132,7 @@ Roadmap decisions for v2.0 (2026-10-25):
 - [Phase 2] Poll cutoff verified live 2026-10-29 (governor test run 40792640070, D-56). Evaluation cutoff, alert cutoff, 5-attempt alert bound and WR-01 lock expiry are still offline-verified only.
 - [Phase 5] The first weekly rebalance (on) applied inside that test run (266 graduated, 0 replaced) with 214 boards missing one poll; EVID-01 should read it with that caveat.
 - [Phase 2] greenhouse|nadiacare|4459849009 deleted from the tracker on purpose (owner, D-55); add it to the live Settings row Tracker_Deleted_Keys to clear NEEDS ATTENTION.
-- Phase 3: Events 186,430 rows on 2026-10-25, about 3,355 rows a day, so the D-03 200k point arrives about 2026-10-29.
+- [Phase 3] Post-deploy watch: read the first fold on bc3bea2 (first poller run after 00:00 UTC 2026-11-18: `Storage: ... 0 counted` and a fold line with no `storage fold skipped` note), then one storage_parity run. WR-11 accepted (manual clearing steps in DEPLOY.md). Total spreadsheet cells 3.0M of 10M, growing with Boards.
 - Open owner decisions (GOV-01) and the 6 ingest warnings: `.planning/INGEST-CONFLICTS.md`.
 - Hourly cadence depends on an external trigger (GitHub's own schedule fires about every 4.4 h).
 - [Phase 3] Decision coverage gate overridden at plan time (2026-10-29): `check.decision-coverage-plan` cannot parse `P3-NN` IDs (could-not-parse). A manual check found all 14 (P3-01..P3-14) cited in the plans' must_haves and in the D-57 entry (03-01). The owner chose to proceed; verify-phase should re-check this by hand.
@@ -153,6 +155,6 @@ Future requirements (FEAT-01, FILT-03, MAINT-01..02, REL-03..05, EVID-06, ADPT-0
 
 ## Session Continuity
 
-Last session: 2026-11-17T05:08:55.993Z
-Stopped at: Completed 03-10-PLAN.md
+Last session: 2026-11-17T09:17:16Z
+Stopped at: Phase 3 complete, ready to plan Phase 4
 Resume file: None
