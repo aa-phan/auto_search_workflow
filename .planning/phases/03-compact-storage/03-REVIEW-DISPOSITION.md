@@ -7,6 +7,14 @@ findings:
     severity: warning
     disposition: skipped
     title: "An Identity stem no job key can produce holds keys that match nothing, is not flagged, raises the mark, and deleting it is a permanent `identity_shrunk`"
+  - id: WR-12
+    severity: warning
+    disposition: open
+    title: "The documented hand edit of the `storage` key has no safe-edit protocol: a syntax slip flips a compact system to dual and erases its records, a run in progress discards the edit, and nothing checks the result"
+  - id: WR-13
+    severity: warning
+    disposition: open
+    title: "STATUS states the storage-report result without its scope, and two older statements it contradicts were left standing"
   - id: IN-01
     severity: info
     disposition: open
@@ -43,10 +51,6 @@ findings:
     severity: info
     disposition: open
     title: "The tests do not pin the claim that matters most for the fix, \"the fold stays held back\""
-  - id: IN-10
-    severity: info
-    disposition: fixed
-    title: "The documented repair path has no tooling and the mark can be stuck high by a transient over-read"
   - id: IN-11
     severity: info
     disposition: open
@@ -55,6 +59,22 @@ findings:
     severity: info
     disposition: open
     title: "The WR-10 fix removes an incidental dual-mode detection of a bare entry, and dual mode has no `identity_entry` check"
+  - id: IN-13
+    severity: info
+    disposition: open
+    title: "The runbook documents only half of the repair and only the mild WR-11 case"
+  - id: IN-14
+    severity: info
+    disposition: open
+    title: "STATUS labels an inference as a log reading and relies on notes that the public log does not carry"
+  - id: IN-15
+    severity: info
+    disposition: open
+    title: "DEPLOY.md still carries statements that are false after the deploy history (pre-existing, outside the diff)"
+  - id: IN-10
+    severity: info
+    disposition: fixed
+    title: "The documented repair path has no tooling and the mark can be stuck high by a transient over-read"
   - id: WR-10
     severity: warning
     disposition: fixed
@@ -95,9 +115,9 @@ findings:
     severity: warning
     disposition: fixed
     title: "The fold does not consult the integrity check the same run just ran"
-open: 14
-total: 23
-recorded: 2026-11-17T05:13:28.818Z
+open: 16
+total: 28
+recorded: 2026-11-17T09:12:46.256Z
 ---
 
 # Phase 03: Code Review Disposition
@@ -105,6 +125,8 @@ recorded: 2026-11-17T05:13:28.818Z
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
 | WR-11 | warning | skipped | accepted by the owner 2026-11-17 (UAT 8, option b); known limit in STATUS.md, clearing steps in DEPLOY.md |
+| WR-12 | warning | open | - |
+| WR-13 | warning | open | - |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
@@ -114,9 +136,12 @@ recorded: 2026-11-17T05:13:28.818Z
 | IN-07 | info | open | - |
 | IN-08 | info | open | - |
 | IN-09 | info | open | - |
-| IN-10 | info | fixed | runbook note "Clearing a stuck `identity_shrunk`" added to DEPLOY.md 2026-11-17 (no tooling added) |
 | IN-11 | info | open | - |
 | IN-12 | info | open | - |
+| IN-13 | info | open | - |
+| IN-14 | info | open | - |
+| IN-15 | info | open | - |
+| IN-10 | info | fixed | runbook note "Clearing a stuck `identity_shrunk`" added to DEPLOY.md 2026-11-17 (no tooling added) (not in the current review) |
 | WR-10 | warning | fixed | plan 03-10 (389789a, de57002); resolved per 03-REVIEW.md re-review 98c19d8 (not in the current review) |
 | WR-09 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
 | WR-08 | warning | fixed | 03-REVIEW-FIX.md (not in the current review) |
