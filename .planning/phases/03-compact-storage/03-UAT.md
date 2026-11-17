@@ -10,6 +10,8 @@ updated: 2026-11-17T06:00:00Z
 
 number: 8
 name: Deploy decision after the WR-10 fix (open warning WR-11)
+expected: |
+  Decide: (a) fix WR-11 first, (b) accept WR-11, add the IN-10 runbook line and deploy, or (c) defer the branch. After a deploy: no 'storage write failed', 'storage parity:' or 'storage fold skipped' note, and the next fold still runs.
 awaiting: user response
 
 ## Tests
@@ -71,7 +73,9 @@ blocked: 0
 
 - gap_id: G-3-7
   truth: "Before the review fixes WR-01..WR-09 are deployed, WR-10 is fixed: an Identity entry with no posting ID (a bare kind letter such as `b`) holds no key, is flagged identity_entry, and deleting it is not a counted identity_shrunk"
-  status: failed
+  status: resolved
+  resolved_by: 03-10-PLAN.md
+  resolved_at: 2026-11-17
   reason: "User reported: fix wr-10 first"
   severity: major
   test: 7
